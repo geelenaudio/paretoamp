@@ -1,0 +1,184 @@
+/**
+ * Geelen Audio Amp – Amped-ESP32 (non-plus, non-S)
+ * I2S init → stable clock → GPIO 13 (Amp Enable) → Config → Audio Engine → A2DP Sink.
+ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <DNSServer.h>
+#include <driver/i2s.h>
+#include "config_manager.h"
+#include "audio_engine.h"
+#include "snapclient.h"
+#include "web_server.h"
+#define A2DP_I2S_AUDIOTOOLS 0  /* Use Print output, not AudioTools */
+#include "BluetoothA2DPSink.h"
+
+#ifndef PIN_I2S_WS
+#define PIN_I2S_WS  25
+#endif
+#ifndef PIN_I2S_BCK
+#define PIN_I2S_BCK 26
+#endif
+#ifndef PIN_I2S_DATA
+#define PIN_I2S_DATA 22
+#endif
+#ifndef PIN_AMP_ENABLE
+#define PIN_AMP_ENABLE 13
+#endif
+
+constexpr int SAMPLE_RATE   = 44100;
+constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
+constexpr int BUF_COUNT    = 4;
+constexpr int BUF_LEN      = 512;
+constexpr unsigned long I2S_STABLE_MS = 50;
+
+static bool i2s_ok = false;
+static geelen::ConfigManager configManager;
+static geelen::AudioEngine audioEngine;
+
+class A2DPToEngine : public Print {
+ public:
+  void setEngine(geelen::AudioEngine* eng) { engine_ = eng; }
+  size_t write(uint8_t c) override {
+    if (engine_) engine_->feedPCM(&c, 1);
+    return 1;
+  }
+  size_t write(const uint8_t* data, size_t len) override {
+    if (engine_) engine_->feedPCM(data, len);
+    return len;
+  }
+ private:
+  geelen::AudioEngine* engine_ = nullptr;
+};
+
+static A2DPToEngine a2dpOutput;
+static BluetoothA2DPSink a2dpSink(a2dpOutput);
+static geelen::Snapclient snapclient;
+static geelen::WebServer webServer;
+static DNSServer dnsServer;
+static bool apMode = false;
+static const char* AP_SSID = "Geelen-Audio";
+static const char* AP_PASS = "geelen123";
+
+static bool initI2S() {
+  i2s_config_t cfg = {};
+  cfg.mode                   = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  cfg.sample_rate            = SAMPLE_RATE;
+  cfg.bits_per_sample        = I2S_BITS_PER_SAMPLE_16BIT;
+  cfg.channel_format         = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  cfg.communication_format   = I2S_COMM_FORMAT_STAND_I2S;
+  cfg.intr_alloc_flags       = 0;
+  cfg.dma_desc_num           = BUF_COUNT;
+  cfg.dma_frame_num          = BUF_LEN;
+  cfg.use_apll               = false;
+  cfg.tx_desc_auto_clear     = true;
+  cfg.fixed_mclk             = 0;
+
+  i2s_pin_config_t pin = {};
+  pin.bck_io_num   = PIN_I2S_BCK;
+  pin.ws_io_num    = PIN_I2S_WS;
+  pin.data_out_num = PIN_I2S_DATA;
+  pin.data_in_num  = I2S_PIN_NO_CHANGE;
+
+  if (i2s_driver_install(I2S_PORT, &cfg, 0, NULL) != ESP_OK) return false;
+  if (i2s_set_pin(I2S_PORT, &pin) != ESP_OK) {
+    i2s_driver_uninstall(I2S_PORT);
+    return false;
+  }
+  i2s_zero_dma_buffer(I2S_PORT);
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\nGeelen Audio Amp – Amped-ESP32");
+
+  if (!initI2S()) {
+    Serial.println("I2S init failed");
+    return;
+  }
+  i2s_ok = true;
+  Serial.printf("I2S OK (WS=%d BCK=%d DATA=%d)\n", PIN_I2S_WS, PIN_I2S_BCK, PIN_I2S_DATA);
+
+  delay(I2S_STABLE_MS);
+  pinMode(PIN_AMP_ENABLE, OUTPUT);
+  digitalWrite(PIN_AMP_ENABLE, HIGH);
+  Serial.println("Amp enable (GPIO 13) HIGH");
+
+  if (!configManager.begin()) {
+    Serial.println("Config Manager init failed");
+    return;
+  }
+  Serial.printf("Config: volume=%u preset=%u\n",
+                configManager.getVolume(), configManager.getPresetId());
+
+  if (!audioEngine.begin()) {
+    Serial.println("Audio Engine init failed");
+    return;
+  }
+  int8_t eq[geelen::EQ_BANDS];
+  configManager.getEQGains(eq);
+  static_assert(geelen::EQ_BANDS == geelen::AUDIO_EQ_BANDS, "EQ band count mismatch");
+  audioEngine.setEQGains(eq);
+  audioEngine.setVolume(configManager.getVolume());
+  snapclient.setEngine(&audioEngine);
+
+  char ssid[geelen::WIFI_SSID_MAX], pass[geelen::WIFI_PASS_MAX];
+  if (configManager.getWifiSsid(ssid, sizeof(ssid)) && ssid[0] != '\0') {
+    configManager.getWifiPass(pass, sizeof(pass));
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, pass[0] != '\0' ? pass : nullptr);
+    Serial.printf("WiFi connecting to %s\n", ssid);
+    for (int i = 0; i < 100 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASS);
+    dnsServer.start(53, "*", WiFi.softAPIP());
+    apMode = true;
+    Serial.printf("AP started: %s / %s at %s\n", AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
+  }
+
+  geelen::AudioSource src = configManager.getAudioSource();
+  if (src == geelen::AudioSource::Network) {
+    char host[geelen::SNAPCAST_HOST_MAX];
+    if (configManager.getSnapcastHost(host, sizeof(host)) && host[0] != '\0') {
+      snapclient.connect(host, configManager.getSnapcastPort());
+      a2dpOutput.setEngine(nullptr);
+    } else {
+      src = geelen::AudioSource::Bluetooth;
+      a2dpOutput.setEngine(&audioEngine);
+    }
+  }
+  if (src == geelen::AudioSource::Bluetooth) {
+    a2dpOutput.setEngine(&audioEngine);
+    a2dpSink.start("Geelen Audio");
+    Serial.println("A2DP Sink started (Geelen Audio). Connect from phone.");
+  } else {
+    Serial.println("Source: Network (Snapcast).");
+  }
+
+  webServer.setConfig(&configManager);
+  webServer.setEngine(&audioEngine);
+  webServer.setSnapclient(&snapclient);
+  if (webServer.begin()) {
+    Serial.println("Web UI: http://<device-ip>/");
+  }
+}
+
+void loop() {
+  if (!i2s_ok) {
+    delay(1000);
+    return;
+  }
+  if (apMode) dnsServer.processNextRequest();
+  configManager.tick(millis());
+  webServer.tick();
+  if (configManager.getAudioSource() == geelen::AudioSource::Network) {
+    snapclient.tick();
+  }
+  audioEngine.process();
+  delay(1);
+}
