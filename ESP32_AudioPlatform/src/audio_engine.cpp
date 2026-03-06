@@ -4,21 +4,10 @@
 
 #include "audio_engine.h"
 #include "audio_util.h"
-#include <driver/i2s.h>
+#include <driver/i2s_std.h>
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <cmath>
-
-#ifndef PIN_I2S_BCK
-#define PIN_I2S_BCK 26
-#endif
-#ifndef PIN_I2S_WS
-#define PIN_I2S_WS 25
-#endif
-#ifndef PIN_I2S_DATA
-#define PIN_I2S_DATA 22
-#endif
-static const i2s_port_t I2S_PORT = I2S_NUM_0;
 
 namespace geelen {
 
@@ -62,8 +51,12 @@ void AudioEngine::updateBiquadCoefficients() {
 }
 
 AudioEngine::AudioEngine()
-  : ring_buf_(nullptr), ring_head_(0), ring_tail_(0), ring_cap_(0), running_(false) {
+  : ring_buf_(nullptr), ring_head_(0), ring_tail_(0), ring_cap_(0), running_(false), i2s_tx_handle_(nullptr) {
   initBiquads();
+}
+
+void AudioEngine::setI2SChannel(void* tx_handle) {
+  i2s_tx_handle_ = tx_handle;
 }
 
 AudioEngine::~AudioEngine() {
@@ -148,10 +141,11 @@ void AudioEngine::process() {
     ring_tail_ = (ring_tail_ + 1) % ring_cap_;
   }
   if (rd == 0) return;
+  if (!i2s_tx_handle_) return;
   size_t frames = rd / 2;
   processSamples(process_buf, frames);
   size_t written = 0;
-  i2s_write(I2S_PORT, process_buf, rd * sizeof(int16_t), &written, 0);
+  i2s_channel_write((i2s_chan_handle_t)i2s_tx_handle_, process_buf, rd * sizeof(int16_t), &written, 0);
 }
 
 }  // namespace geelen

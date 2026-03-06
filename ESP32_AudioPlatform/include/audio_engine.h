@@ -22,6 +22,8 @@ class AudioEngine {
   ~AudioEngine();
 
   bool begin();
+  /** Set I2S TX channel handle (new driver). Pass from main after i2s_channel_init_std_mode. */
+  void setI2SChannel(void* tx_handle);
   void setEQGains(const int8_t gains[AUDIO_EQ_BANDS]);
   void setVolume(uint8_t vol_percent);
 
@@ -47,6 +49,7 @@ class AudioEngine {
   volatile size_t ring_tail_;
   size_t ring_cap_;
   bool running_;
+  void* i2s_tx_handle_;  /* i2s_chan_handle_t from driver/i2s_std.h */
 };
 
 }  // namespace geelen

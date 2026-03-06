@@ -6,7 +6,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <DNSServer.h>
-#include <driver/i2s.h>
+#include <driver/i2s_std.h>
+#include <driver/gpio.h>
 #include "config_manager.h"
 #include "audio_engine.h"
 #include "snapclient.h"
@@ -28,12 +29,10 @@
 #endif
 
 constexpr int SAMPLE_RATE   = 44100;
-constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
-constexpr int BUF_COUNT    = 4;
-constexpr int BUF_LEN      = 512;
 constexpr unsigned long I2S_STABLE_MS = 50;
 
 static bool i2s_ok = false;
+static i2s_chan_handle_t i2s_tx_chan = NULL;
 static geelen::ConfigManager configManager;
 static geelen::AudioEngine audioEngine;
 
@@ -62,31 +61,35 @@ static const char* AP_SSID = "Geelen-Audio";
 static const char* AP_PASS = "geelen123";
 
 static bool initI2S() {
-  i2s_config_t cfg = {};
-  cfg.mode                   = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-  cfg.sample_rate            = SAMPLE_RATE;
-  cfg.bits_per_sample        = I2S_BITS_PER_SAMPLE_16BIT;
-  cfg.channel_format         = I2S_CHANNEL_FMT_RIGHT_LEFT;
-  cfg.communication_format   = I2S_COMM_FORMAT_STAND_I2S;
-  cfg.intr_alloc_flags       = 0;
-  cfg.dma_desc_num           = BUF_COUNT;
-  cfg.dma_frame_num          = BUF_LEN;
-  cfg.use_apll               = false;
-  cfg.tx_desc_auto_clear     = true;
-  cfg.fixed_mclk             = 0;
+  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  if (i2s_new_channel(&chan_cfg, &i2s_tx_chan, NULL) != ESP_OK) return false;
 
-  i2s_pin_config_t pin = {};
-  pin.bck_io_num   = PIN_I2S_BCK;
-  pin.ws_io_num    = PIN_I2S_WS;
-  pin.data_out_num = PIN_I2S_DATA;
-  pin.data_in_num  = I2S_PIN_NO_CHANGE;
-
-  if (i2s_driver_install(I2S_PORT, &cfg, 0, NULL) != ESP_OK) return false;
-  if (i2s_set_pin(I2S_PORT, &pin) != ESP_OK) {
-    i2s_driver_uninstall(I2S_PORT);
+  i2s_std_config_t std_cfg = {
+    .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+    .gpio_cfg = {
+      .mclk = I2S_GPIO_UNUSED,
+      .bclk = (gpio_num_t)PIN_I2S_BCK,
+      .ws = (gpio_num_t)PIN_I2S_WS,
+      .dout = (gpio_num_t)PIN_I2S_DATA,
+      .din = I2S_GPIO_UNUSED,
+      .invert_flags = {
+        .mclk_inv = false,
+        .bclk_inv = false,
+        .ws_inv = false,
+      },
+    },
+  };
+  if (i2s_channel_init_std_mode(i2s_tx_chan, &std_cfg) != ESP_OK) {
+    i2s_del_channel(i2s_tx_chan);
+    i2s_tx_chan = NULL;
     return false;
   }
-  i2s_zero_dma_buffer(I2S_PORT);
+  if (i2s_channel_enable(i2s_tx_chan) != ESP_OK) {
+    i2s_del_channel(i2s_tx_chan);
+    i2s_tx_chan = NULL;
+    return false;
+  }
   return true;
 }
 
@@ -123,6 +126,7 @@ void setup() {
   static_assert(geelen::EQ_BANDS == geelen::AUDIO_EQ_BANDS, "EQ band count mismatch");
   audioEngine.setEQGains(eq);
   audioEngine.setVolume(configManager.getVolume());
+  audioEngine.setI2SChannel(i2s_tx_chan);
   snapclient.setEngine(&audioEngine);
 
   char ssid[geelen::WIFI_SSID_MAX], pass[geelen::WIFI_PASS_MAX];
