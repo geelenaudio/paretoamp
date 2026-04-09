@@ -1,0 +1,76 @@
+#
+# Baseline ESP-IDF configuration for Amped-ESP32 (ESP32-WROVER with PSRAM)
+#
+
+# Console/logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# CPU frequency (audio + BT + WiFi coexist is happier at 240MHz)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 is not set
+
+# C++ (cspot/bell requires exceptions)
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# Flash (WROVER-N8R8 = 8MB; partition table needs this or gen_esp32part fails at 2MB default)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# PSRAM
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=32768
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# mbedTLS memory + bundle sizing
+# Spotify Connect TLS can be heap-hungry; prefer allocating mbedTLS buffers in PSRAM.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+# CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC is not set
+# CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC is not set
+# CONFIG_MBEDTLS_IRAM_8BIT_MEM_ALLOC is not set
+
+# Allocate TX/RX buffers on demand to reduce peak heap.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# Certificate bundle: "common" saves a lot of RAM/flash while still covering almost all sites.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL is not set
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_NONE is not set
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=120
+
+# Partition table (custom)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_idf.csv"
+
+# WiFi + BT (enabled; detailed tuning comes later)
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+
+# Controller mode: A2DP requires BR/EDR (Classic BT). Some defaults end up BLE-only.
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+
+# Reduce audio jitter/drift: disable WiFi modem sleep / station disconnect PM.
+# (Audio streaming is sensitive to scheduling jitter; Arduino default behavior is closer to "always on".)
+# Note: some options are version/target-specific; unused keys are ignored by Kconfig.
+# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set
+# CONFIG_ESP_WIFI_SLP_IRAM_OPT is not set
+
+# Watchdogs
+# Audio workloads + WiFi/BT coexist can legitimately starve the idle task on CPU1
+# for >5s during bring-up. Keep task WDT enabled, but don't require IDLE1 to run.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+
+# Some build systems still reference the legacy alias symbols.
+CONFIG_TASK_WDT_TIMEOUT_S=15
+CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+# CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+

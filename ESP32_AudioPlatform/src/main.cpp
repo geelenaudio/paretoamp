@@ -8,6 +8,7 @@
 #include <DNSServer.h>
 #include <driver/i2s_std.h>
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include "config_manager.h"
 #include "audio_engine.h"
 #include "snapclient.h"
@@ -59,6 +60,24 @@ static DNSServer dnsServer;
 static bool apMode = false;
 static const char* AP_SSID = "Geelen-Audio";
 static const char* AP_PASS = "geelen123";
+static const char* HOSTNAME = "Geelen-Audio";
+
+static void stopApMode() {
+  if (!apMode) return;
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  apMode = false;
+  Serial.println("[WiFi] AP stopped (STA connected).");
+}
+
+static void printMemoryStats(const char* tag) {
+  Serial.printf("[%s] heap=%u min_heap=%u psram=%u heap8=%u\n",
+                tag,
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)ESP.getMinFreeHeap(),
+                (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+}
 
 static bool initI2S() {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -97,6 +116,31 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\nGeelen Audio Amp – Amped-ESP32");
+  printMemoryStats("boot");
+
+  // Ensure consistent DHCP hostname on your LAN (instead of esp32-<mac>)
+  WiFi.setHostname(HOSTNAME);
+  WiFi.softAPsetHostname(HOSTNAME);
+
+  WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+    switch (event) {
+      case ARDUINO_EVENT_WIFI_STA_START:
+        Serial.println("[WiFi] STA start");
+        break;
+      case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        Serial.println("[WiFi] STA connected");
+        break;
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        Serial.printf("[WiFi] STA got IP: %s\n", WiFi.localIP().toString().c_str());
+        stopApMode();
+        break;
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        Serial.printf("[WiFi] STA disconnected (reason=%d)\n", (int)info.wifi_sta_disconnected.reason);
+        break;
+      default:
+        break;
+    }
+  });
 
   if (!initI2S()) {
     Serial.println("I2S init failed");
@@ -143,8 +187,11 @@ void setup() {
     dnsServer.start(53, "*", WiFi.softAPIP());
     apMode = true;
     Serial.printf("AP started: %s / %s at %s\n", AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
+  } else {
+    Serial.printf("[WiFi] STA up: %s\n", WiFi.localIP().toString().c_str());
   }
 
+  printMemoryStats("pre_web");
   geelen::AudioSource src = configManager.getAudioSource();
   if (src == geelen::AudioSource::Network) {
     char host[geelen::SNAPCAST_HOST_MAX];
@@ -156,13 +203,6 @@ void setup() {
       a2dpOutput.setEngine(&audioEngine);
     }
   }
-  if (src == geelen::AudioSource::Bluetooth) {
-    a2dpOutput.setEngine(&audioEngine);
-    a2dpSink.start("Geelen Audio");
-    Serial.println("A2DP Sink started (Geelen Audio). Connect from phone.");
-  } else {
-    Serial.println("Source: Network (Snapcast).");
-  }
 
   webServer.setConfig(&configManager);
   webServer.setEngine(&audioEngine);
@@ -170,6 +210,21 @@ void setup() {
   if (webServer.begin()) {
     Serial.println("Web UI: http://<device-ip>/");
   }
+
+  printMemoryStats("pre_audio_source");
+  if (src == geelen::AudioSource::Bluetooth) {
+    if (apMode && ESP.getFreeHeap() < 60000) {
+      Serial.println("A2DP not started (low heap in AP mode). Configure WiFi first, then reboot.");
+      printMemoryStats("a2dp_skipped");
+      return;
+    }
+    a2dpOutput.setEngine(&audioEngine);
+    a2dpSink.start("Geelen Audio");
+    Serial.println("A2DP Sink started (Geelen Audio). Connect from phone.");
+  } else {
+    Serial.println("Source: Network (Snapcast).");
+  }
+  printMemoryStats("post_audio_source");
 }
 
 void loop() {

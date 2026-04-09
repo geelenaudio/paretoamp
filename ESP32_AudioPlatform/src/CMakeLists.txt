@@ -1,0 +1,28 @@
+idf_component_register(
+  SRCS
+    "idf_main.cpp"
+    "audio_engine.cpp"
+    "audio_util.cpp"
+    "idf_config_manager.cpp"
+    "idf_wifi_manager.cpp"
+    "idf_http_server.cpp"
+    "idf_a2dp_sink.cpp"
+    "idf_snapclient.cpp"
+    "snapcast_protocol.cpp"
+    "spotify_service.cpp"
+  INCLUDE_DIRS
+    "."
+    "../include"
+  REQUIRES
+    nvs_flash
+    spiffs
+    esp_wifi
+    esp_netif
+    esp_event
+    esp_http_server
+    lwip
+    mdns
+    bt
+    geelen_spotify
+)
+

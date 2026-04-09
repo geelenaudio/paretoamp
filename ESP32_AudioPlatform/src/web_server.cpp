@@ -22,10 +22,27 @@ static const char INDEX_HTML[] PROGMEM = R"raw(
 <p>WiFi: <input id="ssid" placeholder="SSID"/><input id="pass" type="password" placeholder="Password"/><button onclick="saveWifi()">Save</button></p>
 <p><a href="/api/status">API status</a></p>
 <script>
-function saveWifi(){ var s=document.getElementById('ssid').value; var p=document.getElementById('pass').value; fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p)}).then(r=>r.json()).then(d=>alert(d.ok?'Saved. Reconnect device to WiFi.':'')); }
-</script>
-function setVol(v){ fetch('/api/volume?v='+v).then(r=>r.json()).then(d=>{ document.getElementById('vol').textContent=d.volume; }); }
-function setSource(s){ fetch('/api/source?s='+s,{method:'POST'}).then(r=>r.json()).then(d=>{ document.getElementById('src').textContent=d.source===0?'Bluetooth':'Network'; }); }
+function saveWifi(){
+  var s=document.getElementById('ssid').value;
+  var p=document.getElementById('pass').value;
+  fetch('/api/wifi',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p)
+  }).then(r=>r.json()).then(d=>{
+    alert(d.ok ? 'Saved. Device will reboot and try WiFi.' : 'Save failed');
+  });
+}
+function setVol(v){
+  fetch('/api/volume?v='+v).then(r=>r.json()).then(d=>{
+    document.getElementById('vol').textContent=d.volume;
+  });
+}
+function setSource(s){
+  fetch('/api/source?s='+s,{method:'POST'}).then(r=>r.json()).then(d=>{
+    document.getElementById('src').textContent=d.source===0?'Bluetooth':'Network';
+  });
+}
 fetch('/api/status').then(r=>r.json()).then(d=>{
   document.getElementById('vol').textContent=d.volume||'--';
   document.getElementById('src').textContent=d.source===0?'Bluetooth':'Network';
@@ -34,6 +51,22 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
 )raw";
 
 namespace geelen {
+
+static void scheduleRestart(unsigned long delay_ms) {
+  // Restart outside of the AsyncWebServer callback context.
+  xTaskCreate(
+    [](void* arg) {
+      unsigned long ms = (unsigned long)(uintptr_t)arg;
+      vTaskDelay(pdMS_TO_TICKS(ms));
+      ESP.restart();
+    },
+    "restart",
+    2048,
+    (void*)delay_ms,
+    1,
+    nullptr
+  );
+}
 
 bool WebServer::begin() {
   if (started_) return true;
@@ -117,6 +150,8 @@ void WebServer::setupRoutes() {
     String out;
     serializeJson(doc, out);
     req->send(200, "application/json", out);
+    Serial.println("[WiFi] Credentials saved via Web UI; rebooting to apply.");
+    scheduleRestart(800);
   });
 
   server->on("/api/snapcast", HTTP_GET, [this](AsyncWebServerRequest* req) {

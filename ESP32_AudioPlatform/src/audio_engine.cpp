@@ -5,11 +5,40 @@
 #include "audio_engine.h"
 #include "audio_util.h"
 #include <driver/i2s_std.h>
-#include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
+#include <cstdarg>
+#include <cstdio>
+#ifndef ARDUINO
+#include <esp_log.h>
+#endif
 #include <cmath>
 
 namespace geelen {
+
+static unsigned long nowMs() {
+#ifdef ARDUINO
+  return millis();
+#else
+  return (unsigned long)(esp_timer_get_time() / 1000ULL);
+#endif
+}
+
+static void logf(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+#ifdef ARDUINO
+  Serial.vprintf(fmt, ap);
+#else
+  char buf[256];
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  // Trim trailing newline handling is caller-defined; keep as-is.
+  ESP_LOGI("Audio", "%s", buf);
+#endif
+  va_end(ap);
+}
 
 static const float EQ_CENTER_HZ[AUDIO_EQ_BANDS] = {
   31.f, 62.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f, 16000.f
@@ -51,8 +80,29 @@ void AudioEngine::updateBiquadCoefficients() {
 }
 
 AudioEngine::AudioEngine()
-  : ring_buf_(nullptr), ring_head_(0), ring_tail_(0), ring_cap_(0), running_(false), i2s_tx_handle_(nullptr) {
+  : ring_buf_(nullptr),
+    ring_head_(0),
+    ring_tail_(0),
+    ring_cap_(0),
+    running_(false),
+    i2s_tx_handle_(nullptr),
+    playing_(false),
+    underruns_(0),
+    overflows_(0),
+    last_stats_ms_(0) {
   initBiquads();
+}
+
+size_t AudioEngine::ringFillSamples() const {
+  size_t h = ring_head_;
+  size_t t = ring_tail_;
+  if (h >= t) return h - t;
+  return ring_cap_ - (t - h);
+}
+
+size_t AudioEngine::bufferedFrames() const {
+  // Stereo frames.
+  return ringFillSamples() / 2;
 }
 
 void AudioEngine::setI2SChannel(void* tx_handle) {
@@ -75,6 +125,10 @@ bool AudioEngine::begin() {
   if (!ring_buf_) return false;
   ring_head_ = 0;
   ring_tail_ = 0;
+  playing_ = false;
+  underruns_ = 0;
+  overflows_ = 0;
+  last_stats_ms_ = nowMs();
   running_ = true;
   return true;
 }
@@ -95,7 +149,10 @@ void AudioEngine::feedPCM(const uint8_t* data, size_t len_bytes) {
   const int16_t* src = (const int16_t*)data;
   for (size_t i = 0; i < num_samples; i++) {
     size_t next = (ring_head_ + 1) % ring_cap_;
-    if (next == ring_tail_) break;
+    if (next == ring_tail_) {
+      overflows_++;
+      break;
+    }
     ring_buf_[ring_head_] = src[i];
     ring_head_ = next;
   }
@@ -131,21 +188,84 @@ void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
 
 void AudioEngine::process() {
   if (!ring_buf_ || !running_) return;
+  if (!i2s_tx_handle_) return;
+
+  const size_t fill_samples = ringFillSamples();
+  const size_t fill_frames = fill_samples / 2;
+  const size_t prefill_frames = (size_t)((uint64_t)SAMPLE_RATE * AUDIO_PREFILL_MS / 1000);
+  const size_t low_water_frames = (size_t)((uint64_t)SAMPLE_RATE * AUDIO_LOW_WATER_MS / 1000);
+
+  if (!playing_) {
+    if (fill_frames < prefill_frames) {
+      return;
+    }
+    playing_ = true;
+    logf("[Audio] start (prefill=%lums fill=%u frames, buf=%u frames)",
+         (unsigned long)AUDIO_PREFILL_MS,
+         (unsigned)fill_frames,
+         (unsigned)RING_BUF_SAMPLES);
+  } else {
+    if (fill_frames < low_water_frames) {
+      playing_ = false;
+      underruns_++;
+      logf("[Audio] rebuffer (low-water=%lums fill=%u frames) underruns=%lu",
+           (unsigned long)AUDIO_LOW_WATER_MS,
+           (unsigned)fill_frames,
+           (unsigned long)underruns_);
+      return;
+    }
+  }
+
   const size_t chunk_frames = 128;
   const size_t chunk_samples = chunk_frames * 2;
   int16_t process_buf[chunk_samples];
-  size_t to_read = chunk_samples;
+  size_t temp_tail = ring_tail_;
   size_t rd = 0;
-  while (ring_tail_ != ring_head_ && rd < to_read) {
-    process_buf[rd++] = ring_buf_[ring_tail_];
-    ring_tail_ = (ring_tail_ + 1) % ring_cap_;
+  while (temp_tail != ring_head_ && rd < chunk_samples) {
+    process_buf[rd++] = ring_buf_[temp_tail];
+    temp_tail = (temp_tail + 1) % ring_cap_;
   }
-  if (rd == 0) return;
-  if (!i2s_tx_handle_) return;
-  size_t frames = rd / 2;
+
+  if (rd == 0) {
+    underruns_++;
+    playing_ = false;
+    return;
+  }
+
+  // If we're short, pad with zeros and count it as an underrun event.
+  if (rd < chunk_samples) {
+    underruns_++;
+    for (size_t i = rd; i < chunk_samples; i++) process_buf[i] = 0;
+    rd = chunk_samples;
+  }
+
+  const size_t frames = rd / 2;
   processSamples(process_buf, frames);
   size_t written = 0;
-  i2s_channel_write((i2s_chan_handle_t)i2s_tx_handle_, process_buf, rd * sizeof(int16_t), &written, 0);
+  // Block briefly so we don't drain the ring faster than I2S can accept data.
+  // Also, only advance the ring by what was actually written.
+  esp_err_t err = i2s_channel_write((i2s_chan_handle_t)i2s_tx_handle_,
+                                   process_buf,
+                                   rd * sizeof(int16_t),
+                                   &written,
+                                   pdMS_TO_TICKS(20));
+  if (err != ESP_OK || written == 0) {
+    // I2S backpressure: do not consume from ring, try again next tick.
+    return;
+  }
+  const size_t written_samples = written / sizeof(int16_t);
+  ring_tail_ = (ring_tail_ + written_samples) % ring_cap_;
+
+  unsigned long now = nowMs();
+  if (now - last_stats_ms_ >= 1000) {
+    size_t fill2 = ringFillSamples() / 2;
+    logf("[Audio] buf=%u/%u frames underruns=%lu overflows=%lu",
+         (unsigned)fill2,
+         (unsigned)RING_BUF_SAMPLES,
+         (unsigned long)underruns_,
+         (unsigned long)overflows_);
+    last_stats_ms_ = now;
+  }
 }
 
 }  // namespace geelen

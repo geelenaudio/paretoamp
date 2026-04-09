@@ -13,8 +13,15 @@ namespace geelen {
 
 constexpr size_t AUDIO_EQ_BANDS = 10;
 constexpr int SAMPLE_RATE = 44100;
-constexpr size_t RING_BUF_SAMPLES = 4096;
+// 2 seconds of stereo 16-bit PCM at 44.1kHz (frames, not int16 samples)
+constexpr size_t RING_BUF_SAMPLES = (size_t)SAMPLE_RATE * 2;
 constexpr size_t RING_BUF_BYTES = RING_BUF_SAMPLES * sizeof(int16_t) * 2;
+
+// Buffering strategy:
+// - Prefill before starting playback to absorb BT/WiFi scheduling jitter
+// - If we drop too low, pause and rebuffer
+constexpr uint32_t AUDIO_PREFILL_MS = 400;
+constexpr uint32_t AUDIO_LOW_WATER_MS = 120;
 
 class AudioEngine {
  public:
@@ -31,8 +38,11 @@ class AudioEngine {
   void process();
 
   bool isRunning() const { return running_; }
+  /** Current buffered audio (frames at 44.1kHz stereo). Useful for drift control. */
+  size_t bufferedFrames() const;
 
  private:
+  size_t ringFillSamples() const;
   void initBiquads();
   void updateBiquadCoefficients();
   void processSamples(int16_t* buf, size_t num_frames);
@@ -50,6 +60,11 @@ class AudioEngine {
   size_t ring_cap_;
   bool running_;
   void* i2s_tx_handle_;  /* i2s_chan_handle_t from driver/i2s_std.h */
+
+  bool playing_;
+  uint32_t underruns_;
+  uint32_t overflows_;
+  unsigned long last_stats_ms_;
 };
 
 }  // namespace geelen

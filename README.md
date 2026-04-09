@@ -10,6 +10,7 @@ Documentation for the Geelen Audio Amp firmware (Amped-ESP32 non-plus, non-S).
 - [User guide](docs/user-guide.md) – Setup, WiFi/AP, Bluetooth, Snapcast/Spotify via WiFi, EQ, Web UI
 - [Development](docs/development.md) – Architecture, modules, build, PlatformIO
 - [API reference](docs/api.md) – REST endpoints for the Web UI
+- [Manual test matrix](docs/manual-test-matrix.md) – Quick bring-up checks for all sources + Web UI
 
 ## Overview
 
