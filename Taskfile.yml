@@ -1,0 +1,184 @@
+# Mini dev loop for the ESP32 Audio Platform.
+#
+#   task                # list all tasks
+#   task fw:all         # build firmware + SPA + flash both
+#   task snap:up        # start the snapcast server
+#   task stream:desktop # pipe desktop audio into the snapserver FIFO
+#
+# Requires `task` (go-task, https://taskfile.dev) — already installed via brew.
+#
+# pio isn't on PATH by default, so we resolve it via ~/.platformio/penv/bin/pio.
+# Override by setting PIO when invoking, e.g. `PIO=pio task fw:build`.
+version: "3"
+
+vars:
+  # PlatformIO binary. Falls back to the usual install location so you don't
+  # have to touch your shell rc just to run `task`.
+  PIO:
+    sh: command -v pio 2>/dev/null || echo "$HOME/.platformio/penv/bin/pio"
+  PIO_ENV: amped-esp32-idf
+  PIO_PORT: /dev/ttyUSB0
+  FW_DIR: ESP32_AudioPlatform
+  SNAP_DIR: snapcast-example
+  SNAP_FIFO: snapcast-example/data/testfifo
+
+tasks:
+  default:
+    desc: List every task with a one-line description
+    cmds:
+      - task --list
+
+  # ---------- firmware --------------------------------------------------------
+
+  fw:build:
+    desc: Compile the ESP-IDF firmware (no upload)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}}"
+
+  fw:upload:
+    desc: Flash the app partition only (keeps SPIFFS)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
+
+  fw:assets:
+    desc: Build + upload the SPA (SPIFFS partition, keeps firmware)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t uploadfs --upload-port {{.PIO_PORT}}"
+
+  fw:all:
+    desc: Build + flash firmware, then build + flash SPIFFS assets
+    cmds:
+      - task: fw:upload
+      - task: fw:assets
+
+  fw:monitor:
+    desc: Attach serial monitor (115200, exception decoder, timestamps)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} device monitor -e {{.PIO_ENV}} --port {{.PIO_PORT}}"
+
+  fw:erase:
+    desc: Erase the entire flash (nukes WiFi creds, EQ, presets — use sparingly)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t erase --upload-port {{.PIO_PORT}}"
+
+  fw:clean:
+    desc: Drop PlatformIO build cache for this env
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t clean"
+
+  # ---------- snapcast server -------------------------------------------------
+
+  snap:up:
+    desc: Start snapserver + snapweb + librespot (docker compose, detached)
+    dir: "{{.SNAP_DIR}}"
+    cmds:
+      - docker compose up -d
+      - |
+        echo
+        echo "snapweb UI:        http://$(hostname -I | awk '{print $1}'):1780/"
+        echo "Snapclient stream: tcp://$(hostname -I | awk '{print $1}'):1704"
+
+  snap:down:
+    desc: Stop and remove the snapcast container (keeps ./data)
+    dir: "{{.SNAP_DIR}}"
+    cmds:
+      - docker compose down
+
+  snap:logs:
+    desc: Tail the snapserver/librespot log
+    dir: "{{.SNAP_DIR}}"
+    cmds:
+      - docker compose logs -f snapcast
+
+  snap:restart:
+    desc: Restart snapserver (pick up edits to snapserver.conf)
+    dir: "{{.SNAP_DIR}}"
+    cmds:
+      - docker compose restart snapcast
+
+  snap:reset:
+    desc: Wipe snapserver + librespot state (./data). DESTRUCTIVE.
+    dir: "{{.SNAP_DIR}}"
+    cmds:
+      - docker compose down
+      - rm -rf data
+      - mkdir -p data
+
+  # ---------- stream into the `Desktop` pipe source --------------------------
+  # snapserver.conf has:
+  #   source = pipe:////data/testfifo?name=Desktop&sampleformat=44100:16:2
+  # Anything raw S16LE 44.1 kHz stereo piped into ./data/testfifo on the host
+  # comes out as the `Desktop` Snapcast stream.
+
+  stream:sources:
+    desc: List PipeWire sinks/monitors you can feed into the Desktop stream
+    cmds:
+      - |
+        if command -v wpctl >/dev/null; then
+          wpctl status | sed -n '/Audio/,/Video/p' | sed -n '/Sinks:/,/Sources:/p'
+          echo
+          echo "Use a *Sink's monitor* to capture desktop audio. Pass the numeric id"
+          echo "  to: task stream:desktop -- <id>"
+          echo "Or the node name to: task stream:desktop -- <node.name>"
+        elif command -v pactl >/dev/null; then
+          pactl list sources short
+        else
+          echo "Neither wpctl (PipeWire) nor pactl (PulseAudio) is installed."
+          exit 1
+        fi
+
+  stream:desktop:
+    desc: "Pipe system audio monitor into the Desktop FIFO. Usage: task stream:desktop -- <pw-target>"
+    cmds:
+      - mkdir -p {{.SNAP_DIR}}/data
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Specify a PipeWire target, e.g.:"
+          echo "  task stream:desktop -- @DEFAULT_MONITOR@"
+          echo "  task stream:desktop -- 67"
+          echo "  task stream:desktop -- alsa_output.usb-RODE_Microphones_RODE_AI-1_69A5EC74-00.iec958-stereo"
+          echo "Run 'task stream:sources' to find an id/name."
+          exit 2
+        fi
+        pw-record --target "{{.CLI_ARGS}}" \
+                  --format=s16 --rate=44100 --channels=2 - \
+          > "$(pwd)/{{.SNAP_FIFO}}"
+
+  stream:test:
+    desc: Pipe a 440 Hz sine (10 s) into the Desktop FIFO (end-to-end smoke test)
+    cmds:
+      - mkdir -p {{.SNAP_DIR}}/data
+      - |
+        ffmpeg -re \
+          -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=10" \
+          -ac 2 -f s16le - > "{{.SNAP_FIFO}}"
+
+  stream:wav:
+    desc: "Pipe a local WAV/MP3/FLAC into the Desktop FIFO. Usage: task stream:wav -- path/to/file"
+    cmds:
+      - mkdir -p {{.SNAP_DIR}}/data
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Pass a file, e.g.: task stream:wav -- ~/Music/test.flac"
+          exit 2
+        fi
+        ffmpeg -re -i "{{.CLI_ARGS}}" -f s16le -ar 44100 -ac 2 - > "{{.SNAP_FIFO}}"
+
+  # ---------- composite -------------------------------------------------------
+
+  up:
+    desc: fw:all + snap:up (full bring-up after a fresh clone)
+    cmds:
+      - task: fw:all
+      - task: snap:up
+
+  down:
+    desc: Tear everything down (snap only — firmware stays on the device)
+    cmds:
+      - task: snap:down
