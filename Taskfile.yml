@@ -42,17 +42,32 @@ tasks:
     cmds:
       - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
 
-  fw:assets:
-    desc: Build + upload the SPA (SPIFFS partition, keeps firmware)
+  fw:web:
+    desc: Bundle the SPA (web/ -> data/web/ gzipped) + build + flash SPIFFS
     dir: "{{.FW_DIR}}"
     cmds:
       - "{{.PIO}} run -e {{.PIO_ENV}} -t uploadfs --upload-port {{.PIO_PORT}}"
 
+  fw:web-bundle:
+    desc: Run the SPA bundler only (web/ -> data/web/ gzipped). No device touched.
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - python3 scripts/build_web.py
+
+  fw:web-image:
+    desc: Build the SPIFFS image (.pio/.../spiffs.bin), but don't flash it
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t buildfs"
+      - |
+        img=$(ls -1 .pio/build/{{.PIO_ENV}}/*spiffs*.bin 2>/dev/null | head -n 1)
+        [ -n "$img" ] && echo "SPIFFS image: $(pwd)/$img ($(stat -c %s "$img") bytes)"
+
   fw:all:
-    desc: Build + flash firmware, then build + flash SPIFFS assets
+    desc: Build + flash firmware, then bundle + build + flash SPIFFS assets
     cmds:
       - task: fw:upload
-      - task: fw:assets
+      - task: fw:web
 
   fw:monitor:
     desc: Attach serial monitor (115200, exception decoder, timestamps)
