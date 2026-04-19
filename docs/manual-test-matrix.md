@@ -1,6 +1,6 @@
 ## Manual test matrix (ESP32 Audio Amp)
 
-This checklist is intended for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`) and covers the Web UI + all audio sources.
+This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`) and covers the Web UI + all supported audio sources.
 
 ### Preconditions
 
@@ -9,7 +9,6 @@ This checklist is intended for the **ESP-IDF** PlatformIO environment (`amped-es
 - In the Web UI, source IDs are:
   - **0** = Bluetooth
   - **1** = Network (Snapclient)
-  - **2** = Spotify Connect (cspot)
 
 ### Smoke boot
 
@@ -17,17 +16,19 @@ This checklist is intended for the **ESP-IDF** PlatformIO environment (`amped-es
 - **HTTP**: open `/` and `/api/status` returns JSON with `volume`, `source`, `preset`.
 - **WiFi AP fallback** (if STA not configured): AP comes up, Web UI reachable at `192.168.4.1`.
 
+### NVS migration
+
+- Flash onto a device whose NVS still has `audio_source = 2` (legacy Spotify Connect). It should boot without crashing, log `Migrating legacy audio source 2 -> Bluetooth`, and `/api/status` should report `source = 0`.
+
 ### Web UI / REST API
 
-- **GET status**:
-  - `GET /api/status` returns JSON and reflects current config.
-- **Set volume**:
-  - `GET /api/volume?v=0` then `v=50` then `v=100`; confirm `volume` updates in `/api/status`.
-- **Set WiFi**:
-  - `POST /api/wifi` with form fields `ssid`, `pass` triggers reboot and attempts STA.
+- **GET status**: `GET /api/status` returns JSON and reflects current config.
+- **Set volume**: `GET /api/volume?v=0` then `v=50` then `v=100`; confirm `volume` updates in `/api/status`.
+- **Set WiFi**: `POST /api/wifi` with form fields `ssid`, `pass` triggers reboot and attempts STA.
 - **Set source**:
-  - `POST /api/source?s=0|1|2` updates `/api/status`.
-  - When switching **into or out of Bluetooth/Spotify**, device schedules a reboot (expected).
+  - `POST /api/source?s=0|1` updates `/api/status`.
+  - When switching **into or out of Bluetooth**, the device schedules a reboot (expected).
+  - Values outside `0..1` are clamped.
 
 ### Bluetooth (A2DP sink)
 
@@ -35,30 +36,16 @@ This checklist is intended for the **ESP-IDF** PlatformIO environment (`amped-es
 - **Discoverability**: phone sees device name **“Geelen Audio”**.
 - **Connect and play**: start playback; audio is heard on I2S output.
 - **Reconnect**: disconnect/reconnect from phone and verify playback resumes.
-- **Volume**: use device Web UI volume buttons; confirm change is audible (if your pipeline applies volume post-decode).
+- **Volume**: use device Web UI volume buttons; confirm change is audible.
 
 ### Network (Snapclient)
 
-- **Configure Snapserver** (in Web UI / config): set host + port (or whatever UI you use for snap settings).
+- **Configure Snapserver**: set host + port in the Web UI (default port 1704 — the Snapcast **stream** port).
 - **Select source**: `POST /api/source?s=1` (Network).
 - **Playback**: start Snapcast stream; confirm stable audio (no stutter) for 2–5 minutes.
 - **Drop/reconnect**: stop server briefly, restart, confirm client reconnects and resumes.
 
-### Spotify Connect (cspot)
-
-- **Select source**: `POST /api/source?s=2` and wait for reboot.
-- **Zeroconf discovery**: Spotify app sees the device as a Connect target.
-- **Pair**:
-  - `GET /spotify_info` returns JSON.
-  - Spotify app pairs (device becomes controllable).
-- **Playback**: start a track; confirm audio output.
-- **Persistence**:
-  - Reboot device; verify it starts Spotify using saved credentials (no re-pairing).
-- **Factory reset**:
-  - Trigger factory reset (whatever UI endpoint exists); verify Spotify credentials are cleared and pairing is required again.
-
 ### Regression / resource checks
 
 - **Heap**: after starting each source, confirm no low-heap warnings or crashes.
-- **Source switching**: switch through 0 → 1 → 2 → 0, waiting for reboots where expected, and verify each mode still functions.
-
+- **Source switching**: switch through 0 → 1 → 0, waiting for reboots where expected, and verify each mode still functions.

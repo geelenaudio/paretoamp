@@ -17,11 +17,13 @@
 - Default source is **Bluetooth**. The device advertises as **Geelen Audio**. Pair and connect from your phone; audio streams to the amp through the 10-band EQ.
 - Last paired device can be re-paired on next power-up (stored in config).
 
-## Spotify via WiFi (Network source)
+## Spotify / audio via WiFi (Network source)
 
-1. On a Raspberry Pi or PC, install **snapserver** and a Spotify source (e.g. **librespot**). Configure snapserver to stream from librespot.
-2. In the Web UI, set **Source** to **Network** and set **Snapcast host** to your snapserver IP (and port, default 1705).
-3. Reboot or ensure the device has WiFi and the correct source; it will connect to snapserver and play the stream. From the Spotify app, choose the librespot/snapserver output to play to this speaker.
+On-device Spotify Connect is not supported. Use Snapcast instead:
+
+1. On a Raspberry Pi or PC, install **snapserver** and a source such as **librespot** (Spotify) or any other pipe source. Configure snapserver to stream from it.
+2. In the Web UI, set **Source** to **Network** and set **Snapcast host** to your snapserver IP (and port, default 1704 — the Snapcast audio stream port; 1705 is the JSON-RPC control channel and will not play audio).
+3. Ensure the device has WiFi and the correct source; it will connect to snapserver and play the stream. From the Spotify app, choose the librespot/snapserver output to play to this speaker.
 
 ## Web UI
 

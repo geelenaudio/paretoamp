@@ -31,7 +31,7 @@ jobs:
         run: pip install --upgrade platformio
 
       - name: Build PlatformIO Project
-        run: pio run
+        run: pio run -e amped-esp32-idf
         working-directory: ESP32_AudioPlatform
 
       - name: Run native unit tests

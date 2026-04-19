@@ -6,10 +6,14 @@ idf_component_register(
     "idf_config_manager.cpp"
     "idf_wifi_manager.cpp"
     "idf_http_server.cpp"
+    "idf_api.cpp"
+    "idf_cpu_sampler.cpp"
+    "idf_logs.cpp"
+    "idf_dlna.cpp"
+    "idf_mp3_streamer.cpp"
     "idf_a2dp_sink.cpp"
     "idf_snapclient.cpp"
     "snapcast_protocol.cpp"
-    "spotify_service.cpp"
   INCLUDE_DIRS
     "."
     "../include"
@@ -20,9 +24,11 @@ idf_component_register(
     esp_netif
     esp_event
     esp_http_server
+    esp_app_format
+    esp_timer
     lwip
     mdns
     bt
-    geelen_spotify
+    json
+    libhelix-mp3
 )
-

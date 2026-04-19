@@ -40,42 +40,63 @@ static void logf(const char* fmt, ...) {
   va_end(ap);
 }
 
+// Legacy graphic-EQ centre frequencies. Used by setEQGains() and by the
+// default-calibration initialiser so the "untouched" curve matches what
+// the device used to ship with.
 static const float EQ_CENTER_HZ[AUDIO_EQ_BANDS] = {
   31.f, 62.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f, 16000.f
 };
-static const float Q = 1.2f;
+static constexpr float DEFAULT_Q = 1.2f;
 
 void AudioEngine::initBiquads() {
-  for (size_t i = 0; i < AUDIO_EQ_BANDS; i++) {
-    eq_gains_[i] = 0;
-    for (int ch = 0; ch < 2; ch++) {
-      state_x1[i][ch] = state_x2[i][ch] = 0.f;
-      state_y1[i][ch] = state_y2[i][ch] = 0.f;
+  for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
+    Cascade& c = cascades_[layer];
+    c.enabled = false;
+    for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
+      c.bands[i] = { EQ_CENTER_HZ[i], 0.f, DEFAULT_Q };
+      for (int ch = 0; ch < 2; ++ch) {
+        c.x1[i][ch] = c.x2[i][ch] = 0.f;
+        c.y1[i][ch] = c.y2[i][ch] = 0.f;
+      }
     }
+    rebuildCascade(layer);
   }
+  headroom_linear_ = 1.f;
   volume_ = 1.f;
-  updateBiquadCoefficients();
+  volume_l_ = 1.f;
+  volume_r_ = 1.f;
+  muted_ = false;
+  l_on_ = true;
+  r_on_ = true;
+  mono_ = false;
 }
 
-void AudioEngine::updateBiquadCoefficients() {
-  float sr = (float)SAMPLE_RATE;
-  for (size_t band = 0; band < AUDIO_EQ_BANDS; band++) {
-    float g = geelen::gainDbToLinear(eq_gains_[band]);
-    float A = sqrtf(g);
-    float w0 = 2.f * (float)M_PI * EQ_CENTER_HZ[band] / sr;
-    float cosw0 = cosf(w0);
-    float alpha = sinf(w0) / (2.f * Q);
-    float a0 = 1.f + alpha / A;
-    float b0 = (1.f + alpha * A) / a0;
-    float b1 = (-2.f * cosw0) / a0;
-    float b2 = (1.f - alpha * A) / a0;
-    float a1 = (-2.f * cosw0) / a0;
-    float a2 = (1.f - alpha / A) / a0;
-    biquad_b0[band] = b0;
-    biquad_b1[band] = b1;
-    biquad_b2[band] = b2;
-    biquad_a1[band] = a1;
-    biquad_a2[band] = a2;
+void AudioEngine::rebuildCascade(int layer) {
+  if (layer < 0 || layer >= (int)AUDIO_EQ_LAYERS) return;
+  Cascade& c = cascades_[layer];
+  const float sr = (float)SAMPLE_RATE;
+  for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
+    // RBJ peaking-EQ biquad. Same math as the legacy EQ; here the
+    // caller supplies per-band frequency, gain, and Q instead of a
+    // fixed-frequency graphic EQ.
+    float freq = c.bands[i].freq_hz;
+    float gain = c.bands[i].gain_db;
+    float q    = c.bands[i].q;
+    // Clamp hard — coefficient math is undefined outside these ranges.
+    if (freq < 20.f) freq = 20.f;
+    if (freq > sr * 0.45f) freq = sr * 0.45f;  // below Nyquist margin
+    if (q < 0.1f)  q = 0.1f;
+    if (q > 10.f)  q = 10.f;
+    const float A = powf(10.f, gain / 40.f);  // sqrt(linear)
+    const float w0 = 2.f * (float)M_PI * freq / sr;
+    const float cosw0 = cosf(w0);
+    const float alpha = sinf(w0) / (2.f * q);
+    const float a0 = 1.f + alpha / A;
+    c.b0[i] = (1.f + alpha * A) / a0;
+    c.b1[i] = (-2.f * cosw0) / a0;
+    c.b2[i] = (1.f - alpha * A) / a0;
+    c.a1[i] = (-2.f * cosw0) / a0;
+    c.a2[i] = (1.f - alpha / A) / a0;
   }
 }
 
@@ -134,13 +155,102 @@ bool AudioEngine::begin() {
 }
 
 void AudioEngine::setEQGains(const int8_t gains[AUDIO_EQ_BANDS]) {
-  for (size_t i = 0; i < AUDIO_EQ_BANDS; i++) eq_gains_[i] = gains[i];
-  updateBiquadCoefficients();
+  Cascade& c = cascades_[EQ_LAYER_CALIBRATION];
+  for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
+    c.bands[i].freq_hz = EQ_CENTER_HZ[i];
+    c.bands[i].gain_db = (float)gains[i];
+    c.bands[i].q       = DEFAULT_Q;
+  }
+  c.enabled = true;
+  rebuildCascade(EQ_LAYER_CALIBRATION);
+}
+
+void AudioEngine::setEqCurve(int layer, const EqBand bands[AUDIO_EQ_BANDS], bool enabled) {
+  if (layer < 0 || layer >= (int)AUDIO_EQ_LAYERS) return;
+  Cascade& c = cascades_[layer];
+  for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) c.bands[i] = bands[i];
+  c.enabled = enabled;
+  rebuildCascade(layer);
+}
+
+void AudioEngine::setHeadroomDb(float db) {
+  if (db > 0.f) db = 0.f;  // only ever attenuating
+  // Guard against absurd values that would crash or deafen.
+  if (db < -60.f) db = -60.f;
+  headroom_linear_ = powf(10.f, db / 20.f);
+}
+
+float AudioEngine::computeEqPeakGainDb() const {
+  // Sweep 256 log-spaced points from 20 Hz to 20 kHz and accumulate the
+  // product of per-band |H(f)| across both enabled cascades. Tracking the
+  // max gives us the worst-case headroom we need to pre-attenuate so the
+  // cascade's output stays at ≤ 0 dB regardless of input. 256 points is
+  // plenty to resolve a Q=10 peak at 20 kHz (-> bandwidth ~2 kHz) while
+  // still being cheap enough to run on any EQ change.
+  constexpr int N = 256;
+  const float sr = (float)SAMPLE_RATE;
+  const float f_lo = 20.f;
+  const float f_hi = 20000.f;
+  // Use std::log explicitly — the file's own `logf(fmt, ...)` printer
+  // shadows the <cmath> free function.
+  const float log_lo = std::log(f_lo);
+  const float log_hi = std::log(f_hi);
+
+  float peak = 1.f;
+  for (int i = 0; i < N; ++i) {
+    const float f = expf(log_lo + (log_hi - log_lo) * (float)i / (float)(N - 1));
+    const float w = 2.f * (float)M_PI * f / sr;
+    const float cw = cosf(w);
+    const float c2w = cosf(2.f * w);
+    const float sw = sinf(w);
+    const float s2w = sinf(2.f * w);
+
+    float mag_product = 1.f;
+    for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
+      const Cascade& c = cascades_[layer];
+      if (!c.enabled) continue;
+      for (size_t b = 0; b < AUDIO_EQ_BANDS; ++b) {
+        // |H(e^jw)| = |b0 + b1 e^-jw + b2 e^-j2w| / |1 + a1 e^-jw + a2 e^-j2w|
+        const float num_re = c.b0[b] + c.b1[b] * cw + c.b2[b] * c2w;
+        const float num_im =           -c.b1[b] * sw - c.b2[b] * s2w;
+        const float den_re = 1.f      + c.a1[b] * cw + c.a2[b] * c2w;
+        const float den_im =           -c.a1[b] * sw - c.a2[b] * s2w;
+        const float num = sqrtf(num_re * num_re + num_im * num_im);
+        const float den = sqrtf(den_re * den_re + den_im * den_im);
+        if (den > 1e-12f) mag_product *= num / den;
+      }
+    }
+    if (mag_product > peak) peak = mag_product;
+  }
+  return 20.f * log10f(peak);
 }
 
 void AudioEngine::setVolume(uint8_t vol_percent) {
   if (vol_percent > 100) vol_percent = 100;
   volume_ = vol_percent / 100.f;
+  // Keep per-channel in sync for legacy callers — the new UI uses
+  // setVolumeLR() directly and will overwrite these shortly afterwards.
+  volume_l_ = volume_r_ = volume_;
+}
+
+void AudioEngine::setVolumeLR(uint8_t l_pct, uint8_t r_pct) {
+  if (l_pct > 100) l_pct = 100;
+  if (r_pct > 100) r_pct = 100;
+  volume_l_ = l_pct / 100.f;
+  volume_r_ = r_pct / 100.f;
+  // Legacy `volume_` tracks the max channel so `getVolume()`-style callers
+  // see something sensible.
+  volume_ = volume_l_ > volume_r_ ? volume_l_ : volume_r_;
+}
+
+void AudioEngine::setMuted(bool muted) {
+  muted_ = muted;
+}
+
+void AudioEngine::setChannels(bool l_on, bool r_on, bool mono) {
+  l_on_ = l_on;
+  r_on_ = r_on;
+  mono_ = mono;
 }
 
 void AudioEngine::feedPCM(const uint8_t* data, size_t len_bytes) {
@@ -159,36 +269,65 @@ void AudioEngine::feedPCM(const uint8_t* data, size_t len_bytes) {
 }
 
 void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
+  // Snapshot the control state once per block. API mutators run on another
+  // task but each write is to a word-sized primitive, so a torn read costs
+  // at most one block of wrong gain — inaudible.
+  const bool  mono   = mono_;
+  const bool  muted  = muted_;
+  const bool  lon    = l_on_;
+  const bool  ron    = r_on_;
+  const float gL     = muted ? 0.f : volume_l_;
+  const float gR     = muted ? 0.f : volume_r_;
+
+  const float hr = headroom_linear_;
+
   for (size_t f = 0; f < num_frames; f++) {
     float L = (float)buf[f * 2];
     float R = (float)buf[f * 2 + 1];
-    for (size_t band = 0; band < AUDIO_EQ_BANDS; band++) {
-      float x0L = L, x0R = R;
-      float y0L = biquad_b0[band] * x0L + biquad_b1[band] * state_x1[band][0] + biquad_b2[band] * state_x2[band][0]
-                  - biquad_a1[band] * state_y1[band][0] - biquad_a2[band] * state_y2[band][0];
-      float y0R = biquad_b0[band] * x0R + biquad_b1[band] * state_x1[band][1] + biquad_b2[band] * state_x2[band][1]
-                  - biquad_a1[band] * state_y1[band][1] - biquad_a2[band] * state_y2[band][1];
-      state_x2[band][0] = state_x1[band][0]; state_x1[band][0] = x0L;
-      state_y2[band][0] = state_y1[band][0]; state_y1[band][0] = y0L;
-      state_x2[band][1] = state_x1[band][1]; state_x1[band][1] = x0R;
-      state_y2[band][1] = state_y1[band][1]; state_y1[band][1] = y0R;
-      L = y0L;
-      R = y0R;
+    // Two cascades (calibration, preference). Both always run their
+    // state-update math so biquad history stays coherent when enables
+    // flip at runtime — a disabled cascade simply feeds output = input.
+    for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
+      Cascade& c = cascades_[layer];
+      if (!c.enabled) continue;
+      for (size_t band = 0; band < AUDIO_EQ_BANDS; ++band) {
+        float x0L = L, x0R = R;
+        float y0L = c.b0[band] * x0L + c.b1[band] * c.x1[band][0] + c.b2[band] * c.x2[band][0]
+                    - c.a1[band] * c.y1[band][0] - c.a2[band] * c.y2[band][0];
+        float y0R = c.b0[band] * x0R + c.b1[band] * c.x1[band][1] + c.b2[band] * c.x2[band][1]
+                    - c.a1[band] * c.y1[band][1] - c.a2[band] * c.y2[band][1];
+        c.x2[band][0] = c.x1[band][0]; c.x1[band][0] = x0L;
+        c.y2[band][0] = c.y1[band][0]; c.y1[band][0] = y0L;
+        c.x2[band][1] = c.x1[band][1]; c.x1[band][1] = x0R;
+        c.y2[band][1] = c.y1[band][1]; c.y1[band][1] = y0R;
+        L = y0L;
+        R = y0R;
+      }
     }
-    L *= volume_;
-    R *= volume_;
-    if (L > 32767.f) L = 32767.f;
-    if (L < -32768.f) L = -32768.f;
-    if (R > 32767.f) R = 32767.f;
-    if (R < -32768.f) R = -32768.f;
-    buf[f * 2] = (int16_t)L;
-    buf[f * 2 + 1] = (int16_t)R;
+    L *= hr;
+    R *= hr;
+    if (mono) {
+      // Preserve energy with a −3 dB sum (arithmetic average) rather than
+      // clipping-prone straight add. Feed the average to both channels so
+      // channel-specific gain / on-off can still silence one side.
+      const float M = (L + R) * 0.5f;
+      L = M;
+      R = M;
+    }
+    float outL = lon ? L * gL : 0.f;
+    float outR = ron ? R * gR : 0.f;
+    if (outL > 32767.f) outL = 32767.f;
+    if (outL < -32768.f) outL = -32768.f;
+    if (outR > 32767.f) outR = 32767.f;
+    if (outR < -32768.f) outR = -32768.f;
+    buf[f * 2]     = (int16_t)outL;
+    buf[f * 2 + 1] = (int16_t)outR;
   }
 }
 
-void AudioEngine::process() {
-  if (!ring_buf_ || !running_) return;
-  if (!i2s_tx_handle_) return;
+bool AudioEngine::process() {
+  if (!ring_buf_ || !running_) return false;
+  if (!i2s_tx_handle_) return false;
 
   const size_t fill_samples = ringFillSamples();
   const size_t fill_frames = fill_samples / 2;
@@ -197,7 +336,7 @@ void AudioEngine::process() {
 
   if (!playing_) {
     if (fill_frames < prefill_frames) {
-      return;
+      return false;
     }
     playing_ = true;
     logf("[Audio] start (prefill=%lums fill=%u frames, buf=%u frames)",
@@ -212,7 +351,7 @@ void AudioEngine::process() {
            (unsigned long)AUDIO_LOW_WATER_MS,
            (unsigned)fill_frames,
            (unsigned long)underruns_);
-      return;
+      return false;
     }
   }
 
@@ -229,7 +368,7 @@ void AudioEngine::process() {
   if (rd == 0) {
     underruns_++;
     playing_ = false;
-    return;
+    return false;
   }
 
   // If we're short, pad with zeros and count it as an underrun event.
@@ -244,14 +383,19 @@ void AudioEngine::process() {
   size_t written = 0;
   // Block briefly so we don't drain the ring faster than I2S can accept data.
   // Also, only advance the ring by what was actually written.
+  // IMPORTANT: this blocking write is also what throttles the audio task loop
+  // to realtime (~44.1 kHz). When DMA has room it returns almost immediately;
+  // when DMA is full it yields CPU to IDLE until a descriptor drains. Without
+  // this, the ring empties at the CPU's whim (far faster than I2S can play).
   esp_err_t err = i2s_channel_write((i2s_chan_handle_t)i2s_tx_handle_,
                                    process_buf,
                                    rd * sizeof(int16_t),
                                    &written,
                                    pdMS_TO_TICKS(20));
   if (err != ESP_OK || written == 0) {
-    // I2S backpressure: do not consume from ring, try again next tick.
-    return;
+    // I2S backpressure without any progress: do not consume from ring, and
+    // let the caller sleep a tick instead of retrying in a tight loop.
+    return false;
   }
   const size_t written_samples = written / sizeof(int16_t);
   ring_tail_ = (ring_tail_ + written_samples) % ring_cap_;
@@ -266,6 +410,7 @@ void AudioEngine::process() {
          (unsigned long)overflows_);
     last_stats_ms_ = now;
   }
+  return true;
 }
 
 }  // namespace geelen

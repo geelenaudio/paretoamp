@@ -1,0 +1,668 @@
+openapi: 3.1.0
+info:
+  title: Geelen Audio Device API
+  summary: On-device REST + SSE API for the Geelen ESP32 audio amplifier.
+  description: |
+    Every endpoint served at `/api/*` by the firmware. This spec is the single
+    source of truth: both the firmware handlers (`src/idf_api.cpp`) and the
+    SPA (`web/api.js`) must conform byte-for-byte to the schemas defined
+    here.
+
+    The device serves this spec at `GET /openapi.yaml` and an interactive
+    Swagger UI at `GET /docs`. Authentication is intentionally absent —
+    the device is expected to live on a trusted LAN.
+
+    Legacy compatibility endpoints (`GET /api/status`, `POST /api/source`,
+    `POST /api/wifi`, `GET /api/volume?v=`) are retained as pragma but not
+    documented here; they exist only to keep older scripts working and will
+    be removed once the SPA fully owns configuration.
+  version: 0.3.0
+  contact:
+    name: Geelen Audio
+    url: https://github.com/geelen/ESP32_AudioPlatform
+  license:
+    name: MIT
+
+servers:
+  - url: http://geelen.local
+    description: Local device (mDNS)
+  - url: http://{host}
+    description: Arbitrary host / IP
+    variables:
+      host:
+        default: 192.168.1.100
+        description: Device hostname or IP.
+
+tags:
+  - name: State
+    description: Aggregated device state and runtime metrics.
+  - name: Audio
+    description: Volume, channels, stereo/mono, mode.
+  - name: Sources
+    description: Per-source configuration (Snapcast, DLNA).
+  - name: EQ
+    description: Dual parametric EQ (calibration + preference), presets, headroom.
+  - name: Admin
+    description: Device name, granular reset.
+  - name: Logs
+    description: Live log streaming (SSE).
+
+paths:
+  /api/state:
+    get:
+      tags: [State]
+      summary: Aggregated device state
+      description: |
+        Single round-trip snapshot of everything the SPA needs to render:
+        current mode, volume, channel config, Snapcast host, DLNA settings,
+        both EQ curves, headroom settings, device name, firmware version.
+
+        SPA fetches this once per page mount; live metrics (CPU / heap /
+        WiFi RSSI) live on `GET /api/system` and should be polled
+        separately.
+      operationId: getState
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceState" }
+              example:
+                device_name: "Geelen Audio"
+                firmware: "0.3.0"
+                mode: "snapclient"
+                volume: { l: 70, r: 70, muted: false }
+                channels: { stereo_mono: "stereo", l_on: true, r_on: true }
+                snapcast: { host: "10.0.80.34", port: 1704 }
+                dlna: { enabled: false, name: "Geelen Audio" }
+                eq:
+                  calibration:
+                    enabled: true
+                    bands:
+                      - { freq: 1000, gain_db: -1.5, q: 1.2 }
+                  preference:
+                    enabled: false
+                    bands:
+                      - { freq: 1000, gain_db: 0, q: 1.2 }
+                  headroom: { mode: "auto", manual_db: 0, auto_db: -2.3 }
+                  active_slot: 255
+
+  /api/system:
+    get:
+      tags: [State]
+      summary: Runtime metrics
+      description: |
+        Live snapshot of uptime, free heap, PSRAM, chip info, WiFi link
+        status, and CPU load per core. Intended to be polled at ~1 Hz
+        while the Overview page is visible.
+      operationId: getSystem
+      responses:
+        "200":
+          description: Metrics snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemInfo" }
+              example:
+                uptime_s: 3725
+                free_heap: 131072
+                min_free_heap: 98304
+                free_psram: 4194304
+                chip: { model: "ESP32", revision: 301, cores: 2 }
+                wifi:
+                  connected: true
+                  ssid: "home-5g"
+                  rssi: -58
+                  channel: 36
+                  ip: "10.0.80.34"
+                cpu: { core0_pct: 12, core1_pct: 34 }
+
+  /api/volume:
+    post:
+      tags: [Audio]
+      summary: Set volume / mute
+      description: |
+        Accepts `{l, r, muted}` for independent channels, or `{v}` to set
+        both channels to the same level. Values are clamped to 0..100. If
+        both `v` and `l`/`r` are supplied, the per-channel fields win.
+      operationId: setVolume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VolumeSetting" }
+            examples:
+              ganged: { value: { v: 70, muted: false } }
+              split:  { value: { l: 65, r: 72, muted: false } }
+              mute:   { value: { muted: true } }
+      responses:
+        "200":
+          description: New effective setting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VolumeSetting" }
+
+  /api/channels:
+    post:
+      tags: [Audio]
+      summary: Channel on/off and stereo/mono
+      operationId: setChannels
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChannelSetting" }
+            example: { stereo_mono: "stereo", l_on: true, r_on: true }
+      responses:
+        "200":
+          description: New effective setting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChannelSetting" }
+
+  /api/mode:
+    post:
+      tags: [Audio]
+      summary: Switch audio source
+      description: |
+        Transitions between `bluetooth`, `snapclient`, and `dlna`. Any edge
+        that crosses the `bluetooth` boundary forces a reboot so the BT
+        classic stack can be (un)loaded cleanly; the reply indicates
+        whether a reboot was scheduled.
+      operationId: setMode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { $ref: "#/components/schemas/Mode" }
+            example: { mode: "snapclient" }
+      responses:
+        "200":
+          description: Mode accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { $ref: "#/components/schemas/Mode" }
+                  reboot: { type: boolean }
+
+  /api/snapcast:
+    post:
+      tags: [Sources]
+      summary: Configure Snapcast host
+      operationId: setSnapcast
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SnapcastSetting" }
+            example: { host: "10.0.80.34", port: 1704 }
+      responses:
+        "200":
+          description: New host/port.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapcastSetting" }
+
+  /api/dlna:
+    post:
+      tags: [Sources]
+      summary: DLNA renderer settings
+      description: |
+        Enables or disables the DLNA renderer and optionally renames the
+        advertised friendly name. Requires firmware with Phase-9 DLNA
+        support for the `enabled: true` path to have any effect.
+      operationId: setDlna
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DlnaSetting" }
+            example: { enabled: true, name: "Living Room Amp" }
+      responses:
+        "200":
+          description: New settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DlnaSetting" }
+
+  /api/device-name:
+    post:
+      tags: [Admin]
+      summary: Rename the device
+      description: |
+        User-visible name shown in Snapweb, DLNA announcements, and BT
+        advertising. Max 32 bytes UTF-8 (truncated without warning).
+      operationId: setDeviceName
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string, maxLength: 32 } }
+            example: { name: "Living Room Amp" }
+      responses:
+        "200":
+          description: New name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { name: { type: string } }
+
+  /api/eq:
+    post:
+      tags: [EQ]
+      summary: Update an EQ layer
+      description: |
+        Writes a 10-band parametric curve and/or toggles the layer enable
+        for one of the two cascades. `bands` may be a partial array; bands
+        are merged by index so the client can ship a single edited band.
+
+        The firmware clamps `freq` to 20 Hz..20 kHz, `gain_db` to
+        ±18 dB, and `q` to 0.1..10.0 before storage.
+      operationId: setEqLayer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EqLayerUpdate" }
+            example:
+              layer: "preference"
+              enabled: true
+              bands:
+                - { freq: 60,   gain_db: 3.0, q: 1.0 }
+                - { freq: 8000, gain_db: 2.0, q: 0.8 }
+      responses:
+        "200":
+          description: The full curve after clamping.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EqCurve"
+                  - type: object
+                    properties: { layer: { type: string, enum: [calibration, preference] } }
+
+  /api/eq/headroom:
+    post:
+      tags: [EQ]
+      summary: Set headroom mode and manual cap
+      description: |
+        In `auto` mode the firmware computes the peak gain of the enabled
+        cascade and pre-attenuates to keep total output at or below 0 dB.
+        In `manual` mode the user's `manual_db` overrides (must be ≤ 0).
+      operationId: setHeadroom
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HeadroomSetting" }
+            example: { mode: "auto", manual_db: 0.0 }
+      responses:
+        "200":
+          description: New setting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HeadroomSetting" }
+
+  /api/eq/presets:
+    get:
+      tags: [EQ]
+      summary: List preference EQ preset slots
+      operationId: getPresets
+      responses:
+        "200":
+          description: All 10 user slots + factory read-only entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EqPresetList" }
+
+  /api/eq/presets/{idx}/save:
+    post:
+      tags: [EQ]
+      summary: Save the live preference curve into slot `idx`
+      operationId: savePreset
+      parameters:
+        - $ref: "#/components/parameters/PresetIndex"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { name: { type: string, maxLength: 32 } }
+            example: { name: "My bass boost" }
+      responses:
+        "200":
+          description: Slot metadata after save.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EqPresetSlot" }
+
+  /api/eq/presets/{idx}/load:
+    post:
+      tags: [EQ]
+      summary: Replace the live preference curve with slot `idx`
+      operationId: loadPreset
+      parameters:
+        - $ref: "#/components/parameters/PresetIndex"
+      responses:
+        "200":
+          description: Slot contents + resulting preference curve.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index: { type: integer }
+                  name: { type: string }
+                  preference: { $ref: "#/components/schemas/EqCurve" }
+        "404":
+          description: Slot is empty.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/eq/presets/{idx}/rename:
+    post:
+      tags: [EQ]
+      summary: Rename an existing preset slot
+      operationId: renamePreset
+      parameters:
+        - $ref: "#/components/parameters/PresetIndex"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string, maxLength: 32 } }
+      responses:
+        "200":
+          description: New slot metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EqPresetSlot" }
+
+  /api/eq/presets/{idx}:
+    delete:
+      tags: [EQ]
+      summary: Clear a preset slot
+      operationId: deletePreset
+      parameters:
+        - $ref: "#/components/parameters/PresetIndex"
+      responses:
+        "200":
+          description: Deletion result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  index: { type: integer }
+                  deleted: { type: boolean }
+
+  /api/reset:
+    post:
+      tags: [Admin]
+      summary: Reset a scope of persistent memory
+      description: |
+        Available scopes: `wifi`, `bluetooth`, `snapcast`, `dlna`, `eq`,
+        `audio`, `all`. WiFi and Bluetooth scopes force a reboot; others
+        stay live. The `eq` scope also clears all preset slots.
+      operationId: resetScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope]
+              properties: { scope: { $ref: "#/components/schemas/ResetScope" } }
+            example: { scope: "snapcast" }
+      responses:
+        "200":
+          description: Reset result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scope: { $ref: "#/components/schemas/ResetScope" }
+                  reboot: { type: boolean }
+        "400":
+          description: Unknown scope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/logs/stream:
+    get:
+      tags: [Logs]
+      summary: Live log event stream (SSE)
+      description: |
+        Server-Sent Events stream of device log lines. The server first
+        replays the current ring buffer, then pushes each new entry as it
+        is logged. Only one active subscriber is allowed — a second
+        `EventSource` will close the first.
+
+        Each SSE `data:` field is a single JSON object matching
+        `#/components/schemas/LogEntry`.
+      operationId: streamLogs
+      responses:
+        "200":
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/LogEntry" }
+
+components:
+  parameters:
+    PresetIndex:
+      name: idx
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0, maximum: 9 }
+      description: Preset slot index (0..9).
+
+  schemas:
+    Mode:
+      type: string
+      enum: [bluetooth, snapclient, dlna]
+      description: Active audio source.
+
+    VolumeSetting:
+      type: object
+      properties:
+        l: { type: integer, minimum: 0, maximum: 100 }
+        r: { type: integer, minimum: 0, maximum: 100 }
+        v:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Convenience scalar — sets both channels.
+        muted: { type: boolean }
+        volume:
+          type: integer
+          description: Legacy scalar reflected from max(l, r). Read-only on responses.
+
+    ChannelSetting:
+      type: object
+      properties:
+        stereo_mono: { type: string, enum: [stereo, mono] }
+        l_on: { type: boolean }
+        r_on: { type: boolean }
+
+    SnapcastSetting:
+      type: object
+      properties:
+        host: { type: string, maxLength: 64 }
+        port: { type: integer, minimum: 1, maximum: 65535, default: 1704 }
+
+    DlnaSetting:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        name: { type: string, maxLength: 32 }
+
+    EqBand:
+      type: object
+      required: [freq, gain_db, q]
+      properties:
+        freq:    { type: number, minimum: 20,  maximum: 20000, description: "Hz" }
+        gain_db: { type: number, minimum: -18, maximum: 18 }
+        q:       { type: number, minimum: 0.1, maximum: 10.0 }
+
+    EqCurve:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        bands:
+          type: array
+          minItems: 10
+          maxItems: 10
+          items: { $ref: "#/components/schemas/EqBand" }
+
+    EqLayerUpdate:
+      type: object
+      required: [layer]
+      properties:
+        layer: { type: string, enum: [calibration, preference] }
+        enabled: { type: boolean }
+        bands:
+          type: array
+          items: { $ref: "#/components/schemas/EqBand" }
+
+    HeadroomSetting:
+      type: object
+      properties:
+        mode: { type: string, enum: [auto, manual] }
+        manual_db:
+          type: number
+          maximum: 0
+          description: User cap in dB (must be ≤ 0, enforced server-side).
+        auto_db:
+          type: number
+          maximum: 0
+          description: Computed peak gain in dB. Response-only; ignored on requests.
+
+    EqPresetSlot:
+      type: object
+      properties:
+        index: { type: integer, minimum: 0, maximum: 9 }
+        name:  { type: string }
+        saved: { type: boolean }
+
+    EqPresetList:
+      type: object
+      properties:
+        active:
+          oneOf:
+            - type: integer
+              minimum: 0
+              maximum: 9
+            - type: "null"
+          description: Slot currently loaded into the live curve, or null if unsaved/modified.
+        slots:
+          type: array
+          minItems: 10
+          maxItems: 10
+          items: { $ref: "#/components/schemas/EqPresetSlot" }
+        factory:
+          type: array
+          items:
+            type: object
+            properties: { name: { type: string } }
+
+    ResetScope:
+      type: string
+      enum: [wifi, bluetooth, snapcast, dlna, eq, audio, all, factory]
+
+    DeviceState:
+      type: object
+      properties:
+        device_name: { type: string }
+        firmware:    { type: string }
+        mode:        { $ref: "#/components/schemas/Mode" }
+        volume:      { $ref: "#/components/schemas/VolumeSetting" }
+        channels:    { $ref: "#/components/schemas/ChannelSetting" }
+        snapcast:    { $ref: "#/components/schemas/SnapcastSetting" }
+        dlna:        { $ref: "#/components/schemas/DlnaSetting" }
+        eq:
+          type: object
+          properties:
+            calibration: { $ref: "#/components/schemas/EqCurve" }
+            preference:  { $ref: "#/components/schemas/EqCurve" }
+            headroom:    { $ref: "#/components/schemas/HeadroomSetting" }
+            active_slot:
+              type: integer
+              description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
+
+    SystemInfo:
+      type: object
+      properties:
+        uptime_s:      { type: number }
+        free_heap:     { type: integer }
+        min_free_heap: { type: integer }
+        free_psram:    { type: integer }
+        chip:
+          type: object
+          properties:
+            model:    { type: string }
+            revision: { type: integer }
+            cores:    { type: integer }
+        wifi:
+          type: object
+          properties:
+            connected: { type: boolean }
+            ssid:      { type: string }
+            rssi:      { type: integer, description: "dBm" }
+            channel:   { type: integer }
+            ip:        { type: string }
+        cpu:
+          type: object
+          properties:
+            core0_pct: { type: integer, minimum: 0, maximum: 100 }
+            core1_pct: { type: integer, minimum: 0, maximum: 100 }
+        firmware:
+          type: object
+          description: Build-time identity of the running image.
+          properties:
+            version:    { type: string, example: "0.3.0" }
+            project:    { type: string, example: "geelen_amp" }
+            build_date: { type: string, example: "Apr 19 2026" }
+            build_time: { type: string, example: "12:34:56" }
+            idf_ver:    { type: string, example: "v5.1.2" }
+            elf_sha256: { type: string, description: "64-hex-char ELF checksum" }
+        net:
+          type: object
+          description: Network identity of the device.
+          properties:
+            hostname: { type: string }
+            sta_mac:  { type: string, example: "aa:bb:cc:11:22:33" }
+            ap_mac:   { type: string }
+            bt_mac:   { type: string }
+
+    LogEntry:
+      description: |
+        The SSE stream frames are JSON objects of shape `{t, line}` where
+        `line` is the raw ESP-IDF log line (including level/tag prefix).
+        Clients may parse `line` themselves if they want level/tag fields.
+      type: object
+      properties:
+        t:    { type: integer, description: "Device uptime in ms" }
+        line: { type: string, description: "Raw log line, ANSI-stripped on the client" }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

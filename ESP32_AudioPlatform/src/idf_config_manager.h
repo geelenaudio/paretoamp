@@ -1,5 +1,17 @@
-// ESP-IDF-specific ConfigManager implementation.
-// Keeps the same public surface as the Arduino version, but uses ESP-IDF NVS + esp_littlefs.
+// ESP-IDF ConfigManager (NVS + esp_littlefs).
+//
+// Phase 1 expanded this significantly:
+//   - AudioSource gained `Dlna` (widened for Phase 3).
+//   - Per-channel volume (vol_l / vol_r) + muted replace the scalar `vol`.
+//   - ChannelConfig + stereo/mono mode.
+//   - Dual 10-band parametric EQ (calibration + preference) with enables,
+//     preset-slot indicator, auto-headroom + manual headroom cap.
+//   - Device name (user-friendly, shown in snapweb / DLNA / BT).
+//   - DLNA renderer enabled flag.
+//
+// Storage discipline: every mutator marks dirty; `tick()` debounces the actual
+// NVS write by SAVE_DEBOUNCE_MS. API handlers that need a guaranteed persist
+// can call `save()` directly (e.g. reset scopes, factory reset).
 
 #pragma once
 
@@ -8,32 +20,86 @@
 
 namespace geelen_idf {
 
-// Keep constants aligned with Arduino build
+// Legacy EQ constants — retained only for one-shot migration of the old
+// int8_t gain array into parametric bands. Phase 5 removes these entirely.
 constexpr size_t EQ_BANDS = 10;
 constexpr int8_t EQ_GAIN_MIN = -12;
 constexpr int8_t EQ_GAIN_MAX = 12;
+
 constexpr uint8_t VOLUME_MIN = 0;
 constexpr uint8_t VOLUME_MAX = 100;
 constexpr uint8_t VOLUME_DEFAULT = 80;
 
+// Phase 5 preset model.
+constexpr size_t PARAMETRIC_BANDS = 10;
+constexpr size_t PRESET_SLOT_COUNT = 10;
+constexpr size_t PRESET_NAME_MAX = 32;
+
+// Legacy fixed-preset count (pre-Phase-5 preset_id used 4 factory + 4 custom).
+// Kept as a constant so code that still references it builds; factory-preset
+// data moved into presets/ factory files in Phase 5.
 constexpr size_t NUM_FIXED_PRESETS = 4;
 constexpr size_t NUM_CUSTOM_SLOTS = 4;
 constexpr size_t MAX_PRESET_NAME = 32;
+
 constexpr unsigned long SAVE_DEBOUNCE_MS = 2000;
 constexpr size_t LAST_BT_DEVICE_MAX = 18;
 constexpr size_t SNAPCAST_HOST_MAX = 64;
-/** Max JSON length for Spotify reusable credentials (LoginBlob / getCredentialsJson). */
-constexpr size_t SPOTIFY_CRED_JSON_MAX = 2048;
 constexpr size_t WIFI_SSID_MAX = 32;
 constexpr size_t WIFI_PASS_MAX = 64;
-constexpr uint16_t SNAPCAST_PORT_DEFAULT = 1705;
+constexpr size_t DEV_NAME_MAX = 32;
+// Snapcast STREAM port. 1704 is the Snapcast audio stream; 1705 is the
+// JSON-RPC control channel used by snapweb / CLI clients, and connecting a
+// Snapclient there yields silence (server waits for Hello which never
+// unlocks the stream). Pre-0.2.0 firmware defaulted to 1705 — that was a bug.
+constexpr uint16_t SNAPCAST_PORT_DEFAULT = 1704;
 
-enum class AudioSource : uint8_t { Bluetooth = 0, Network = 1, Spotify = 2 };
+enum class AudioSource : uint8_t {
+  Bluetooth = 0,
+  Network = 1,   // Snapclient
+  Dlna = 2,      // Phase 9: native DLNA renderer
+};
+
+enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };
+enum class StereoMode : uint8_t { Stereo = 0, Mono = 1 };
+
+// Single biquad band in {freq, gain, Q} form. 12 bytes each. 10 of these per
+// curve, 2 curves per device, so total EQ state is 240 bytes — well within
+// the 4 KiB NVS entry budget.
+struct ParametricBand {
+  float freq_hz;
+  float gain_db;
+  float q;
+};
 
 struct Config {
+  // Legacy scalars — kept as compatibility for older callers (Snap
+  // ServerSettings handler, Phase 0 UI). vol_l / vol_r are the source of
+  // truth; `volume` is updated in lockstep as max(vol_l, vol_r) so legacy
+  // readers see a sensible scalar.
   uint8_t volume;
-  uint8_t preset_id;
-  int8_t eq_gains[EQ_BANDS];
+  uint8_t preset_id;                  // deprecated — zeroed after Phase 5 migration
+  int8_t eq_gains[EQ_BANDS];          // deprecated — read only during migration
+
+  // Phase 1 additions.
+  uint8_t vol_l;
+  uint8_t vol_r;
+  bool muted;
+  StereoMode stereo_mode;
+  bool ch_l_on;
+  bool ch_r_on;
+
+  ParametricBand eq_cal[PARAMETRIC_BANDS];
+  bool eq_cal_on;
+  ParametricBand eq_pref[PARAMETRIC_BANDS];
+  bool eq_pref_on;
+  uint8_t eq_pref_slot;               // 0..9 or 0xFF ("unsaved / modified")
+
+  HeadroomMode eq_hr_mode;
+  float eq_hr_manual_db;              // always <= 0.0f
+
+  char dev_name[DEV_NAME_MAX];
+  bool dlna_on;
 };
 
 class ConfigManager {
@@ -42,13 +108,49 @@ class ConfigManager {
   bool begin();
   void tick(unsigned long now_ms);
 
+  // ---- Volume -----------------------------------------------------------
   uint8_t getVolume() const { return config_.volume; }
+  uint8_t getVolumeL() const { return config_.vol_l; }
+  uint8_t getVolumeR() const { return config_.vol_r; }
+  bool isMuted() const { return config_.muted; }
+  // Legacy: sets both channels to `v`. Still called by the Snap ServerSettings
+  // handler; new code should prefer setVolumeLR.
   void setVolume(uint8_t v);
+  void setVolumeLR(uint8_t l, uint8_t r);
+  void setMuted(bool muted);
+
+  // ---- Channels ---------------------------------------------------------
+  StereoMode getStereoMode() const { return config_.stereo_mode; }
+  bool getChannelLOn() const { return config_.ch_l_on; }
+  bool getChannelROn() const { return config_.ch_r_on; }
+  void setStereoMode(StereoMode m);
+  void setChannels(bool l_on, bool r_on);
+
+  // ---- Preset (legacy) --------------------------------------------------
   uint8_t getPresetId() const { return config_.preset_id; }
   void setPresetId(uint8_t id);
   void getEQGains(int8_t out[EQ_BANDS]) const;
   void setEQGains(const int8_t gains[EQ_BANDS]);
 
+  // ---- Parametric EQ ----------------------------------------------------
+  // `curve[out]` receives a copy of the 10-band curve.
+  void getEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) const;
+  void setEqCalibration(const ParametricBand bands[PARAMETRIC_BANDS]);
+  bool getEqCalibrationEnabled() const { return config_.eq_cal_on; }
+  void setEqCalibrationEnabled(bool on);
+
+  void getEqPreference(ParametricBand out[PARAMETRIC_BANDS]) const;
+  void setEqPreference(const ParametricBand bands[PARAMETRIC_BANDS]);
+  bool getEqPreferenceEnabled() const { return config_.eq_pref_on; }
+  void setEqPreferenceEnabled(bool on);
+  uint8_t getEqPreferenceSlot() const { return config_.eq_pref_slot; }
+  void setEqPreferenceSlot(uint8_t slot);
+
+  HeadroomMode getHeadroomMode() const { return config_.eq_hr_mode; }
+  float getHeadroomManualDb() const { return config_.eq_hr_manual_db; }
+  void setHeadroom(HeadroomMode mode, float manual_db);
+
+  // ---- Source / Snapcast / WiFi ----------------------------------------
   AudioSource getAudioSource() const { return audio_source_; }
   void setAudioSource(AudioSource s);
 
@@ -62,19 +164,36 @@ class ConfigManager {
   bool getWifiPass(char* out, size_t max_len) const;
   void setWifiPass(const char* pass);
 
-  /** Stored Spotify credentials JSON (after successful auth); empty if none. */
-  bool getSpotifyCredentials(char* out, size_t max_len) const;
-  void setSpotifyCredentials(const char* json);
-  void clearSpotifyCredentials();
+  // ---- Device name / DLNA -----------------------------------------------
+  bool getDeviceName(char* out, size_t max_len) const;
+  void setDeviceName(const char* name);
+  bool getDlnaEnabled() const { return config_.dlna_on; }
+  void setDlnaEnabled(bool on);
 
+  // ---- Reset scopes (Phase 6) ------------------------------------------
   bool save();
   void factoryReset();
+  // Each scope wipes the corresponding NVS keys and restores defaults for
+  // those fields. No scope triggers a reboot — callers decide whether to
+  // restart afterwards (WiFi/BT typically do; Snap/DLNA don't).
+  void resetWifi();
+  void resetBluetoothPairings();     // only erases our `last_bt` hint; actual
+                                     // BT bond storage is in the BT stack's
+                                     // own NVS namespace and needs a reboot
+                                     // after an `esp_bt_gap_remove_bond_*`
+                                     // sweep to fully take effect.
+  void resetSnapcast();
+  void resetDlna();
+  void resetEq();                    // both curves + all preset slots
+  void resetAudio();                 // volume/channels only, leaves EQ
 
  private:
   void loadDefaults();
   bool load();
   void markDirty(unsigned long now_ms);
   void ensurePresetsDir();
+  static void loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS]);
+  static void loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]);
 
   Config config_{};
   bool initialized_{false};
@@ -85,8 +204,6 @@ class ConfigManager {
   uint16_t snapcast_port_{SNAPCAST_PORT_DEFAULT};
   char wifi_ssid_[WIFI_SSID_MAX]{};
   char wifi_pass_[WIFI_PASS_MAX]{};
-  char spotify_cred_json_[SPOTIFY_CRED_JSON_MAX]{};
 };
 
 }  // namespace geelen_idf
-

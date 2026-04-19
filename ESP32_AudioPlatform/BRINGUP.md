@@ -1,16 +1,16 @@
-# ESP32_AudioPlatform bring-up checklist (Amped-ESP32)
+# ESP32_AudioPlatform bring-up checklist (Amped-ESP32, ESP-IDF)
 
 ## Serial logging
-- Build/upload: `pio run -e amped-esp32 -t upload`
-- Monitor: `pio device monitor -e amped-esp32`
-- If you see “nothing”, press **RESET** once while the monitor is open.
+- Build/upload: `pio run -e amped-esp32-idf -t upload`
+- Monitor: `pio device monitor -e amped-esp32-idf`
+- If you see "nothing", press **RESET** once while the monitor is open.
 
 Expected early output:
 - ROM boot text (`ets Jul 29 2019 ...`)
-- `Geelen Audio Amp – Amped-ESP32`
+- `Geelen Audio Amp – ESP-IDF env boot`
 
 ## First boot after partition changes
-- Erase once: `pio run -e amped-esp32 -t erase`
+- Erase once: `pio run -e amped-esp32-idf -t erase`
 - Upload again.
 
 Expected:
@@ -24,13 +24,10 @@ Expected:
 - Visit `/` and `/api/status` in a browser.
 
 ## Audio
-- `I2S OK (WS=25 BCK=26 DATA=22)`
+- I2S init logs (WS=25, BCK=26, DATA=22)
 - Amp enable should log `Amp enable (GPIO 13) HIGH`
-- If source is Bluetooth, you should see:
-  - `A2DP Sink started (Geelen Audio). Connect from phone.`
+- If source is Bluetooth, you should see the A2DP sink start.
 
 ## Troubleshooting signals
-- If you see `[AsyncTCP.cpp:...] begin(): failed to start task`:
-  - Capture the memory stats lines printed by the firmware (`[boot]`, `[pre_web]`, etc.).
-  - Try starting without Bluetooth (set source to Network, or temporarily disable A2DP) to confirm heap pressure.
-
+- Capture free heap / PSRAM early in boot if you suspect memory pressure.
+- If BT fails to start, try switching source to Network (Snapcast) to confirm whether the pressure is BT-specific.

@@ -12,7 +12,7 @@
   - **BCLK** – GPIO 26
   - **LRCK (WS)** – GPIO 25
   - **DOUT (DATA)** – GPIO 22
-- Firmware uses the **new I2S driver** (`driver/i2s_std.h`, channel-based API) so it builds with the latest Arduino-ESP32 / PlatformIO espressif32 platform.
+- Firmware uses the **new I2S driver** (`driver/i2s_std.h`, channel-based API) from ESP-IDF (PlatformIO `espidf` framework).
 
 ## Amp enable (Rev H+)
 
