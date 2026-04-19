@@ -1,0 +1,24 @@
+services:
+  snapcast:
+    # sweisgerber/snapcast bundles snapserver + snapweb + librespot + shairport-sync
+    # in one container. Image history: https://hub.docker.com/r/sweisgerber/snapcast
+    image: docker.io/sweisgerber/snapcast:latest
+    container_name: snapcast
+    hostname: snapcast
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      # We only need the server here; the ESP32 is the Snapclient.
+      - START_SNAPCLIENT=false
+      # Set to `true` to also expose a `snapcast` AirPlay target (shairport-sync).
+      # Useful as a workaround when Spotify's audio-key backend blocks librespot
+      # for your account ("error audio key 0 1"): cast from iOS/macOS instead.
+      - START_AIRPLAY=false
+    volumes:
+      # Override the stream config so we pin 44.1 kHz (matches the ESP32 amp).
+      - ./snapserver.conf:/config/snapserver.conf:ro
+      # Persistent snapserver state (server.json) + librespot cache.
+      - ./data:/data

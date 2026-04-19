@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Geelen Audio — API reference</title>
+  <link rel="stylesheet" href="/docs/ui.css" />
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .topbar { display: none; }
+    .swagger-ui .scheme-container { background: #f7f7f7; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="/docs/ui.js" charset="UTF-8"></script>
+  <script>
+    // Standalone Swagger UI pointed at the device's OpenAPI spec. Lives in
+    // SPIFFS alongside the spec so the docs work even when the device has
+    // no upstream connectivity.
+    window.onload = function () {
+      window.ui = SwaggerUIBundle({
+        url: "/openapi.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        tryItOutEnabled: true,
+        presets: [SwaggerUIBundle.presets.apis],
+      });
+    };
+  </script>
+</body>
+</html>

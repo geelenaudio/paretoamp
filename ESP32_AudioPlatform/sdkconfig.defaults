@@ -2,16 +2,19 @@
 # Baseline ESP-IDF configuration for Amped-ESP32 (ESP32-WROVER with PSRAM)
 #
 
-# Console/logging
+# Console/logging: compile in DEBUG (for tag-level filtering), default runtime INFO (less UART spam).
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
+# CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT is not set
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+CONFIG_LOG_MAXIMUM_LEVEL=4
 
 # CPU frequency (audio + BT + WiFi coexist is happier at 240MHz)
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 is not set
 
-# C++ (cspot/bell requires exceptions)
-CONFIG_COMPILER_CXX_EXCEPTIONS=y
+# C++ exceptions are disabled: no in-tree component depends on them.
+# CONFIG_COMPILER_CXX_EXCEPTIONS is not set
 
 # Flash (WROVER-N8R8 = 8MB; partition table needs this or gen_esp32part fails at 2MB default)
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
@@ -22,8 +25,14 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=32768
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
+# Allow FreeRTOS task stacks to be allocated in PSRAM. Kept after removing cspot
+# because WiFi + BT + Snapclient coexist still fragments internal RAM quickly, and
+# this gives us headroom to move large task stacks out of DRAM if needed later.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
 # mbedTLS memory + bundle sizing
-# Spotify Connect TLS can be heap-hungry; prefer allocating mbedTLS buffers in PSRAM.
+# Move mbedTLS buffers to PSRAM to keep internal RAM free for WiFi/BT/audio paths.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
 # CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC is not set
@@ -73,4 +82,18 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_TASK_WDT_TIMEOUT_S=15
 CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 # CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+
+# LwIP TCP receive window — raise from default 5760 to 32 KiB.
+#
+# The default is pitifully small for Snapcast: at 44.1 kHz S16 stereo we
+# consume ~176 kB/s, so a 5760-byte window is only ~33 ms of audio. Any
+# WiFi retransmit or task-scheduling hiccup longer than that closes the
+# window, the server backs off, and the ring buffer on our side runs dry.
+# 32 KiB (~186 ms) gives comfortable headroom and matches the I2S DMA
+# queue depth (16 × 512 frames = 185 ms).
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+# RX mailbox has to hold at least WND/MSS segments; 64 is safe for 32 KiB.
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+# Keep TCP_MSS at the wire default (1440 at 1500-byte MTU) so we don't
+# re-fragment; no override here.
 

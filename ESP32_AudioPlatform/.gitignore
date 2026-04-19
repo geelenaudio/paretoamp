@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+tools/
+
+# SPIFFS staging area — regenerated on every build from `web/` by
+# scripts/build_web.py. Checked-in source is `web/`; the gzipped output here
+# is purely build artefact.
+data/web/
