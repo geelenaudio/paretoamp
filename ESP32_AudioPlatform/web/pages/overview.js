@@ -5,10 +5,9 @@
 //                   host). Fetched once on mount; we only re-fetch it after
 //                   mutations happen on other pages.
 //   - /api/system : runtime metrics (uptime, heap, PSRAM, WiFi RSSI, CPU
-//                   load per core). Polled at 1 Hz while the page is the
-//                   document's visibility state is `visible`. Automatic
-//                   throttling-to-zero on tab hide keeps the device's HTTP
-//                   load minimal.
+//                   load per core). Polled every POLL_MS while the page is
+//                   visible. Automatic throttling-to-zero on tab hide keeps
+//                   the device's HTTP load minimal.
 //
 // The poll uses `setTimeout` in a chain (not `setInterval`) so a stalled
 // fetch can't pile up requests; if the previous request is still in flight
@@ -16,7 +15,10 @@
 
 import { html, useEffect, useState, useRef } from "/vendor/htm-preact.mjs";
 
-const POLL_MS = 1000;
+// 3 s is "live enough" for heap / RSSI / CPU while still costing the device
+// ~20 % of what the original 1 Hz poll did. The page only mounts when the
+// user is on /, so nothing pulls /api/system while they're on other routes.
+const POLL_MS = 3000;
 
 // Map a 0..100 value to one of the bar colour ramps so bars turn amber
 // before red. Accepts an optional `invert` flag for metrics where low is

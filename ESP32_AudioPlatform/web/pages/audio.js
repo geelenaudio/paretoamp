@@ -141,6 +141,11 @@ export default function Audio({ api, toast }) {
 
   if (!state) return html`<div class="stub">Loading…</div>`;
 
+  // The headline volume is whatever the master knob reads in ganged mode, or
+  // the louder of L/R in split mode (so the big number never drops below the
+  // loudest active channel). L and R are always shown underneath for clarity.
+  const headline = mode === "ganged" ? master : Math.max(l, r);
+
   return html`
     <h1 class="page__title">Audio</h1>
     <p class="page__subtitle">
@@ -148,58 +153,74 @@ export default function Audio({ api, toast }) {
     </p>
 
     <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap: var(--sp-4); margin-bottom: var(--sp-4);">
+      <div class="row--between" style="margin-bottom: var(--sp-5)">
         <div>
           <div class="card__title">Volume</div>
-          <div class="card__value">${l}% <span style="color:var(--fg-2);font-size:16px">· ${r}%</span></div>
+          <div class="vol-big">
+            ${headline}%
+            <span class="vol-big__sub">L ${l}% · R ${r}%</span>
+          </div>
         </div>
-        <div style="display:flex; gap: var(--sp-2)">
-          <button class=${"btn" + (mode === "ganged" ? " btn--primary" : "")}
-                  onClick=${() => setMode("ganged")}>Ganged</button>
-          <button class=${"btn" + (mode === "split" ? " btn--primary" : "")}
-                  onClick=${() => setMode("split")}>Split L/R</button>
+        <div class="row" style="gap: var(--sp-2); flex-wrap: wrap; justify-content: flex-end">
+          <div class="pill-group">
+            <button class=${"btn" + (mode === "ganged" ? " btn--primary" : "")}
+                    onClick=${() => setMode("ganged")}>Ganged</button>
+            <button class=${"btn" + (mode === "split" ? " btn--primary" : "")}
+                    onClick=${() => setMode("split")}>Split L/R</button>
+          </div>
+          <button class=${"btn" + (muted ? " btn--danger" : "")} onClick=${toggleMute}>
+            ${muted ? "Un-mute" : "Mute"}
+          </button>
         </div>
       </div>
 
       ${mode === "ganged" ? html`
         <div class="field">
-          <label class="field__label" for="master">Master (${master}%)</label>
-          <input id="master" class="slider" type="range" min="0" max="100"
-                 value=${master}
-                 onInput=${(e) => onMasterInput(parseInt(e.target.value, 10))}
-                 onChange=${onGangedCommit} />
+          <label class="field__label" for="master">Master</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="master" class="slider" type="range" min="0" max="100"
+                   value=${master}
+                   style=${`--fill:${master}`}
+                   onInput=${(e) => onMasterInput(parseInt(e.target.value, 10))}
+                   onChange=${onGangedCommit} />
+            <span class="chip">${master}%</span>
+          </div>
         </div>
-        <div class="field" style="margin-top: var(--sp-3)">
-          <label class="field__label" for="balance">
-            Balance (${balance === 0 ? "centre" : balance > 0 ? `R ${balance}` : `L ${Math.abs(balance)}`})
-          </label>
-          <input id="balance" class="slider" type="range" min="-100" max="100"
-                 value=${balance}
-                 onInput=${(e) => onBalanceInput(parseInt(e.target.value, 10))}
-                 onChange=${onGangedCommit} />
+        <div class="field" style="margin-top: var(--sp-4)">
+          <label class="field__label" for="balance">Balance</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="balance" class="slider" type="range" min="-100" max="100"
+                   value=${balance}
+                   style=${`--fill:${(balance + 100) / 2}`}
+                   onInput=${(e) => onBalanceInput(parseInt(e.target.value, 10))}
+                   onChange=${onGangedCommit} />
+            <span class="chip">${balance === 0 ? "centre" : balance > 0 ? `R ${balance}` : `L ${Math.abs(balance)}`}</span>
+          </div>
         </div>
       ` : html`
         <div class="field">
-          <label class="field__label" for="lvol">Left (${l}%)</label>
-          <input id="lvol" class="slider" type="range" min="0" max="100"
-                 value=${l}
-                 onInput=${(e) => onSplitInput("l", parseInt(e.target.value, 10))}
-                 onChange=${onSplitCommit} />
+          <label class="field__label" for="lvol">Left</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="lvol" class="slider" type="range" min="0" max="100"
+                   value=${l}
+                   style=${`--fill:${l}`}
+                   onInput=${(e) => onSplitInput("l", parseInt(e.target.value, 10))}
+                   onChange=${onSplitCommit} />
+            <span class="chip">${l}%</span>
+          </div>
         </div>
-        <div class="field" style="margin-top: var(--sp-3)">
-          <label class="field__label" for="rvol">Right (${r}%)</label>
-          <input id="rvol" class="slider" type="range" min="0" max="100"
-                 value=${r}
-                 onInput=${(e) => onSplitInput("r", parseInt(e.target.value, 10))}
-                 onChange=${onSplitCommit} />
+        <div class="field" style="margin-top: var(--sp-4)">
+          <label class="field__label" for="rvol">Right</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="rvol" class="slider" type="range" min="0" max="100"
+                   value=${r}
+                   style=${`--fill:${r}`}
+                   onInput=${(e) => onSplitInput("r", parseInt(e.target.value, 10))}
+                   onChange=${onSplitCommit} />
+            <span class="chip">${r}%</span>
+          </div>
         </div>
       `}
-
-      <div style="margin-top: var(--sp-5); display:flex; gap: var(--sp-2); flex-wrap: wrap;">
-        <button class=${"btn" + (muted ? " btn--danger" : "")} onClick=${toggleMute}>
-          ${muted ? "Un-mute" : "Mute"}
-        </button>
-      </div>
     </div>
 
     <div class="card">
@@ -210,31 +231,39 @@ export default function Audio({ api, toast }) {
         system receives L+R mixed together.
       </p>
 
-      <label style="display:flex; align-items:center; gap: var(--sp-3); margin: var(--sp-3) 0;">
+      <label class="toggle-row">
         <span class="switch">
           <input type="checkbox" checked=${lon} onChange=${() => toggleChannel("l")} />
           <span class="switch__slider"></span>
         </span>
-        <span>Left channel output</span>
+        <span>
+          <span class="toggle-row__label">Left channel output</span>
+          <span class="toggle-row__help">Disable to route only Right to both outputs.</span>
+        </span>
       </label>
-      <label style="display:flex; align-items:center; gap: var(--sp-3); margin: var(--sp-3) 0;">
+
+      <label class="toggle-row">
         <span class="switch">
           <input type="checkbox" checked=${ron} onChange=${() => toggleChannel("r")} />
           <span class="switch__slider"></span>
         </span>
-        <span>Right channel output</span>
+        <span>
+          <span class="toggle-row__label">Right channel output</span>
+          <span class="toggle-row__help">Disable to route only Left to both outputs.</span>
+        </span>
       </label>
-      <label style="display:flex; align-items:center; gap: var(--sp-3); margin: var(--sp-3) 0;">
+
+      <label class="toggle-row">
         <span class="switch">
           <input type="checkbox" checked=${!stereo} onChange=${toggleStereo} />
           <span class="switch__slider"></span>
         </span>
         <span>
-          Mono sum (L + R → both outputs)
-          <div style="color: var(--fg-2); font-size: 12px;">
+          <span class="toggle-row__label">Mono sum (L + R → both outputs)</span>
+          <span class="toggle-row__help">
             Useful when only one speaker is connected or for centering a
             mono-recorded source.
-          </div>
+          </span>
         </span>
       </label>
     </div>

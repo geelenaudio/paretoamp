@@ -1,12 +1,40 @@
 /* Geelen Audio – design tokens + base styles.
-   Dark-by-default; the SPA never dispatches to a light theme at runtime.
-   If a light theme is ever added, flip the --bg-*/--fg-* tokens and rely on
-   color-scheme to re-style form controls. */
+   Themes are attribute-scoped on <html data-theme="dark|light">. The bootstrap
+   inline in index.html applies the right one before first paint (localStorage
+   > system preference > dark). Flipping the attribute at runtime retints the
+   whole app in a single repaint — no reload, no FOUC.
 
+   Token contract: every surface/text/accent colour must resolve through one
+   of the tokens below. No component stylesheet may reference raw hex. */
+
+/* Shape / spacing / typography — theme-invariant. */
 :root {
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  --r-1: 6px;
+  --r-2: 10px;
+  --r-3: 16px;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --nav-w: 240px;
+  --nav-w-mobile: 68px;
+  --hdr-h: 56px;
+}
+
+/* Dark theme (default). */
+:root,
+:root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* Palette */
   --bg-0: #0b0d10;          /* page background */
   --bg-1: #12151a;          /* cards */
   --bg-2: #1a1f26;          /* nested surfaces, inputs */
@@ -17,34 +45,54 @@
   --fg-1: #b6bdc8;          /* secondary text */
   --fg-2: #7b8390;          /* tertiary / captions */
   --accent: #6ab0ff;        /* primary actions, links */
-  --accent-soft: #1b2d45;
+  --accent-soft: #1b2d45;   /* nav-active tint, focus ring background */
+  --accent-ink: #0b0d10;    /* text/icon drawn on top of --accent fills */
   --ok: #4cc38a;
   --warn: #e6b566;
   --err: #e86a5f;
   --err-soft: #3a1816;
 
-  /* Spacing scale (px). Everything snaps to 4 px. */
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 48px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, .5);
+  --focus-ring: 0 0 0 3px rgba(106, 176, 255, .32);
+  --row-hover: rgba(255, 255, 255, .04);
 
-  /* Radii, shadows, typography */
-  --r-1: 6px;
-  --r-2: 10px;
-  --r-3: 16px;
-  --shadow-1: 0 1px 2px rgba(0,0,0,.4);
-  --shadow-2: 0 8px 24px rgba(0,0,0,.5);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* DSP layer colours. Consumed by both the SVG plot and the band handles. */
+  --eq-cal: #e6b566;
+  --eq-pref: #9d7cff;
+  --eq-plot-border: rgba(0, 0, 0, 0);
+}
 
-  --nav-w: 240px;
-  --nav-w-mobile: 68px;
-  --hdr-h: 56px;
+/* Light theme. Calm, paper-feel; accent darkened for contrast on white. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-0: #f5f7fa;
+  --bg-1: #ffffff;
+  --bg-2: #eef1f5;
+  --bg-3: #e1e5ec;
+  --line: #d6dbe3;
+  --line-strong: #b6bdc8;
+  --fg-0: #1a1f26;
+  --fg-1: #4d5566;
+  --fg-2: #7b8390;
+  --accent: #1f6bd6;
+  --accent-soft: #dbe7fa;
+  --accent-ink: #ffffff;
+  --ok: #2f9d66;
+  --warn: #b67919;
+  --err: #d4483c;
+  --err-soft: #fae1df;
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, .06);
+  --shadow-2: 0 8px 24px rgba(16, 24, 40, .10);
+  --focus-ring: 0 0 0 3px rgba(31, 107, 214, .22);
+  --row-hover: rgba(16, 24, 40, .04);
+
+  /* Darker layer tints for legibility on white card. */
+  --eq-cal: #b67919;
+  --eq-pref: #7a5be0;
+  --eq-plot-border: rgba(16, 24, 40, .08);
 }
 
 * { box-sizing: border-box; }
@@ -88,8 +136,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: 8px;
   background: linear-gradient(135deg, var(--accent) 0%, #9d7cff 100%);
   display: grid; place-items: center;
-  color: #0b0d10;
+  color: #ffffff;
   font-weight: 800;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, .25);
 }
 .shell__header {
   grid-area: header;
@@ -101,6 +150,25 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .shell__header-title { font-weight: 600; font-size: 15px; }
 .shell__header-meta { color: var(--fg-2); font-size: 12px; font-family: var(--font-mono); }
+.shell__header-actions { display: flex; align-items: center; gap: var(--sp-3); }
+
+/* Bare icon button (theme toggle, header actions). */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px; height: 36px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--fg-1);
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
+  font-size: 16px;
+  line-height: 1;
+}
+.icon-btn:hover { background: var(--bg-3); color: var(--fg-0); border-color: var(--line-strong); }
+.icon-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .shell__nav {
   grid-area: nav;
   border-right: 1px solid var(--line);
@@ -122,8 +190,12 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-1);
   cursor: pointer;
   user-select: none;
+  text-decoration: none;
   transition: background 120ms, color 120ms;
 }
+.nav-item:hover,
+.nav-item:visited,
+.nav-item:focus { color: var(--fg-0); text-decoration: none; }
 .nav-item:hover { background: var(--bg-2); color: var(--fg-0); }
 .nav-item--active {
   background: var(--accent-soft);
@@ -156,6 +228,39 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .card__sub { color: var(--fg-2); font-size: 12px; margin-top: var(--sp-1); }
 
+/* Card that's visually "off" — used when the content inside has no effect
+   (e.g. DSP band editor while the layer is disabled). We dim via opacity
+   on the bands area only, via the banner + card__title staying vivid so
+   the state is still readable at a glance. */
+.card--muted { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.card--muted .eq-bands { opacity: .55; }
+
+/* Inline notices inside a card — yellow == warn, red == err. Rendered
+   after the card title and before the body content. */
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-2);
+  font-size: 13px;
+  line-height: 1.45;
+  border: 1px solid transparent;
+}
+.banner strong { font-weight: 600; margin-right: var(--sp-1); }
+.banner em { font-style: normal; font-weight: 600; color: inherit; }
+.banner--warn {
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-1));
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  color: var(--fg-0);
+}
+.banner--err {
+  background: var(--err-soft, color-mix(in srgb, var(--err) 14%, var(--bg-1)));
+  border-color: color-mix(in srgb, var(--err) 55%, transparent);
+  color: var(--fg-0);
+}
+
 .grid {
   display: grid;
   gap: var(--sp-4);
@@ -183,22 +288,23 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--bg-2);
   color: var(--fg-0);
   cursor: pointer;
-  transition: background 120ms, border-color 120ms;
+  transition: background 120ms, border-color 120ms, box-shadow 120ms, color 120ms;
 }
 .btn:hover { background: var(--bg-3); }
+.btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .btn--primary {
   background: var(--accent);
-  color: #0b0d10;
+  color: var(--accent-ink);
   border-color: var(--accent);
   font-weight: 600;
 }
-.btn--primary:hover { filter: brightness(1.05); }
+.btn--primary:hover { filter: brightness(1.05); box-shadow: var(--focus-ring); }
 .btn--danger {
   background: var(--err-soft);
   border-color: var(--err);
   color: var(--err);
 }
-.btn--danger:hover { background: var(--err); color: #0b0d10; }
+.btn--danger:hover { background: var(--err); color: var(--accent-ink); border-color: var(--err); }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
 .input, .select {
@@ -219,60 +325,228 @@ button, input, select, textarea { font: inherit; color: inherit; }
   letter-spacing: .05em;
 }
 
-/* Toggle switch */
+/* Layout helpers used by pages to drop inline flex styles. */
+.row { display: flex; align-items: center; gap: var(--sp-3); }
+.row--between { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
+.row--wrap { flex-wrap: wrap; }
+.row--end { justify-content: flex-end; }
+.stack { display: flex; flex-direction: column; gap: var(--sp-3); }
+.chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 72px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-0);
+  text-align: center;
+}
+.chip--accent { background: var(--accent-soft); border-color: var(--accent); color: var(--fg-0); }
+
+/* Toggle row: switch on the left, label + help text on the right. Rows stack
+   inside a card with a hairline between them. Whole row is a click target. */
+.toggle-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+  cursor: pointer;
+  margin: 0;
+}
+.toggle-row + .toggle-row { border-top: 1px solid var(--line); }
+.toggle-row__label {
+  color: var(--fg-0);
+  font-weight: 500;
+}
+.toggle-row__help {
+  color: var(--fg-2);
+  font-size: 12px;
+  margin-top: 2px;
+  display: block;
+}
+
+/* Segmented button pair ("Ganged" / "Split L/R"). */
+.pill-group { display: inline-flex; gap: 0; border-radius: var(--r-2); overflow: hidden; }
+.pill-group .btn { border-radius: 0; border-right-width: 0; }
+.pill-group .btn:first-child { border-top-left-radius: var(--r-2); border-bottom-left-radius: var(--r-2); }
+.pill-group .btn:last-child  { border-top-right-radius: var(--r-2); border-bottom-right-radius: var(--r-2); border-right-width: 1px; }
+
+/* Section heading used on the Reset page to group rows. */
+.section-title {
+  margin: var(--sp-6) 0 var(--sp-3);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--fg-2);
+}
+.section-title:first-child { margin-top: 0; }
+.section-title--danger { color: var(--err); }
+
+/* Reset row: card with a leading tone stripe + icon, and a distinct confirm
+   state. `data-tone` controls the stripe/icon colour (ok | warn | danger). */
+.reset-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4);
+  padding-left: calc(var(--sp-4) + 4px);
+  margin-bottom: var(--sp-3);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-1);
+  transition: background 160ms, border-color 160ms, box-shadow 160ms;
+}
+.reset-row::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  border-top-left-radius: var(--r-2);
+  border-bottom-left-radius: var(--r-2);
+  background: var(--accent);
+}
+.reset-row[data-tone="warn"]::before   { background: var(--warn); }
+.reset-row[data-tone="danger"]::before { background: var(--err); }
+.reset-row[data-tone="ok"]::before     { background: var(--ok); }
+.reset-row__icon {
+  display: grid; place-items: center;
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--bg-2);
+  color: var(--accent);
+  font-size: 18px;
+}
+.reset-row[data-tone="warn"] .reset-row__icon   { color: var(--warn); }
+.reset-row[data-tone="danger"] .reset-row__icon { color: var(--err); }
+.reset-row[data-tone="ok"] .reset-row__icon     { color: var(--ok); }
+.reset-row__title { font-weight: 600; color: var(--fg-0); }
+.reset-row__blurb { color: var(--fg-1); margin: var(--sp-1) 0 0; font-size: 14px; }
+.reset-row__note {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--warn); font-size: 12px; margin-top: var(--sp-2);
+}
+.reset-row__actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; justify-content: flex-end; }
+.reset-row.is-confirming {
+  background: var(--err-soft);
+  border-color: var(--err);
+  box-shadow: 0 0 0 1px var(--err), var(--shadow-1);
+}
+@media (max-width: 520px) {
+  .reset-row {
+    grid-template-columns: 32px 1fr;
+  }
+  .reset-row__actions {
+    grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+  .reset-row__actions .btn { flex: 1 1 auto; justify-content: center; }
+}
+
+/* Oversized volume readout for the audio page's main card. */
+.vol-big {
+  font-family: var(--font-mono);
+  font-size: 44px;
+  font-weight: 700;
+  color: var(--fg-0);
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+.vol-big__sub {
+  color: var(--fg-2);
+  font-size: 18px;
+  font-weight: 500;
+  margin-left: var(--sp-2);
+}
+
+/* Toggle switch: clear OFF/ON contrast on both themes. */
 .switch {
   position: relative;
   display: inline-block;
-  width: 42px; height: 24px;
+  width: 44px; height: 24px;
   flex-shrink: 0;
 }
-.switch input { display: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; cursor: pointer; margin: 0; }
 .switch__slider {
   position: absolute; inset: 0;
-  background: var(--bg-3);
+  background: var(--bg-2);
   border-radius: 24px;
-  transition: background 160ms;
-  border: 1px solid var(--line-strong);
+  transition: background 160ms, border-color 160ms, box-shadow 160ms;
+  border: 1.5px solid var(--line-strong);
 }
 .switch__slider::before {
   content: "";
   position: absolute;
-  left: 2px; top: 2px;
-  width: 18px; height: 18px;
+  left: 2px; top: 50%;
+  width: 17px; height: 17px;
   border-radius: 50%;
-  background: var(--fg-1);
+  background: var(--fg-0);
+  transform: translateY(-50%);
+  box-shadow: var(--shadow-1);
   transition: transform 160ms, background 160ms;
 }
-.switch input:checked + .switch__slider { background: var(--accent); border-color: var(--accent); }
+.switch:hover .switch__slider { border-color: var(--accent); }
+.switch input:focus-visible + .switch__slider { box-shadow: var(--focus-ring); }
+.switch input:checked + .switch__slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
 .switch input:checked + .switch__slider::before {
-  background: #0b0d10;
-  transform: translateX(18px);
+  background: var(--accent-ink);
+  transform: translate(20px, -50%);
 }
 
-/* Slider (horizontal) */
+/* Slider (horizontal). Pages may drive the filled portion via --fill: 0..100.
+   Falls back to 50 % when nothing is set so a static slider still looks like
+   one, not a grey hair. `accent-color` is a fallback for UAs that ignore our
+   custom track (Safari < 16.4). */
 .slider {
   -webkit-appearance: none; appearance: none;
   width: 100%;
-  height: 4px;
-  background: var(--bg-3);
-  border-radius: 2px;
+  height: 6px;
+  border-radius: 999px;
   outline: none;
+  accent-color: var(--accent);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--accent) calc(var(--fill, 50) * 1%),
+    var(--bg-3)   calc(var(--fill, 50) * 1%),
+    var(--bg-3)   100%
+  );
+  border: 1px solid var(--line);
+  transition: box-shadow 120ms;
 }
+.slider:hover { box-shadow: var(--focus-ring); }
+.slider:focus-visible { box-shadow: var(--focus-ring); }
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 18px; height: 18px;
+  width: 20px; height: 20px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  border: 3px solid var(--bg-0);
+  border: 3px solid var(--bg-1);
+  box-shadow: var(--shadow-1);
+  transition: transform 120ms;
+}
+.slider::-webkit-slider-thumb:hover { transform: scale(1.08); }
+.slider::-moz-range-thumb {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 3px solid var(--bg-1);
   box-shadow: var(--shadow-1);
 }
-.slider::-moz-range-thumb {
-  width: 18px; height: 18px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  border: 3px solid var(--bg-0);
+.slider::-moz-range-track {
+  height: 6px;
+  background: transparent; /* the gradient on .slider itself paints the track */
 }
 
 /* Status pill */
@@ -412,43 +686,69 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: 2px;
 }
 
-/* Band-row editor. Three numeric fields + index. */
+/* Band-row editor. Each band gets three labelled sliders with a value chip
+   and nudge buttons, vertically stacked in a card-surface. */
 .eq-bands {
   display: grid;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   margin-top: var(--sp-4);
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
 }
 .eq-band {
-  display: grid;
-  grid-template-columns: 24px 1fr 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: var(--sp-2);
-  align-items: end;
-  padding: var(--sp-2);
+  padding: var(--sp-3);
   background: var(--bg-2);
+  border: 1px solid var(--line);
   border-radius: var(--r-2);
+  transition: border-color 120ms, box-shadow 120ms;
 }
-.eq-band__idx {
-  align-self: center;
-  text-align: center;
+.eq-band--active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.eq-band__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
   color: var(--fg-2);
   font-family: var(--font-mono);
-  font-size: 12px;
-}
-.eq-band__field {
-  display: grid;
-  gap: 2px;
-}
-.eq-band__field span {
   font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px dashed var(--line);
+}
+.eq-band__idx {
+  color: var(--fg-0);
+  font-weight: 600;
+}
+.eq-band__row {
+  display: grid;
+  grid-template-columns: 42px 1fr 78px auto;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.eq-band__row > label {
   color: var(--fg-2);
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: .04em;
 }
-.eq-band .input {
-  padding: 6px 8px;
+.eq-band__nudge {
+  display: inline-flex;
+  gap: 4px;
+}
+.eq-band__nudge .btn {
+  padding: 2px 0;
+  min-width: 28px;
+  height: 28px;
+  justify-content: center;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1;
 }
 
 /* Preset slot list */
@@ -516,7 +816,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   line-height: 1.5;
   border-bottom: 1px solid transparent;
 }
-.logs__row:hover { background: rgba(255, 255, 255, 0.04); }
+.logs__row:hover { background: var(--row-hover); }
 .logs__time { color: var(--fg-2); }
 .logs__level { font-weight: 700; text-align: center; }
 .logs__tag { color: var(--fg-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

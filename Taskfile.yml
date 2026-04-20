@@ -132,38 +132,115 @@ tasks:
   # comes out as the `Desktop` Snapcast stream.
 
   stream:sources:
-    desc: List PipeWire sinks/monitors you can feed into the Desktop stream
+    desc: List PipeWire MONITOR sources (what you actually want for desktop audio)
     cmds:
       - |
         if command -v wpctl >/dev/null; then
+          echo "Default monitor (always works): @DEFAULT_MONITOR@"
+          echo
+          echo "Or pick one of these explicitly (they all mirror a sink):"
+          # Prefer pw-cli because `wpctl status` hides monitor sources by
+          # default. Nodes of media.class = Audio/Source/Virtual with a
+          # name ending in `.monitor` are sink-monitors — exactly what we
+          # need. Fall back to a hint if pw-cli isn't available.
+          if command -v pw-cli >/dev/null; then
+            pw-cli ls Node 2>/dev/null | awk '
+              /^[[:space:]]*id [0-9]+,/          { id = $2; sub(",","",id); next }
+              /node\.name = ".*\.monitor"/       { name = $3; gsub("\"","",name); found=1 }
+              /node\.description = ".*"/        {
+                # Grab everything between the quotes so descriptions with spaces
+                # survive.
+                match($0, /"[^"]*"/); desc = substr($0, RSTART+1, RLENGTH-2)
+              }
+              /media\.class = "Audio\/Source\/Virtual"/ { isvirt=1 }
+              /^$/ {
+                if (found && isvirt) {
+                  printf "  %-5s %-70s %s\n", id, name, desc
+                }
+                id=""; name=""; desc=""; found=0; isvirt=0
+              }
+            '
+          else
+            echo "  (install pw-cli for a full monitor list; in the meantime,"
+            echo "   each sink below has a monitor named '<node.name>.monitor')"
+          fi
+          echo
+          echo "Underlying sinks (for reference):"
           wpctl status | sed -n '/Audio/,/Video/p' | sed -n '/Sinks:/,/Sources:/p'
           echo
-          echo "Use a *Sink's monitor* to capture desktop audio. Pass the numeric id"
-          echo "  to: task stream:desktop -- <id>"
-          echo "Or the node name to: task stream:desktop -- <node.name>"
+          echo "Usage:"
+          echo "  task stream:desktop                           # auto: @DEFAULT_MONITOR@"
+          echo "  task stream:desktop -- @DEFAULT_MONITOR@      # same thing, explicit"
+          echo "  task stream:desktop -- <monitor.node.name>    # pick one from above"
         elif command -v pactl >/dev/null; then
-          pactl list sources short
+          pactl list sources short | grep -E "monitor"
         else
           echo "Neither wpctl (PipeWire) nor pactl (PulseAudio) is installed."
           exit 1
         fi
 
   stream:desktop:
-    desc: "Pipe system audio monitor into the Desktop FIFO. Usage: task stream:desktop -- <pw-target>"
+    desc: "Pipe desktop audio into the Desktop FIFO. Default: monitor of the system-default sink."
     cmds:
       - mkdir -p {{.SNAP_DIR}}/data
       - |
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Specify a PipeWire target, e.g.:"
-          echo "  task stream:desktop -- @DEFAULT_MONITOR@"
-          echo "  task stream:desktop -- 67"
-          echo "  task stream:desktop -- alsa_output.usb-RODE_Microphones_RODE_AI-1_69A5EC74-00.iec958-stereo"
-          echo "Run 'task stream:sources' to find an id/name."
-          exit 2
+        # IMPORTANT: we intentionally do NOT use `pw-record` here.
+        #
+        # pw-record writes its output via libsndfile, which picks the
+        # container format from the filename extension. Writing to stdout
+        # (no extension) makes sndfile default to Sun/NeXT .au — a 24-byte
+        # header followed by framed 16-bit PCM. Snapserver is configured
+        # for RAW PCM on its FIFO, so it interprets the .au header bytes
+        # as audio samples and you get continuous static. There is no
+        # `--raw` flag on pw-record to disable this.
+        #
+        # ffmpeg's `-f pulse` input talks to the PipeWire-pulse compat
+        # socket, reads the monitor source directly, and writes clean
+        # s16le PCM to stdout. No container, no header, no surprises.
+
+        TARGET="{{.CLI_ARGS}}"
+
+        # Classic footgun guard: a bare numeric id (e.g. `69`) from
+        # `wpctl status`. PipeWire sink ids and source ids share one
+        # namespace, so targeting `69` when `69` is a Sink hits the wrong
+        # side. Reject it with a hint pointing at the monitor.
+        if echo "$TARGET" | grep -qE '^[0-9]+$' && command -v wpctl >/dev/null; then
+          CLASS=$(wpctl inspect "$TARGET" 2>/dev/null | sed -n 's/.*media.class = "\(.*\)".*/\1/p')
+          if [ "$CLASS" = "Audio/Sink" ]; then
+            NAME=$(wpctl inspect "$TARGET" 2>/dev/null | sed -n 's/.*node.name = "\(.*\)".*/\1/p')
+            echo "Error: id $TARGET is a Sink ($NAME). You want its MONITOR source:"
+            echo "  task stream:desktop -- ${NAME}.monitor"
+            echo "or just:"
+            echo "  task stream:desktop"
+            exit 2
+          fi
         fi
-        pw-record --target "{{.CLI_ARGS}}" \
-                  --format=s16 --rate=44100 --channels=2 - \
-          > "$(pwd)/{{.SNAP_FIFO}}"
+
+        # Resolve the target to a concrete Pulse-API source name.
+        # `@DEFAULT_MONITOR@` is a PipeWire-only shorthand; ffmpeg's pulse
+        # input doesn't understand it, so translate to <default-sink>.monitor.
+        if [ -z "$TARGET" ] || [ "$TARGET" = "@DEFAULT_MONITOR@" ]; then
+          if command -v wpctl >/dev/null; then
+            SINK_NAME=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null \
+                         | sed -n 's/.*node\.name = "\(.*\)".*/\1/p' | head -1)
+            if [ -z "$SINK_NAME" ]; then
+              echo "Error: could not resolve the default audio sink via wpctl."
+              echo "Try: task stream:sources   # pick a monitor source by name"
+              exit 2
+            fi
+            TARGET="${SINK_NAME}.monitor"
+          else
+            echo "Error: wpctl not found; pass an explicit source name, e.g."
+            echo "  task stream:desktop -- alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
+            exit 2
+          fi
+        fi
+
+        echo "Recording from $TARGET into ${SNAP_FIFO} (via ffmpeg/-f pulse)..."
+        exec ffmpeg -hide_banner -loglevel warning \
+                    -f pulse -i "$TARGET" \
+                    -ac 2 -ar 44100 -f s16le - \
+                    > "$(pwd)/{{.SNAP_FIFO}}"
 
   stream:test:
     desc: Pipe a 440 Hz sine (10 s) into the Desktop FIFO (end-to-end smoke test)

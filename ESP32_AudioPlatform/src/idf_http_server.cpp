@@ -114,16 +114,38 @@ static esp_err_t serve_file(httpd_req_t* req, const char* fs_path_no_gz,
     }
   }
 
+  // Build a weak ETag from (size << 32 | mtime). Two different builds produce
+  // distinct ETags; unchanged files re-use the same one so the client keeps
+  // its cached copy. Prefix `W/` marks it weak — we don't promise byte-exact
+  // equality, only semantic equivalence (good enough for gzip wrappers).
+  char etag[40];
+  snprintf(etag, sizeof(etag), "W/\"%lx-%lx\"",
+           (unsigned long)st.st_size, (unsigned long)st.st_mtime);
+
+  // If the client has a matching ETag, we're done — reply 304 with no body.
+  // This is the fast path for unchanged assets (typical page revisit).
+  char inm[48];
+  if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK
+      && strcmp(inm, etag) == 0) {
+    httpd_resp_set_status(req, "304 Not Modified");
+    httpd_resp_set_hdr(req, "ETag", etag);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
+    httpd_resp_send(req, nullptr, 0);
+    return ESP_OK;
+  }
+
   int fd = open(path, O_RDONLY);
   if (fd < 0) return ESP_FAIL;
 
   httpd_resp_set_type(req, mime);
   if (gz) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-  // Cache static assets for a day — they're versioned implicitly by firmware
-  // build; a new upload flips the gz mtime and the browser will re-fetch on
-  // any 304-validating load. Keep the TTL modest so dev iteration isn't
-  // painful.
-  httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+  // Revalidate every load: the browser keeps a copy, sends If-None-Match, and
+  // we answer 304 (above) when the file hasn't changed. This is the only way
+  // to get "new flash -> fresh UI" without a 24 h stale window or the user
+  // having to hard-reload. The overhead per asset is a single round-trip
+  // with an empty body — negligible on LAN.
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
+  httpd_resp_set_hdr(req, "ETag", etag);
 
   char buf[1024];
   ssize_t r;
@@ -171,13 +193,14 @@ static esp_err_t handle_static(httpd_req_t* req) {
   esp_err_t r = serve_file(req, fs_path, mime_for(fs_path));
   if (r == ESP_OK) return ESP_OK;
 
-  // For SPA deep-links (`/mode`, `/dsp`, …) our router is hash-based so we
-  // don't actually need an HTML fallback — browsers always request `/` for
-  // root navigations and `#/…` stays client-side. Still, if someone manually
-  // types `/mode` we fall back to index.html so the route resolves after JS
-  // loads. Only do this if the path has no extension (i.e. it's a "page",
-  // not a missing asset like `/foo.js.gz`).
-  const bool looks_like_page = !strchr(path, '.');
+  // For SPA deep-links (`/mode`, `/dsp`, …) we use the History API in the
+  // client, so the browser sends GET /mode on reload or bookmark. Serve
+  // index.html and let the router take over after JS boots. Only do this
+  // if the path has no extension (i.e. it's a "page", not a missing asset
+  // like `/foo.js.gz`) AND isn't an `/api/...` miss (which should 404 so
+  // the SPA's fetch() rejects visibly).
+  const bool looks_like_page =
+      !strchr(path, '.') && strncmp(path, "/api/", 5) != 0;
   if (looks_like_page) {
     if (serve_file(req, "/spiffs/web/index.html", "text/html; charset=utf-8") == ESP_OK) {
       return ESP_OK;
@@ -326,6 +349,23 @@ bool HttpServer::begin(ConfigManager* cfg) {
   // Enable wildcard matching so `/*` actually fires for /foo.js.gz, /vendor/…,
   // /pages/…. Without this the catch-all only matches the literal string `/*`.
   config.uri_match_fn = httpd_uri_match_wildcard;
+  // Modern browsers open up to 6 parallel connections per host for assets,
+  // plus we keep one long-lived detached socket for the SSE log stream
+  // (see idf_logs.cpp). The default (7) leaves exactly zero headroom, so
+  // the SSE plus a page reload would lock other requests out until LRU
+  // purge kicked in. Bump generously within LWIP's CONFIG_LWIP_MAX_SOCKETS
+  // (=10) budget and reserve one of those slots for async handlers.
+  config.max_open_sockets = 8;
+  config.backlog_conn = 8;
+  // Tighter timeouts so a half-closed peer frees its socket sooner rather
+  // than sitting in the LRU list. 5 s is plenty for any legitimate LAN
+  // request but short enough that dead idle connections don't linger.
+  config.recv_wait_timeout = 5;
+  config.send_wait_timeout = 5;
+  // The static + API handlers allocate a few KiB of locals on the stack
+  // (json assembly, 1 KiB file-serving buffer). Default of 4 KiB is tight
+  // with FP prints in cJSON.
+  config.stack_size = 6 * 1024;
 
   httpd_handle_t h = nullptr;
   if (httpd_start(&h, &config) != ESP_OK) return false;

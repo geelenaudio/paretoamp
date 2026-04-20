@@ -21,10 +21,16 @@ static std::atomic<uint32_t> s_idle_count[portNUM_PROCESSORS];
 static uint8_t s_cpu_pct[portNUM_PROCESSORS] = {0};
 
 // Calibration baseline: the maximum "idle calls per second" we've ever
-// observed. Any current reading below this implies the CPU spent some of
-// that second running non-idle tasks. Starts at 1 to avoid a divide-by-zero
-// before the first sample window closes.
-static uint64_t s_idle_peak[portNUM_PROCESSORS] = {1, 1};
+// observed across *either* core. Using a single shared peak fixes a subtle
+// bug where a core that's never fully idle (e.g. Core 1 pinned to the
+// audio task) would calibrate against its own low peak and permanently
+// report itself as "busy" even when the audio task is just blocking in
+// i2s_channel_write. Both cores are the same Xtensa at the same clock, so
+// their idle-hook call rate at 100% idle is identical — calibrating
+// against the max we've ever seen on either gives an accurate reading for
+// both. Starts at 1 to avoid a divide-by-zero before the first sample
+// window closes.
+static uint64_t s_idle_peak = 1;
 
 static bool IRAM_ATTR idle_hook_cpu0() {
   s_idle_count[0].fetch_add(1, std::memory_order_relaxed);
@@ -53,20 +59,21 @@ static void sampler_task(void*) {
     prev_us = now_us;
     if (dt_us == 0) continue;
 
+    uint64_t per_s[portNUM_PROCESSORS] = {0};
     for (int i = 0; i < portNUM_PROCESSORS; ++i) {
       const uint32_t cur = s_idle_count[i].load(std::memory_order_relaxed);
       const uint32_t delta = cur - prev[i];
       prev[i] = cur;
-
       // Scale delta to calls-per-second so the calibration baseline is
       // independent of sampling jitter.
-      const uint64_t per_s = (uint64_t)delta * 1000000ULL / dt_us;
-      if (per_s > s_idle_peak[i]) s_idle_peak[i] = per_s;
+      per_s[i] = (uint64_t)delta * 1000000ULL / dt_us;
+      if (per_s[i] > s_idle_peak) s_idle_peak = per_s[i];
+    }
 
-      // Guard against transient spikes above the baseline (e.g. the
-      // sampler itself got delayed and then received two deltas in one
-      // window). Clamp to [0, 100].
-      uint64_t pct_idle = per_s * 100ULL / s_idle_peak[i];
+    // Apply the *shared* peak to both cores. Any per-second reading below
+    // the peak implies that much time spent in non-idle tasks on that core.
+    for (int i = 0; i < portNUM_PROCESSORS; ++i) {
+      uint64_t pct_idle = per_s[i] * 100ULL / s_idle_peak;
       if (pct_idle > 100) pct_idle = 100;
       s_cpu_pct[i] = (uint8_t)(100u - (uint32_t)pct_idle);
     }

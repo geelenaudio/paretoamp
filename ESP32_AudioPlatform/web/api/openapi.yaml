@@ -515,11 +515,15 @@ components:
 
     EqBand:
       type: object
+      description: |
+        One peaking-EQ band. Note the frequency field is `freq` (not
+        `freq_hz`) — firmware emits it that way and the SPA consumes it
+        verbatim. Always use `freq` on both request bodies and responses.
       required: [freq, gain_db, q]
       properties:
-        freq:    { type: number, minimum: 20,  maximum: 20000, description: "Hz" }
-        gain_db: { type: number, minimum: -18, maximum: 18 }
-        q:       { type: number, minimum: 0.1, maximum: 10.0 }
+        freq:    { type: number, minimum: 20,  maximum: 20000, description: "Centre frequency in Hz" }
+        gain_db: { type: number, minimum: -18, maximum: 18, description: "Peak/dip in dB" }
+        q:       { type: number, minimum: 0.1, maximum: 10.0, description: "Quality factor (higher = narrower band)" }
 
     EqCurve:
       type: object

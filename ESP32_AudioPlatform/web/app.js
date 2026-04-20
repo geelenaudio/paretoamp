@@ -50,18 +50,53 @@ function Toasts() {
   )}</div>`;
 }
 
+// Header theme toggle. Source of truth lives on `<html data-theme>` (set by the
+// pre-paint script in index.html). Click flips it, persists to localStorage so
+// the choice survives reloads, and re-renders the button's own icon.
+function ThemeToggle() {
+  const [theme, setThemeState] = useState(
+    () => document.documentElement.dataset.theme || "dark",
+  );
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem("ga-theme", theme); } catch { /* ignore */ }
+  }, [theme]);
+  const next = theme === "dark" ? "light" : "dark";
+  const icon = theme === "dark" ? "☀" : "☾";
+  const title = `Switch to ${next} theme`;
+  return html`<button
+    type="button"
+    class="icon-btn"
+    title=${title}
+    aria-label=${title}
+    onClick=${() => setThemeState(next)}>
+    <span aria-hidden="true">${icon}</span>
+  </button>`;
+}
+
+// Render nav items as real <a href> anchors so the native affordances
+// (tooltip on hover, right-click → "Open in new tab", cmd/ctrl-click,
+// screen-reader semantics) all keep working. Plain left-clicks without
+// modifiers are intercepted and routed client-side via pushState; we
+// only swallow the default when we're sure we're handling it ourselves.
 function Nav({ active }) {
+  function onNavClick(ev, path) {
+    if (ev.defaultPrevented) return;
+    if (ev.button !== 0) return;
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    ev.preventDefault();
+    navigate(path);
+  }
   return html`<nav class="shell__nav">
     ${ROUTES.map(
-      (r) => html`<div
+      (r) => html`<a
         key=${r.path}
+        href=${r.path}
         class=${"nav-item" + (active === r.path ? " nav-item--active" : "")}
-        onClick=${() => navigate(r.path)}
-        role="link"
-        tabindex="0">
+        onClick=${(e) => onNavClick(e, r.path)}>
         <span class="nav-item__icon">${r.icon}</span>
         <span class="nav-item__label">${r.label}</span>
-      </div>`,
+      </a>`,
     )}
   </nav>`;
 }
@@ -110,7 +145,10 @@ function App() {
       </div>
       <header class="shell__header">
         <div class="shell__header-title">${pageTitle(route)}</div>
-        <div class="shell__header-meta" id="hdr-meta"></div>
+        <div class="shell__header-actions">
+          <div class="shell__header-meta" id="hdr-meta"></div>
+          <${ThemeToggle} />
+        </div>
       </header>
       <${Nav} active=${route} />
       <main class="shell__main">${body}</main>
