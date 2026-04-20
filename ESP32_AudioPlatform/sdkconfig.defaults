@@ -97,3 +97,11 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 # Keep TCP_MSS at the wire default (1440 at 1500-byte MTU) so we don't
 # re-fragment; no override here.
 
+# LwIP socket budget. The HTTP server reserves 3 sockets for internal use
+# and caps `max_open_sockets` at LWIP_MAX_SOCKETS - 3. With the default
+# of 10 that's 7, which is too tight once the SPA opens its long-lived
+# SSE logs connection + the browser's 6 parallel asset fetches. Bumping
+# to 16 (the LwIP max) gives httpd a cap of 13 — plenty of headroom for
+# concurrent page loads without starving HTTP when the SSE is attached.
+CONFIG_LWIP_MAX_SOCKETS=16
+

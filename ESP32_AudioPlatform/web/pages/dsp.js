@@ -30,12 +30,19 @@ const LAYERS = [
   { id: "calibration", label: "Calibration", blurb: "Corrects the room + speaker response. Normally set once and left alone." },
   { id: "preference",  label: "Preference",  blurb: "Your taste: bass boost, presence, whatever. Swap with presets." },
 ];
+const LAYER_COLOR = { calibration: "var(--eq-cal)", preference: "var(--eq-pref)" };
 const PLOT_W = 860;
 const PLOT_H = 280;
 const DB_RANGE = 20;            // ±20 dB window, same as ±18 band limit with headroom
 
+// Freq sliders use a 0..1000 "position" axis mapped through a log transform so
+// the thumb resolution is uniform across 20 Hz..20 kHz (stepping one position
+// unit near 20 Hz is ~0.09 Hz, near 20 kHz ~90 Hz — useful both ends).
+const FREQ_POS_MAX = 1000;
+
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function logn(x) { return Math.log(x); }
+function pct(v, lo, hi) { return clamp(((v - lo) / (hi - lo)) * 100, 0, 100); }
 
 function freqToX(f, w) {
   const t = (logn(f) - logn(MIN_FREQ)) / (logn(MAX_FREQ) - logn(MIN_FREQ));
@@ -48,10 +55,17 @@ function xToFreq(x, w) {
 function gainToY(g, h) { return h / 2 - (g / DB_RANGE) * (h / 2); }
 function yToGain(y, h) { return -((y - h / 2) / (h / 2)) * DB_RANGE; }
 
+function freqToPos(f) { return Math.round(freqToX(clamp(f, MIN_FREQ, MAX_FREQ), FREQ_POS_MAX)); }
+function posToFreq(p) { return Math.round(xToFreq(clamp(p, 0, FREQ_POS_MAX), FREQ_POS_MAX)); }
+function formatHz(f) {
+  if (f >= 1000) return (f / 1000).toFixed(f >= 10000 ? 0 : 2).replace(/\.?0+$/, "") + " kHz";
+  return Math.round(f) + " Hz";
+}
+
 // Peaking-EQ coefficients (RBJ). Identical to firmware.
-function bandCoeffs({ freq_hz, gain_db, q }) {
+function bandCoeffs({ freq, gain_db, q }) {
   const A = Math.pow(10, gain_db / 40);
-  const w0 = 2 * Math.PI * freq_hz / SR;
+  const w0 = 2 * Math.PI * freq / SR;
   const cw = Math.cos(w0), sw = Math.sin(w0);
   const alpha = sw / (2 * q);
   const a0 = 1 + alpha / A;
@@ -136,7 +150,7 @@ function EqPlot({ layers, activeLayer, onDrag, onDragEnd }) {
     const { x, y } = eventToSvg(e);
     const f = clamp(Math.round(xToFreq(x, PLOT_W)), MIN_FREQ, MAX_FREQ);
     const g = clamp(+yToGain(y, PLOT_H).toFixed(2), MIN_GAIN, MAX_GAIN);
-    onDrag(dragBand.current, { freq_hz: f, gain_db: g });
+    onDrag(dragBand.current, { freq: f, gain_db: g });
   }
   function onPointerUp(e) {
     if (dragBand.current == null) return;
@@ -171,21 +185,21 @@ function EqPlot({ layers, activeLayer, onDrag, onDragEnd }) {
               fill="var(--fg-2)" font-size="10" font-family="var(--font-mono)">${TICK_LABELS[f]}</text>
       `)}
 
-      <path d=${paths.calibration} fill="none" stroke="#e6b566" stroke-width="1.3" opacity="0.55" />
-      <path d=${paths.preference}  fill="none" stroke="#9d7cff" stroke-width="1.3" opacity="0.55" />
-      <path d=${combined}          fill="none" stroke="var(--accent)" stroke-width="2.2" />
+      <path d=${paths.calibration} fill="none" stroke="var(--eq-cal)"  stroke-width="1.3" opacity="0.55" />
+      <path d=${paths.preference}  fill="none" stroke="var(--eq-pref)" stroke-width="1.3" opacity="0.55" />
+      <path d=${combined}          fill="none" stroke="var(--accent)"  stroke-width="2.2" />
 
       ${active.bands.map((b, i) => {
-        const cx = freqToX(b.freq_hz, PLOT_W);
+        const cx = freqToX(b.freq, PLOT_W);
         const cy = gainToY(clamp(b.gain_db, -DB_RANGE, DB_RANGE), PLOT_H);
-        const col = activeLayer === "calibration" ? "#e6b566" : "#9d7cff";
+        const col = LAYER_COLOR[activeLayer];
         return html`
           <circle key=${i}
                   cx=${cx} cy=${cy} r="9"
-                  fill=${col} stroke="#0b0d10" stroke-width="2"
+                  fill=${col} stroke="var(--bg-1)" stroke-width="2"
                   style="cursor: grab; touch-action: none;"
                   onPointerDown=${(e) => onPointerDown(i, e)}>
-            <title>Band ${i + 1}: ${b.freq_hz.toFixed(0)} Hz, ${b.gain_db.toFixed(1)} dB, Q ${b.q.toFixed(2)}</title>
+            <title>Band ${i + 1}: ${formatHz(b.freq)}, ${b.gain_db.toFixed(1)} dB, Q ${b.q.toFixed(2)}</title>
           </circle>
         `;
       })}
@@ -193,31 +207,73 @@ function EqPlot({ layers, activeLayer, onDrag, onDragEnd }) {
   `;
 }
 
-function BandRow({ band, idx, onChange }) {
+// One band: three sliders (log-scaled Hz, linear dB, linear Q) + a value chip
+// and a -/+ nudge pair for fine edits. Sliders fire onInput at ~60 Hz so the
+// parent debounces via scheduleCommit(); nudges fire onClick (single commit).
+function BandRow({ band, idx, onChange, layerColor }) {
+  const freqPos = freqToPos(band.freq);
+  const freqPct = (freqPos / FREQ_POS_MAX) * 100;
+  const gainPct = pct(band.gain_db, MIN_GAIN, MAX_GAIN);
+  const qPct    = pct(band.q,       MIN_Q,    MAX_Q);
+
+  const nudgeFreq = (dir) => {
+    // Nudge by one log-position step (~0.1 % of the axis).
+    const step = Math.max(1, Math.round(FREQ_POS_MAX * 0.005));
+    onChange({ freq: posToFreq(clamp(freqPos + dir * step, 0, FREQ_POS_MAX)) });
+  };
+  const nudgeGain = (dir) => onChange({ gain_db: clamp(+(band.gain_db + dir * 0.5).toFixed(1), MIN_GAIN, MAX_GAIN) });
+  const nudgeQ    = (dir) => onChange({ q:       clamp(+(band.q       + dir * 0.1).toFixed(2), MIN_Q,    MAX_Q) });
+
   return html`
     <div class="eq-band">
-      <div class="eq-band__idx">${idx + 1}</div>
-      <label class="eq-band__field">
-        <span>Freq Hz</span>
-        <input class="input" type="number"
-               min=${MIN_FREQ} max=${MAX_FREQ} step="1"
-               value=${band.freq_hz.toFixed(0)}
-               onChange=${(e) => onChange({ freq_hz: clamp(parseFloat(e.target.value) || MIN_FREQ, MIN_FREQ, MAX_FREQ) })} />
-      </label>
-      <label class="eq-band__field">
-        <span>Gain dB</span>
-        <input class="input" type="number" step="0.5"
-               min=${MIN_GAIN} max=${MAX_GAIN}
-               value=${band.gain_db.toFixed(1)}
-               onChange=${(e) => onChange({ gain_db: clamp(parseFloat(e.target.value) || 0, MIN_GAIN, MAX_GAIN) })} />
-      </label>
-      <label class="eq-band__field">
-        <span>Q</span>
-        <input class="input" type="number" step="0.1"
-               min=${MIN_Q} max=${MAX_Q}
-               value=${band.q.toFixed(2)}
-               onChange=${(e) => onChange({ q: clamp(parseFloat(e.target.value) || 1, MIN_Q, MAX_Q) })} />
-      </label>
+      <div class="eq-band__head">
+        <span class="eq-band__idx">
+          <span style=${`color:${layerColor}`}>●</span> Band ${idx + 1}
+        </span>
+        <span>${formatHz(band.freq)} · ${band.gain_db >= 0 ? "+" : ""}${band.gain_db.toFixed(1)} dB · Q ${band.q.toFixed(2)}</span>
+      </div>
+
+      <div class="eq-band__row">
+        <label for=${`b${idx}-f`}>Freq</label>
+        <input id=${`b${idx}-f`} class="slider" type="range"
+               min="0" max=${FREQ_POS_MAX} step="1"
+               value=${freqPos}
+               style=${`--fill:${freqPct}`}
+               onInput=${(e) => onChange({ freq: posToFreq(parseInt(e.target.value, 10)) })} />
+        <span class="chip">${formatHz(band.freq)}</span>
+        <span class="eq-band__nudge">
+          <button type="button" class="btn" onClick=${() => nudgeFreq(-1)} aria-label="Lower freq">−</button>
+          <button type="button" class="btn" onClick=${() => nudgeFreq(+1)} aria-label="Raise freq">+</button>
+        </span>
+      </div>
+
+      <div class="eq-band__row">
+        <label for=${`b${idx}-g`}>Gain</label>
+        <input id=${`b${idx}-g`} class="slider" type="range"
+               min=${MIN_GAIN} max=${MAX_GAIN} step="0.1"
+               value=${band.gain_db}
+               style=${`--fill:${gainPct}`}
+               onInput=${(e) => onChange({ gain_db: clamp(parseFloat(e.target.value), MIN_GAIN, MAX_GAIN) })} />
+        <span class="chip">${band.gain_db >= 0 ? "+" : ""}${band.gain_db.toFixed(1)} dB</span>
+        <span class="eq-band__nudge">
+          <button type="button" class="btn" onClick=${() => nudgeGain(-1)} aria-label="Lower gain">−</button>
+          <button type="button" class="btn" onClick=${() => nudgeGain(+1)} aria-label="Raise gain">+</button>
+        </span>
+      </div>
+
+      <div class="eq-band__row">
+        <label for=${`b${idx}-q`}>Q</label>
+        <input id=${`b${idx}-q`} class="slider" type="range"
+               min=${MIN_Q} max=${MAX_Q} step="0.05"
+               value=${band.q}
+               style=${`--fill:${qPct}`}
+               onInput=${(e) => onChange({ q: clamp(parseFloat(e.target.value), MIN_Q, MAX_Q) })} />
+        <span class="chip">${band.q.toFixed(2)}</span>
+        <span class="eq-band__nudge">
+          <button type="button" class="btn" onClick=${() => nudgeQ(-1)} aria-label="Lower Q">−</button>
+          <button type="button" class="btn" onClick=${() => nudgeQ(+1)} aria-label="Raise Q">+</button>
+        </span>
+      </div>
     </div>
   `;
 }
@@ -380,7 +436,7 @@ export default function Dsp({ api, toast }) {
       </div>
     </div>
 
-    <div class="card">
+    <div class=${"card" + (layers[active].enabled ? "" : " card--muted")}>
       <div style="display:flex; justify-content:space-between; align-items:center; gap: var(--sp-4)">
         <div>
           <div class="card__title">${LAYERS.find((l) => l.id === active).label} layer</div>
@@ -398,9 +454,20 @@ export default function Dsp({ api, toast }) {
           </span>
         </label>
       </div>
+
+      ${layers[active].enabled ? "" : html`
+        <div class="banner banner--warn" style="margin-top: var(--sp-3)">
+          <strong>Layer is off.</strong>
+          Band edits below are being saved, but they will not affect the
+          audio until you flip the <em>Enabled</em> switch above.
+          <button class="btn btn--primary" style="margin-left: var(--sp-3)"
+                  onClick=${() => toggleLayer(active)}>Enable now</button>
+        </div>`}
+
       <div class="eq-bands">
         ${layers[active].bands.map((b, i) =>
           html`<${BandRow} key=${i} band=${b} idx=${i}
+                           layerColor=${LAYER_COLOR[active]}
                            onChange=${(p) => patchBand(i, p)} />`)}
       </div>
     </div>
@@ -429,13 +496,15 @@ export default function Dsp({ api, toast }) {
 
       ${headroom.mode === "manual" ? html`
         <div class="field">
-          <label class="field__label" for="hr-manual">
-            Manual cap (${Number(headroom.manual_db).toFixed(1)} dB)
-          </label>
-          <input id="hr-manual" class="slider" type="range"
-                 min="-24" max="0" step="0.5"
-                 value=${headroom.manual_db}
-                 onChange=${(e) => setManualDb(parseFloat(e.target.value))} />
+          <label class="field__label" for="hr-manual">Manual cap</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="hr-manual" class="slider" type="range"
+                   min="-24" max="0" step="0.5"
+                   value=${headroom.manual_db}
+                   style=${`--fill:${pct(headroom.manual_db, -24, 0)}`}
+                   onChange=${(e) => setManualDb(parseFloat(e.target.value))} />
+            <span class="chip">${Number(headroom.manual_db).toFixed(1)} dB</span>
+          </div>
         </div>` : ""}
     </div>
 

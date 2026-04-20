@@ -32,6 +32,14 @@ vprintf_like_t  g_prev_vprintf = nullptr;
 // connect. So this is purely informational.
 std::atomic<bool> g_subscriber_active{false};
 
+// Monotonic epoch: incremented on every new subscriber. The streaming
+// task compares this against the epoch it was launched under on every
+// loop iteration; if it drifts, the task exits so the new subscriber
+// can take over. This gives "last-writer-wins" semantics — a stale
+// browser tab keeping a dead socket open can't block a fresh reload
+// from re-subscribing.
+std::atomic<uint32_t> g_subscriber_epoch{0};
+
 // Hook invoked by ESP_LOGx. Runs in whatever task emitted the log.
 int log_vprintf_hook(const char* fmt, va_list ap) {
   // va_list is single-use, copy once for the side channel.
@@ -102,27 +110,44 @@ size_t json_escape(const char* src, size_t n, char* out, size_t cap) {
   return o;
 }
 
-esp_err_t handle_logs_stream(httpd_req_t* req) {
-  if (g_subscriber_active.exchange(true)) {
-    httpd_resp_set_status(req, "429 Too Many Requests");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "another subscriber already attached");
-    return ESP_OK;
-  }
+// Argument passed by handle_logs_stream to sse_stream_task. We can't stuff
+// both the detached req and the epoch into the single `void*` task arg,
+// so pack them in a small heap-allocated struct that the task `delete`s
+// before exiting.
+struct SseTaskArgs {
+  httpd_req_t* req;
+  uint32_t epoch;
+};
 
-  httpd_resp_set_type(req, "text/event-stream");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  httpd_resp_set_hdr(req, "Connection", "keep-alive");
-  httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
-
-  // Kick with a comment so the browser opens the stream immediately.
-  sse_send(req, ": connected\n\n", 13);
+// The streaming loop. Runs on its own task (see handle_logs_stream), NOT on
+// the httpd worker, so a long-lived SSE connection can't starve other HTTP
+// requests. `req` here is a *detached* copy produced by
+// httpd_req_async_handler_begin(); we must hand it back via
+// httpd_req_async_handler_complete() before returning so the httpd cleans
+// up the socket slot.
+void sse_stream_task(void* arg) {
+  SseTaskArgs* args = (SseTaskArgs*)arg;
+  httpd_req_t* req = args->req;
+  const uint32_t my_epoch = args->epoch;
+  delete args;
 
   char frame[kMaxLine + 80];
   char escaped[kMaxLine * 2];
   TickType_t heartbeat_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
 
+  // Kick with a comment so the browser fires onopen immediately.
+  if (!sse_send(req, ": connected\n\n", 13)) {
+    goto done;
+  }
+
   while (true) {
+    // Bail fast if a newer subscriber took over. This is how "last-writer-
+    // wins" is actually enforced: the new connection bumped the epoch, so
+    // we spot it here and exit within at most one ring-receive window (~1 s).
+    if (g_subscriber_epoch.load(std::memory_order_relaxed) != my_epoch) {
+      break;
+    }
+
     size_t item_size = 0;
     char* item = (char*)xRingbufferReceive(
         g_ring, &item_size, pdMS_TO_TICKS(1000));
@@ -140,14 +165,81 @@ esp_err_t handle_logs_stream(httpd_req_t* req) {
       continue;
     }
 
-    // No data — keep the connection alive with an SSE comment.
+    // No data in the last second — keep the connection alive with an SSE
+    // comment. If the write fails, the peer disconnected and we exit.
     if ((int32_t)(xTaskGetTickCount() - heartbeat_deadline) >= 0) {
       if (!sse_send(req, ": ping\n\n", 8)) break;
       heartbeat_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
     }
   }
 
-  g_subscriber_active.store(false);
+done:
+  // Only clear the "active" latch if we're still the current subscriber.
+  // Otherwise the new task that just took over is the rightful owner and
+  // has already set it to true for itself; we'd be clobbering it.
+  if (g_subscriber_epoch.load(std::memory_order_relaxed) == my_epoch) {
+    g_subscriber_active.store(false);
+  }
+  // Tell the httpd we're done with this detached request so the socket
+  // can be freed and the async slot reused.
+  httpd_req_async_handler_complete(req);
+  vTaskDelete(nullptr);
+}
+
+esp_err_t handle_logs_stream(httpd_req_t* req) {
+  // "Last-writer-wins": bump the epoch unconditionally. If a previous
+  // streaming task is still alive, its next loop iteration will see the
+  // drift and exit within ~1 s. Meanwhile we lay claim by setting the
+  // active latch — fresh tasks spawned inside that 1 s overlap window
+  // simply share the ring briefly (the old task stops reading once it
+  // notices the epoch change), which is better than rejecting the client.
+  const uint32_t my_epoch = g_subscriber_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+  g_subscriber_active.store(true, std::memory_order_relaxed);
+
+  httpd_resp_set_type(req, "text/event-stream");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(req, "Connection", "keep-alive");
+  httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
+
+  // Detach the socket from the httpd worker so the worker can return and
+  // continue serving other requests. `detached` is a deep-copy of `req`
+  // that stays valid across tasks; the worker's own `req` becomes invalid
+  // as soon as we return ESP_OK here.
+  httpd_req_t* detached = nullptr;
+  esp_err_t rc = httpd_req_async_handler_begin(req, &detached);
+  if (rc != ESP_OK || !detached) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "async begin failed");
+  }
+
+  // Heap-allocate the task args so both the req and epoch survive the
+  // handoff through the single `void*` task parameter. The task `delete`s
+  // it on entry.
+  auto* args = new (std::nothrow) SseTaskArgs{detached, my_epoch};
+  if (!args) {
+    httpd_req_async_handler_complete(detached);
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "sse args oom");
+  }
+
+  // Spawn a pinned task for the SSE loop. Core 0 is chosen because that's
+  // where httpd / lwip already live — keeping the socket traffic on one
+  // core avoids an unnecessary core-to-core context for every SSE write.
+  // Priority 4 is below audio (20) and above cpu-sampler (1) but below
+  // httpd's default worker (5), so the SSE task doesn't outrun the worker
+  // on requests that do matter.
+  BaseType_t ok = xTaskCreatePinnedToCore(
+      sse_stream_task, "sse-logs", 4096, args, /*prio*/ 4, nullptr,
+      /*core*/ 0);
+  if (ok != pdPASS) {
+    delete args;
+    httpd_req_async_handler_complete(detached);
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "sse task spawn failed");
+  }
+
+  // Returning here unblocks the httpd worker *immediately*; the stream is
+  // now owned by sse_stream_task.
   return ESP_OK;
 }
 

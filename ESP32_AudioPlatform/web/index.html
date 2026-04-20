@@ -6,6 +6,25 @@
   <meta name="theme-color" content="#0b0d10" />
   <title>Geelen Audio</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♪</text></svg>" />
+  <!--
+    Theme bootstrap. Runs before app.css is parsed so the first paint is
+    already the correct palette (no flash of dark-on-light or vice versa).
+    Order: explicit localStorage choice -> OS preference -> dark default.
+  -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("ga-theme");
+        var sys = window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: light)").matches
+          ? "light" : "dark";
+        var theme = (saved === "light" || saved === "dark") ? saved : sys;
+        document.documentElement.dataset.theme = theme;
+      } catch (e) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
