@@ -2,10 +2,8 @@
 // network MACs, filesystem info and links to the embedded API docs and
 // project source.
 //
-// All dynamic data comes from `/api/system` (same endpoint the Overview
-// page polls), so there's no second fetch path to maintain. The page
-// fetches once on mount — the About page isn't something you stare at
-// for updates.
+// Identity comes from `/api/system/identity`; heap/PSRAM from
+// `/api/system/metrics` (same split as Overview polling).
 
 import { html, useEffect, useState } from "/vendor/htm-preact.mjs";
 
@@ -30,7 +28,9 @@ export default function About({ api }) {
   const [err, setErr] = useState(null);
 
   useEffect(() => {
-    api.getSystem().then(setSys, (e) => setErr(String(e)));
+    Promise.all([api.getSystemIdentity(), api.getSystemMetrics()])
+      .then(([id, m]) => setSys({ ...id, ...m }))
+      .catch((e) => setErr(String(e)));
   }, []);
 
   if (err) return html`<div class="stub">Failed to load system info: ${err}</div>`;

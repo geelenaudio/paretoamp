@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "eq_types.h"
+
 #include <cstdint>
 #include <cstddef>
 
@@ -58,19 +60,14 @@ enum class AudioSource : uint8_t {
   Bluetooth = 0,
   Network = 1,   // Snapclient
   Dlna = 2,      // Phase 9: native DLNA renderer
+  TestTone = 3,  // Built-in sine / test signal (reboot to enter/exit)
 };
 
 enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };
 enum class StereoMode : uint8_t { Stereo = 0, Mono = 1 };
 
-// Single biquad band in {freq, gain, Q} form. 12 bytes each. 10 of these per
-// curve, 2 curves per device, so total EQ state is 240 bytes — well within
-// the 4 KiB NVS entry budget.
-struct ParametricBand {
-  float freq_hz;
-  float gain_db;
-  float q;
-};
+/** Wire format matches `geelen::EqBand` (16 bytes). */
+using ParametricBand = geelen::EqBand;
 
 struct Config {
   // Legacy scalars — kept as compatibility for older callers (Snap
@@ -90,8 +87,10 @@ struct Config {
   bool ch_r_on;
 
   ParametricBand eq_cal[PARAMETRIC_BANDS];
+  uint8_t eq_cal_active_bands;
   bool eq_cal_on;
   ParametricBand eq_pref[PARAMETRIC_BANDS];
+  uint8_t eq_pref_active_bands;
   bool eq_pref_on;
   uint8_t eq_pref_slot;               // 0..9 or 0xFF ("unsaved / modified")
 
@@ -100,6 +99,7 @@ struct Config {
 
   char dev_name[DEV_NAME_MAX];
   bool dlna_on;
+  bool voice_feedback;  // spoken SPIFFS prompts (mode / Wi‑Fi / BT)
 };
 
 class ConfigManager {
@@ -136,11 +136,15 @@ class ConfigManager {
   // `curve[out]` receives a copy of the 10-band curve.
   void getEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) const;
   void setEqCalibration(const ParametricBand bands[PARAMETRIC_BANDS]);
+  uint8_t getEqCalibrationActiveBands() const { return config_.eq_cal_active_bands; }
+  void setEqCalibrationActiveBands(uint8_t n);
   bool getEqCalibrationEnabled() const { return config_.eq_cal_on; }
   void setEqCalibrationEnabled(bool on);
 
   void getEqPreference(ParametricBand out[PARAMETRIC_BANDS]) const;
   void setEqPreference(const ParametricBand bands[PARAMETRIC_BANDS]);
+  uint8_t getEqPreferenceActiveBands() const { return config_.eq_pref_active_bands; }
+  void setEqPreferenceActiveBands(uint8_t n);
   bool getEqPreferenceEnabled() const { return config_.eq_pref_on; }
   void setEqPreferenceEnabled(bool on);
   uint8_t getEqPreferenceSlot() const { return config_.eq_pref_slot; }
@@ -170,6 +174,30 @@ class ConfigManager {
   bool getDlnaEnabled() const { return config_.dlna_on; }
   void setDlnaEnabled(bool on);
 
+  bool getVoiceFeedbackEnabled() const { return config_.voice_feedback; }
+  void setVoiceFeedbackEnabled(bool on);
+
+  // ---- Test tone (NVS when in TestTone mode; live via /api/test-tone) ----
+  float getTestToneFreqHz() const { return tt_freq_hz_; }
+  float getTestToneAmpDb() const { return tt_amp_db_; }
+  float getTestTonePan() const { return tt_pan_; }
+  uint8_t getTestToneMode() const { return tt_mode_; }
+  float getTestToneSweepS() const { return tt_sweep_s_; }
+  float getTestToneSweepLoHz() const { return tt_sweep_lo_hz_; }
+  float getTestToneSweepHiHz() const { return tt_sweep_hi_hz_; }
+  float getTestToneDualF2Hz() const { return tt_dual_f2_hz_; }
+  void setTestToneParams(float freq_hz, float amp_db, float pan, uint8_t mode, float sweep_s,
+                         float sweep_lo_hz, float sweep_hi_hz, float dual_f2_hz);
+
+  // ---- ETag / debounced NVS ---------------------------------------------
+  uint32_t stateVersion() const { return state_version_; }
+  void markDirtyEq();
+  void markDirtyAudio();
+  void markDirtyNet();
+  void markDirtyTestTone();
+  /** Marks all NVS domains dirty (factory reset, migration). */
+  void markDirtyAll();
+
   // ---- Reset scopes (Phase 6) ------------------------------------------
   bool save();
   void factoryReset();
@@ -190,7 +218,6 @@ class ConfigManager {
  private:
   void loadDefaults();
   bool load();
-  void markDirty(unsigned long now_ms);
   void ensurePresetsDir();
   static void loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS]);
   static void loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]);
@@ -199,11 +226,24 @@ class ConfigManager {
   bool initialized_{false};
   bool dirty_{false};
   unsigned long last_change_ms_{0};
+  uint8_t dirty_domains_{0};
+  uint32_t state_version_{1};
+  float tt_freq_hz_{440.f};
+  float tt_amp_db_{-12.f};
+  float tt_pan_{0.f};
+  uint8_t tt_mode_{0};
+  float tt_sweep_s_{10.f};
+  float tt_sweep_lo_hz_{20.f};
+  float tt_sweep_hi_hz_{20000.f};
+  float tt_dual_f2_hz_{19000.f};
   AudioSource audio_source_{AudioSource::Bluetooth};
   char snapcast_host_[SNAPCAST_HOST_MAX]{};
   uint16_t snapcast_port_{SNAPCAST_PORT_DEFAULT};
   char wifi_ssid_[WIFI_SSID_MAX]{};
   char wifi_pass_[WIFI_PASS_MAX]{};
 };
+
+/** Background NVS writer; call once after ConfigManager::begin(). */
+void configStartDebouncedSaveTask(ConfigManager* cfg);
 
 }  // namespace geelen_idf

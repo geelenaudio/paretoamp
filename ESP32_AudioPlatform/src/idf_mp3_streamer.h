@@ -43,9 +43,12 @@ class Streamer {
   void setEngine(geelen::AudioEngine* engine);
 
   // Kick off playback of `url`. Spawns the fetch/decode task on first
-  // call; subsequent calls swap the URL atomically. Returns false if the
-  // URL is obviously malformed (e.g. not http://).
+  // call; subsequent calls swap the URL atomically. `url` must be
+  // `http://...` or an absolute VFS path (`/spiffs/...`).
   bool play(const char* url);
+
+  /** SPIFFS / local file (path must start with `/`). */
+  bool playFile(const char* path);
 
   // Pause/resume. Pause closes the socket but keeps `url_` so resume
   // can reopen at the cached byte offset via a Range: header. Not all
@@ -58,6 +61,8 @@ class Streamer {
   void stop();
 
   bool isPlaying() const;
+  /** True while a queued or active SPIFFS MP3 (`/…`) owns the voice path — A2DP must not feed the ring. */
+  bool isPlayingLocalFile() const;
   uint32_t positionMs() const;
   uint32_t durationMs() const;
   void setDurationMs(uint32_t ms);

@@ -3,6 +3,9 @@
 #include "idf_config_manager.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -43,10 +46,30 @@ static const char* NVS_KEY_EQ_CAL_ON     = "eq_cal_on";
 static const char* NVS_KEY_EQ_PREF       = "eq_pref";
 static const char* NVS_KEY_EQ_PREF_ON    = "eq_pref_on";
 static const char* NVS_KEY_EQ_PREF_SLOT  = "eq_pref_sl";
+static const char* NVS_KEY_EQ_CAL_NB     = "eq_cal_nb";
+static const char* NVS_KEY_EQ_PREF_NB    = "eq_pref_nb";
 static const char* NVS_KEY_EQ_HR_MODE    = "eq_hr_mode";
 static const char* NVS_KEY_EQ_HR_MANUAL  = "eq_hr_man";
 static const char* NVS_KEY_DEV_NAME      = "dev_name";
 static const char* NVS_KEY_DLNA_ON       = "dlna_on";
+static const char* NVS_KEY_VOICE_FB     = "voice_fb";
+static const char* NVS_KEY_TT_FREQ     = "tt_freq";
+static const char* NVS_KEY_TT_AMP      = "tt_amp";
+static const char* NVS_KEY_TT_PAN      = "tt_pan";
+static const char* NVS_KEY_TT_MODE      = "tt_mode";
+static const char* NVS_KEY_TT_SWEEP    = "tt_sweep";
+static const char* NVS_KEY_TT_SWP_LO   = "tt_swp_lo";
+static const char* NVS_KEY_TT_SWP_HI   = "tt_swp_hi";
+static const char* NVS_KEY_TT_DF2      = "tt_df2";
+
+namespace {
+constexpr uint8_t D_EQ = 1;
+constexpr uint8_t D_AUDIO = 2;
+constexpr uint8_t D_NET = 4;
+constexpr uint8_t D_TESTTONE = 8;
+
+static unsigned long cfgWallMs() { return (unsigned long)(esp_timer_get_time() / 1000ULL); }
+}  // namespace
 
 static const char* MOUNT_POINT = "/spiffs";
 static const char* PRESETS_DIR = "/spiffs/presets";
@@ -93,15 +116,38 @@ ConfigManager::ConfigManager() {
 
 void ConfigManager::loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) {
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
-    out[i] = { kLegacyIsoCentres[i], 0.0f, 1.2f };
+    out[i].freq_hz = kLegacyIsoCentres[i];
+    out[i].gain_db = 0.f;
+    out[i].q = 1.2f;
+    out[i].type = geelen::EqFilterType::Bell;
+    out[i].slope_db_oct = 12;
+    out[i]._pad[0] = out[i]._pad[1] = 0;
   }
 }
 
 void ConfigManager::loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]) {
-  // Same shape as calibration but explicitly flat — the user builds this up
-  // in the DSP page; the default is "do nothing".
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
-    out[i] = { kLegacyIsoCentres[i], 0.0f, 1.2f };
+    out[i].freq_hz = kLegacyIsoCentres[i];
+    out[i].gain_db = 0.f;
+    out[i].q = 1.2f;
+    out[i].type = geelen::EqFilterType::Bell;
+    out[i].slope_db_oct = 12;
+    out[i]._pad[0] = out[i]._pad[1] = 0;
+  }
+}
+
+static void migrateLegacy12ByteEqBlob(const uint8_t* src, ParametricBand out[PARAMETRIC_BANDS]) {
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
+    float f, g, q;
+    memcpy(&f, src + i * 12, sizeof(float));
+    memcpy(&g, src + i * 12 + 4, sizeof(float));
+    memcpy(&q, src + i * 12 + 8, sizeof(float));
+    out[i].freq_hz = f;
+    out[i].gain_db = g;
+    out[i].q = q;
+    out[i].type = geelen::EqFilterType::Bell;
+    out[i].slope_db_oct = 12;
+    out[i]._pad[0] = out[i]._pad[1] = 0;
   }
 }
 
@@ -117,8 +163,10 @@ void ConfigManager::loadDefaults() {
   config_.preset_id = 0;
   for (size_t i = 0; i < EQ_BANDS; i++) config_.eq_gains[i] = FIXED_PRESET_EQ[0][i];
   loadDefaultEqCalibration(config_.eq_cal);
+  config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_cal_on = false;
   loadDefaultEqPreference(config_.eq_pref);
+  config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_pref_on = false;
   config_.eq_pref_slot = 0xFF;  // "unsaved"
   config_.eq_hr_mode = HeadroomMode::Auto;
@@ -126,12 +174,21 @@ void ConfigManager::loadDefaults() {
   strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   config_.dlna_on = false;
+  config_.voice_feedback = true;
 
   audio_source_ = AudioSource::Bluetooth;
   snapcast_host_[0] = '\0';
   snapcast_port_ = SNAPCAST_PORT_DEFAULT;
   wifi_ssid_[0] = '\0';
   wifi_pass_[0] = '\0';
+  tt_freq_hz_ = 440.f;
+  tt_amp_db_ = -12.f;
+  tt_pan_ = 0.f;
+  tt_mode_ = 0;
+  tt_sweep_s_ = 10.f;
+  tt_sweep_lo_hz_ = 20.f;
+  tt_sweep_hi_hz_ = 20000.f;
+  tt_dual_f2_hz_ = 19000.f;
 }
 
 void ConfigManager::ensurePresetsDir() {
@@ -159,10 +216,13 @@ bool ConfigManager::begin() {
 
   loadDefaults();
   if (!load()) {
+    markDirtyAll();
     save();
   }
 
-  dirty_ = false;
+  if (dirty_) {
+    if (!save()) ESP_LOGW(TAG, "post-load NVS flush failed");
+  }
   last_change_ms_ = 0;
   initialized_ = true;
   return true;
@@ -211,32 +271,54 @@ bool ConfigManager::load() {
     nvs_get_blob(h, NVS_KEY_EQ_LEGACY, config_.eq_gains, &len) == ESP_OK &&
     len == EQ_BANDS * sizeof(int8_t);
 
-  // Parametric EQ curves.
-  len = sizeof(config_.eq_cal);
-  bool have_cal = nvs_get_blob(h, NVS_KEY_EQ_CAL, config_.eq_cal, &len) == ESP_OK &&
-                  len == sizeof(config_.eq_cal);
-  config_.eq_cal_on = nvsGetBool(h, NVS_KEY_EQ_CAL_ON, false);
-
-  if (!have_cal && legacy_eq_present) {
-    // One-time migration: lift the int8 gains into parametric form and
-    // enable the calibration layer so the user's old graphic-EQ curve
-    // carries forward without any manual step.
-    ESP_LOGW(TAG, "Migrating legacy graphic-EQ gains to parametric calibration");
-    loadDefaultEqCalibration(config_.eq_cal);
-    for (size_t i = 0; i < PARAMETRIC_BANDS; ++i)
-      config_.eq_cal[i].gain_db = (float)config_.eq_gains[i];
-    config_.eq_cal_on = true;
-    markDirty(0);
-  } else if (!have_cal) {
-    loadDefaultEqCalibration(config_.eq_cal);
+  // Parametric EQ curves (16 bytes × 10 = 160) or legacy 12 bytes × 10 = 120.
+  {
+    uint8_t eq_blob[256];
+    len = sizeof(eq_blob);
+    esp_err_t cal_err = nvs_get_blob(h, NVS_KEY_EQ_CAL, eq_blob, &len);
+    constexpr size_t kOldEq = PARAMETRIC_BANDS * 12u;
+    constexpr size_t kNewEq = sizeof(config_.eq_cal);
+    if (cal_err == ESP_OK && len == kNewEq) {
+      memcpy(config_.eq_cal, eq_blob, kNewEq);
+    } else if (cal_err == ESP_OK && len == kOldEq) {
+      migrateLegacy12ByteEqBlob(eq_blob, config_.eq_cal);
+    } else {
+      loadDefaultEqCalibration(config_.eq_cal);
+      if (legacy_eq_present) {
+        ESP_LOGW(TAG, "Migrating legacy graphic-EQ gains to parametric calibration");
+        for (size_t i = 0; i < PARAMETRIC_BANDS; ++i)
+          config_.eq_cal[i].gain_db = (float)config_.eq_gains[i];
+        config_.eq_cal_on = true;
+        config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
+        markDirtyEq();
+      }
+    }
   }
+  config_.eq_cal_on = nvsGetBool(h, NVS_KEY_EQ_CAL_ON, false);
+  if (nvs_get_u8(h, NVS_KEY_EQ_CAL_NB, &tmp8) != ESP_OK || tmp8 < 1 || tmp8 > (uint8_t)PARAMETRIC_BANDS)
+    config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
+  else
+    config_.eq_cal_active_bands = tmp8;
 
-  len = sizeof(config_.eq_pref);
-  if (nvs_get_blob(h, NVS_KEY_EQ_PREF, config_.eq_pref, &len) != ESP_OK ||
-      len != sizeof(config_.eq_pref)) {
-    loadDefaultEqPreference(config_.eq_pref);
+  {
+    uint8_t eq_blob[256];
+    len = sizeof(eq_blob);
+    esp_err_t pref_err = nvs_get_blob(h, NVS_KEY_EQ_PREF, eq_blob, &len);
+    constexpr size_t kOldEq = PARAMETRIC_BANDS * 12u;
+    constexpr size_t kNewEq = sizeof(config_.eq_pref);
+    if (pref_err == ESP_OK && len == kNewEq) {
+      memcpy(config_.eq_pref, eq_blob, kNewEq);
+    } else if (pref_err == ESP_OK && len == kOldEq) {
+      migrateLegacy12ByteEqBlob(eq_blob, config_.eq_pref);
+    } else {
+      loadDefaultEqPreference(config_.eq_pref);
+    }
   }
   config_.eq_pref_on = nvsGetBool(h, NVS_KEY_EQ_PREF_ON, false);
+  if (nvs_get_u8(h, NVS_KEY_EQ_PREF_NB, &tmp8) != ESP_OK || tmp8 < 1 || tmp8 > (uint8_t)PARAMETRIC_BANDS)
+    config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
+  else
+    config_.eq_pref_active_bands = tmp8;
   if (nvs_get_u8(h, NVS_KEY_EQ_PREF_SLOT, &tmp8) == ESP_OK) config_.eq_pref_slot = tmp8;
 
   if (nvs_get_u8(h, NVS_KEY_EQ_HR_MODE, &tmp8) == ESP_OK)
@@ -256,13 +338,12 @@ bool ConfigManager::load() {
   }
 
   config_.dlna_on = nvsGetBool(h, NVS_KEY_DLNA_ON, false);
+  config_.voice_feedback = nvsGetBool(h, NVS_KEY_VOICE_FB, true);
 
   uint8_t src = 0;
   bool source_needs_migration = false;
   if (nvs_get_u8(h, NVS_KEY_SOURCE, &src) == ESP_OK) {
-    if (src > (uint8_t)AudioSource::Dlna) {
-      // Pre-rescope firmware used src=2 for Spotify Connect; Dlna is now
-      // the canonical src=2, so only src >= 3 is a stale Spotify pointer.
+    if (src > (uint8_t)AudioSource::TestTone) {
       ESP_LOGW(TAG, "Migrating unknown audio source %u -> Bluetooth", (unsigned)src);
       audio_source_ = AudioSource::Bluetooth;
       source_needs_migration = true;
@@ -281,6 +362,26 @@ bool ConfigManager::load() {
   len = WIFI_PASS_MAX;
   if (nvs_get_str(h, NVS_KEY_WIFI_PASS, wifi_pass_, &len) != ESP_OK) wifi_pass_[0] = '\0';
 
+  {
+    float f = tt_freq_hz_;
+    size_t fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_FREQ, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= 20.f && f <= 20000.f) tt_freq_hz_ = f;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_AMP, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= -60.f && f <= 0.f) tt_amp_db_ = f;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_PAN, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= -1.f && f <= 1.f) tt_pan_ = f;
+    if (nvs_get_u8(h, NVS_KEY_TT_MODE, &tmp8) == ESP_OK && tmp8 <= 10u) tt_mode_ = tmp8;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_SWEEP, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= 1.f && f <= 60.f) tt_sweep_s_ = f;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_SWP_LO, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= 20.f && f <= 20000.f) tt_sweep_lo_hz_ = f;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_SWP_HI, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= 20.f && f <= 20000.f) tt_sweep_hi_hz_ = f;
+    fl = sizeof(f);
+    if (nvs_get_blob(h, NVS_KEY_TT_DF2, &f, &fl) == ESP_OK && fl == sizeof(f) && f >= 20.f && f <= 20000.f) tt_dual_f2_hz_ = f;
+    if (tt_sweep_hi_hz_ <= tt_sweep_lo_hz_) tt_sweep_hi_hz_ = tt_sweep_lo_hz_ + 100.f;
+  }
+
   nvs_close(h);
 
   if (source_needs_migration) {
@@ -290,7 +391,7 @@ bool ConfigManager::load() {
       (void)nvs_commit(wh);
       nvs_close(wh);
     }
-    markDirty(0);
+    markDirtyAll();
   }
 
   if (config_.volume > VOLUME_MAX) config_.volume = VOLUME_DEFAULT;
@@ -301,40 +402,66 @@ bool ConfigManager::load() {
 }
 
 bool ConfigManager::save() {
+  if (!dirty_) return true;
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
 
-  nvs_set_u8(h, NVS_KEY_VOLUME, config_.volume);
-  nvs_set_u8(h, NVS_KEY_PRESET, config_.preset_id);
-  nvs_set_blob(h, NVS_KEY_EQ_LEGACY, config_.eq_gains, EQ_BANDS * sizeof(int8_t));
-  nvs_set_u8(h, NVS_KEY_SOURCE, (uint8_t)audio_source_);
-  nvs_set_str(h, NVS_KEY_SNAP_HOST, snapcast_host_);
-  nvs_set_u16(h, NVS_KEY_SNAP_PORT, snapcast_port_);
-  nvs_set_str(h, NVS_KEY_WIFI_SSID, wifi_ssid_);
-  nvs_set_str(h, NVS_KEY_WIFI_PASS, wifi_pass_);
+  const uint8_t dm = dirty_domains_;
+  if (dm == 0) {
+    nvs_close(h);
+    dirty_ = false;
+    return true;
+  }
 
-  nvs_set_u8(h, NVS_KEY_VOL_L, config_.vol_l);
-  nvs_set_u8(h, NVS_KEY_VOL_R, config_.vol_r);
-  nvs_set_u8(h, NVS_KEY_MUTED, config_.muted ? 1 : 0);
-  nvs_set_u8(h, NVS_KEY_CH_MODE, config_.stereo_mode == StereoMode::Mono ? 1 : 0);
-  nvs_set_u8(h, NVS_KEY_CH_L_ON, config_.ch_l_on ? 1 : 0);
-  nvs_set_u8(h, NVS_KEY_CH_R_ON, config_.ch_r_on ? 1 : 0);
-
-  nvs_set_blob(h, NVS_KEY_EQ_CAL, config_.eq_cal, sizeof(config_.eq_cal));
-  nvs_set_u8(h, NVS_KEY_EQ_CAL_ON, config_.eq_cal_on ? 1 : 0);
-  nvs_set_blob(h, NVS_KEY_EQ_PREF, config_.eq_pref, sizeof(config_.eq_pref));
-  nvs_set_u8(h, NVS_KEY_EQ_PREF_ON, config_.eq_pref_on ? 1 : 0);
-  nvs_set_u8(h, NVS_KEY_EQ_PREF_SLOT, config_.eq_pref_slot);
-
-  nvs_set_u8(h, NVS_KEY_EQ_HR_MODE, config_.eq_hr_mode == HeadroomMode::Manual ? 1 : 0);
-  nvs_set_blob(h, NVS_KEY_EQ_HR_MANUAL, &config_.eq_hr_manual_db, sizeof(float));
-
-  nvs_set_str(h, NVS_KEY_DEV_NAME, config_.dev_name);
-  nvs_set_u8(h, NVS_KEY_DLNA_ON, config_.dlna_on ? 1 : 0);
+  if (dm & D_EQ) {
+    nvs_set_u8(h, NVS_KEY_PRESET, config_.preset_id);
+    nvs_set_blob(h, NVS_KEY_EQ_LEGACY, config_.eq_gains, EQ_BANDS * sizeof(int8_t));
+    nvs_set_blob(h, NVS_KEY_EQ_CAL, config_.eq_cal, sizeof(config_.eq_cal));
+    nvs_set_u8(h, NVS_KEY_EQ_CAL_ON, config_.eq_cal_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_EQ_CAL_NB, config_.eq_cal_active_bands);
+    nvs_set_blob(h, NVS_KEY_EQ_PREF, config_.eq_pref, sizeof(config_.eq_pref));
+    nvs_set_u8(h, NVS_KEY_EQ_PREF_ON, config_.eq_pref_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_EQ_PREF_NB, config_.eq_pref_active_bands);
+    nvs_set_u8(h, NVS_KEY_EQ_PREF_SLOT, config_.eq_pref_slot);
+    nvs_set_u8(h, NVS_KEY_EQ_HR_MODE, config_.eq_hr_mode == HeadroomMode::Manual ? 1 : 0);
+    nvs_set_blob(h, NVS_KEY_EQ_HR_MANUAL, &config_.eq_hr_manual_db, sizeof(float));
+  }
+  if (dm & D_AUDIO) {
+    nvs_set_u8(h, NVS_KEY_VOLUME, config_.volume);
+    nvs_set_u8(h, NVS_KEY_VOL_L, config_.vol_l);
+    nvs_set_u8(h, NVS_KEY_VOL_R, config_.vol_r);
+    nvs_set_u8(h, NVS_KEY_MUTED, config_.muted ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_CH_MODE, config_.stereo_mode == StereoMode::Mono ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_CH_L_ON, config_.ch_l_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_CH_R_ON, config_.ch_r_on ? 1 : 0);
+  }
+  if (dm & D_NET) {
+    nvs_set_u8(h, NVS_KEY_SOURCE, (uint8_t)audio_source_);
+    nvs_set_str(h, NVS_KEY_SNAP_HOST, snapcast_host_);
+    nvs_set_u16(h, NVS_KEY_SNAP_PORT, snapcast_port_);
+    nvs_set_str(h, NVS_KEY_WIFI_SSID, wifi_ssid_);
+    nvs_set_str(h, NVS_KEY_WIFI_PASS, wifi_pass_);
+    nvs_set_str(h, NVS_KEY_DEV_NAME, config_.dev_name);
+    nvs_set_u8(h, NVS_KEY_DLNA_ON, config_.dlna_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_VOICE_FB, config_.voice_feedback ? 1 : 0);
+  }
+  if (dm & D_TESTTONE) {
+    nvs_set_blob(h, NVS_KEY_TT_FREQ, &tt_freq_hz_, sizeof(tt_freq_hz_));
+    nvs_set_blob(h, NVS_KEY_TT_AMP, &tt_amp_db_, sizeof(tt_amp_db_));
+    nvs_set_blob(h, NVS_KEY_TT_PAN, &tt_pan_, sizeof(tt_pan_));
+    nvs_set_u8(h, NVS_KEY_TT_MODE, tt_mode_);
+    nvs_set_blob(h, NVS_KEY_TT_SWEEP, &tt_sweep_s_, sizeof(tt_sweep_s_));
+    nvs_set_blob(h, NVS_KEY_TT_SWP_LO, &tt_sweep_lo_hz_, sizeof(tt_sweep_lo_hz_));
+    nvs_set_blob(h, NVS_KEY_TT_SWP_HI, &tt_sweep_hi_hz_, sizeof(tt_sweep_hi_hz_));
+    nvs_set_blob(h, NVS_KEY_TT_DF2, &tt_dual_f2_hz_, sizeof(tt_dual_f2_hz_));
+  }
 
   esp_err_t err = nvs_commit(h);
   nvs_close(h);
-  if (err == ESP_OK) dirty_ = false;
+  if (err == ESP_OK) {
+    dirty_ = false;
+    dirty_domains_ = 0;
+  }
   return err == ESP_OK;
 }
 
@@ -343,9 +470,64 @@ void ConfigManager::tick(unsigned long now_ms) {
   if (now_ms - last_change_ms_ >= SAVE_DEBOUNCE_MS) save();
 }
 
-void ConfigManager::markDirty(unsigned long now_ms) {
+void ConfigManager::markDirtyEq() {
   dirty_ = true;
-  last_change_ms_ = now_ms;
+  dirty_domains_ |= D_EQ;
+  last_change_ms_ = cfgWallMs();
+  state_version_++;
+}
+void ConfigManager::markDirtyAudio() {
+  dirty_ = true;
+  dirty_domains_ |= D_AUDIO;
+  last_change_ms_ = cfgWallMs();
+  state_version_++;
+}
+void ConfigManager::markDirtyNet() {
+  dirty_ = true;
+  dirty_domains_ |= D_NET;
+  last_change_ms_ = cfgWallMs();
+  state_version_++;
+}
+void ConfigManager::markDirtyTestTone() {
+  dirty_ = true;
+  dirty_domains_ |= D_TESTTONE;
+  last_change_ms_ = cfgWallMs();
+  state_version_++;
+}
+void ConfigManager::markDirtyAll() {
+  dirty_ = true;
+  dirty_domains_ = 0xFF;
+  last_change_ms_ = cfgWallMs();
+  state_version_++;
+}
+
+void ConfigManager::setTestToneParams(float freq_hz, float amp_db, float pan, uint8_t mode, float sweep_s,
+                                      float sweep_lo_hz, float sweep_hi_hz, float dual_f2_hz) {
+  if (freq_hz < 20.f) freq_hz = 20.f;
+  if (freq_hz > 20000.f) freq_hz = 20000.f;
+  if (amp_db < -60.f) amp_db = -60.f;
+  if (amp_db > 0.f) amp_db = 0.f;
+  if (pan < -1.f) pan = -1.f;
+  if (pan > 1.f) pan = 1.f;
+  if (mode > 10u) mode = 0;
+  if (sweep_s < 1.f) sweep_s = 1.f;
+  if (sweep_s > 60.f) sweep_s = 60.f;
+  if (sweep_lo_hz < 20.f) sweep_lo_hz = 20.f;
+  if (sweep_lo_hz > 20000.f) sweep_lo_hz = 20000.f;
+  if (sweep_hi_hz < 20.f) sweep_hi_hz = 20.f;
+  if (sweep_hi_hz > 20000.f) sweep_hi_hz = 20000.f;
+  if (sweep_hi_hz <= sweep_lo_hz) sweep_hi_hz = sweep_lo_hz + 100.f;
+  if (dual_f2_hz < 20.f) dual_f2_hz = 20.f;
+  if (dual_f2_hz > 20000.f) dual_f2_hz = 20000.f;
+  tt_freq_hz_ = freq_hz;
+  tt_amp_db_ = amp_db;
+  tt_pan_ = pan;
+  tt_mode_ = mode;
+  tt_sweep_s_ = sweep_s;
+  tt_sweep_lo_hz_ = sweep_lo_hz;
+  tt_sweep_hi_hz_ = sweep_hi_hz;
+  tt_dual_f2_hz_ = dual_f2_hz;
+  markDirtyTestTone();
 }
 
 // ---- Volume ---------------------------------------------------------------
@@ -355,7 +537,7 @@ void ConfigManager::setVolume(uint8_t v) {
   config_.volume = v;
   config_.vol_l = v;
   config_.vol_r = v;
-  markDirty(0);
+  markDirtyAudio();
 }
 
 void ConfigManager::setVolumeLR(uint8_t l, uint8_t r) {
@@ -366,25 +548,25 @@ void ConfigManager::setVolumeLR(uint8_t l, uint8_t r) {
   // Legacy scalar: pick the greater of the two so the Snap ServerSettings
   // fallback path still reflects what the user asked for.
   config_.volume = (l > r) ? l : r;
-  markDirty(0);
+  markDirtyAudio();
 }
 
 void ConfigManager::setMuted(bool m) {
   config_.muted = m;
-  markDirty(0);
+  markDirtyAudio();
 }
 
 // ---- Channels -------------------------------------------------------------
 
 void ConfigManager::setStereoMode(StereoMode m) {
   config_.stereo_mode = m;
-  markDirty(0);
+  markDirtyAudio();
 }
 
 void ConfigManager::setChannels(bool l_on, bool r_on) {
   config_.ch_l_on = l_on;
   config_.ch_r_on = r_on;
-  markDirty(0);
+  markDirtyAudio();
 }
 
 // ---- Preset (legacy) ------------------------------------------------------
@@ -392,7 +574,7 @@ void ConfigManager::setChannels(bool l_on, bool r_on) {
 void ConfigManager::setPresetId(uint8_t id) {
   if (id >= NUM_FIXED_PRESETS + NUM_CUSTOM_SLOTS) return;
   config_.preset_id = id;
-  markDirty(0);
+  markDirtyEq();
 }
 
 void ConfigManager::getEQGains(int8_t out[EQ_BANDS]) const {
@@ -406,7 +588,7 @@ void ConfigManager::setEQGains(const int8_t gains[EQ_BANDS]) {
     if (g > EQ_GAIN_MAX) g = EQ_GAIN_MAX;
     config_.eq_gains[i] = g;
   }
-  markDirty(0);
+  markDirtyEq();
 }
 
 // ---- Parametric EQ --------------------------------------------------------
@@ -420,7 +602,11 @@ static float clampf(float v, float lo, float hi) {
 static void clampBand(ParametricBand& b) {
   b.freq_hz = clampf(b.freq_hz, 20.0f, 20000.0f);
   b.gain_db = clampf(b.gain_db, -18.0f, 18.0f);
-  b.q       = clampf(b.q, 0.1f, 10.0f);
+  const float q_hi = (b.type == geelen::EqFilterType::Notch) ? 100.0f : 10.0f;
+  b.q = clampf(b.q, 0.1f, q_hi);
+  if (b.slope_db_oct != 6 && b.slope_db_oct != 12 && b.slope_db_oct != 24) b.slope_db_oct = 12;
+  const uint8_t t = (uint8_t)b.type;
+  if (t > (uint8_t)geelen::EqFilterType::HighPass) b.type = geelen::EqFilterType::Bell;
 }
 
 void ConfigManager::getEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) const {
@@ -431,11 +617,18 @@ void ConfigManager::setEqCalibration(const ParametricBand bands[PARAMETRIC_BANDS
     config_.eq_cal[i] = bands[i];
     clampBand(config_.eq_cal[i]);
   }
-  markDirty(0);
+  markDirtyEq();
 }
 void ConfigManager::setEqCalibrationEnabled(bool on) {
   config_.eq_cal_on = on;
-  markDirty(0);
+  markDirtyEq();
+}
+
+void ConfigManager::setEqCalibrationActiveBands(uint8_t n) {
+  if (n < 1) n = 1;
+  if (n > (uint8_t)PARAMETRIC_BANDS) n = (uint8_t)PARAMETRIC_BANDS;
+  config_.eq_cal_active_bands = n;
+  markDirtyEq();
 }
 
 void ConfigManager::getEqPreference(ParametricBand out[PARAMETRIC_BANDS]) const {
@@ -449,15 +642,22 @@ void ConfigManager::setEqPreference(const ParametricBand bands[PARAMETRIC_BANDS]
   // Any live edit marks the slot "modified"; the preset-load handler re-sets
   // this to the slot index after assigning.
   config_.eq_pref_slot = 0xFF;
-  markDirty(0);
+  markDirtyEq();
 }
 void ConfigManager::setEqPreferenceEnabled(bool on) {
   config_.eq_pref_on = on;
-  markDirty(0);
+  markDirtyEq();
 }
 void ConfigManager::setEqPreferenceSlot(uint8_t slot) {
   config_.eq_pref_slot = slot;
-  markDirty(0);
+  markDirtyEq();
+}
+
+void ConfigManager::setEqPreferenceActiveBands(uint8_t n) {
+  if (n < 1) n = 1;
+  if (n > (uint8_t)PARAMETRIC_BANDS) n = (uint8_t)PARAMETRIC_BANDS;
+  config_.eq_pref_active_bands = n;
+  markDirtyEq();
 }
 
 void ConfigManager::setHeadroom(HeadroomMode mode, float manual_db) {
@@ -465,14 +665,14 @@ void ConfigManager::setHeadroom(HeadroomMode mode, float manual_db) {
   if (manual_db > 0.0f) manual_db = 0.0f;
   if (manual_db < -60.0f) manual_db = -60.0f;
   config_.eq_hr_manual_db = manual_db;
-  markDirty(0);
+  markDirtyEq();
 }
 
 // ---- Audio source / Snapcast / WiFi --------------------------------------
 
 void ConfigManager::setAudioSource(AudioSource s) {
   audio_source_ = s;
-  markDirty(0);
+  markDirtyNet();
 }
 
 bool ConfigManager::getSnapcastHost(char* out, size_t max_len) const {
@@ -486,12 +686,12 @@ void ConfigManager::setSnapcastHost(const char* host) {
   if (!host) return;
   strncpy(snapcast_host_, host, SNAPCAST_HOST_MAX - 1);
   snapcast_host_[SNAPCAST_HOST_MAX - 1] = '\0';
-  markDirty(0);
+  markDirtyNet();
 }
 
 void ConfigManager::setSnapcastPort(uint16_t port) {
   snapcast_port_ = port;
-  markDirty(0);
+  markDirtyNet();
 }
 
 bool ConfigManager::getWifiSsid(char* out, size_t max_len) const {
@@ -505,7 +705,7 @@ void ConfigManager::setWifiSsid(const char* ssid) {
   if (!ssid) return;
   strncpy(wifi_ssid_, ssid, WIFI_SSID_MAX - 1);
   wifi_ssid_[WIFI_SSID_MAX - 1] = '\0';
-  markDirty(0);
+  markDirtyNet();
 }
 
 bool ConfigManager::getWifiPass(char* out, size_t max_len) const {
@@ -519,7 +719,7 @@ void ConfigManager::setWifiPass(const char* pass) {
   if (!pass) return;
   strncpy(wifi_pass_, pass, WIFI_PASS_MAX - 1);
   wifi_pass_[WIFI_PASS_MAX - 1] = '\0';
-  markDirty(0);
+  markDirtyNet();
 }
 
 // ---- Device name / DLNA ---------------------------------------------------
@@ -535,12 +735,17 @@ void ConfigManager::setDeviceName(const char* name) {
   if (!name) return;
   strncpy(config_.dev_name, name, DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
-  markDirty(0);
+  markDirtyNet();
 }
 
 void ConfigManager::setDlnaEnabled(bool on) {
   config_.dlna_on = on;
-  markDirty(0);
+  markDirtyNet();
+}
+
+void ConfigManager::setVoiceFeedbackEnabled(bool on) {
+  config_.voice_feedback = on;
+  markDirtyNet();
 }
 
 // ---- Reset scopes ---------------------------------------------------------
@@ -561,6 +766,7 @@ void ConfigManager::factoryReset() {
     (void)nvs_commit(h);
     nvs_close(h);
   }
+  markDirtyAll();
   save();
 }
 
@@ -569,7 +775,7 @@ void ConfigManager::resetWifi() {
   wifi_pass_[0] = '\0';
   nvsErase(NVS_KEY_WIFI_SSID);
   nvsErase(NVS_KEY_WIFI_PASS);
-  markDirty(0);
+  markDirtyNet();
   save();
 }
 
@@ -578,7 +784,7 @@ void ConfigManager::resetBluetoothPairings() {
   // path is to call esp_bt_gap_remove_bond_device() for each bonded peer on
   // reboot. We just mark dirty so a `save()` sync happens and rely on the
   // caller to trigger a restart that does the actual bond wipe.
-  markDirty(0);
+  markDirtyNet();
   save();
 }
 
@@ -587,21 +793,23 @@ void ConfigManager::resetSnapcast() {
   snapcast_port_ = SNAPCAST_PORT_DEFAULT;
   nvsErase(NVS_KEY_SNAP_HOST);
   nvsErase(NVS_KEY_SNAP_PORT);
-  markDirty(0);
+  markDirtyNet();
   save();
 }
 
 void ConfigManager::resetDlna() {
   config_.dlna_on = false;
   nvsErase(NVS_KEY_DLNA_ON);
-  markDirty(0);
+  markDirtyNet();
   save();
 }
 
 void ConfigManager::resetEq() {
   loadDefaultEqCalibration(config_.eq_cal);
+  config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_cal_on = false;
   loadDefaultEqPreference(config_.eq_pref);
+  config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_pref_on = false;
   config_.eq_pref_slot = 0xFF;
   config_.eq_hr_mode = HeadroomMode::Auto;
@@ -610,8 +818,10 @@ void ConfigManager::resetEq() {
 
   nvsErase(NVS_KEY_EQ_CAL);
   nvsErase(NVS_KEY_EQ_CAL_ON);
+  nvsErase(NVS_KEY_EQ_CAL_NB);
   nvsErase(NVS_KEY_EQ_PREF);
   nvsErase(NVS_KEY_EQ_PREF_ON);
+  nvsErase(NVS_KEY_EQ_PREF_NB);
   nvsErase(NVS_KEY_EQ_PREF_SLOT);
   nvsErase(NVS_KEY_EQ_HR_MODE);
   nvsErase(NVS_KEY_EQ_HR_MANUAL);
@@ -624,7 +834,7 @@ void ConfigManager::resetEq() {
     (void)remove(p);
   }
 
-  markDirty(0);
+  markDirtyEq();
   save();
 }
 
@@ -636,8 +846,21 @@ void ConfigManager::resetAudio() {
   config_.stereo_mode = StereoMode::Stereo;
   config_.ch_l_on = true;
   config_.ch_r_on = true;
-  markDirty(0);
+  markDirtyAudio();
   save();
+}
+
+void configStartDebouncedSaveTask(ConfigManager* cfg) {
+  if (!cfg) return;
+  xTaskCreatePinnedToCore(
+      [](void* arg) {
+        auto* c = static_cast<ConfigManager*>(arg);
+        for (;;) {
+          vTaskDelay(pdMS_TO_TICKS(200));
+          c->tick(cfgWallMs());
+        }
+      },
+      "cfg_save", 3072, cfg, 3, nullptr, 0);
 }
 
 }  // namespace geelen_idf

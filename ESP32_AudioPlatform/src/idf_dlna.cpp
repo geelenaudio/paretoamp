@@ -404,7 +404,6 @@ esp_err_t rc_handle(httpd_req_t* req, const char* action,
     if (vv > 100) vv = 100;
     if (s_cfg) {
       s_cfg->setVolume((uint8_t)vv);
-      s_cfg->save();
       if (&on_volume_changed) on_volume_changed();
     }
     return send_soap_response(req, RC_URN, "SetVolume", "");
@@ -423,7 +422,6 @@ esp_err_t rc_handle(httpd_req_t* req, const char* action,
     bool m = (v[0] == '1' || v[0] == 't' || v[0] == 'T');
     if (s_cfg) {
       s_cfg->setMuted(m);
-      s_cfg->save();
       if (&on_volume_changed) on_volume_changed();
     }
     return send_soap_response(req, RC_URN, "SetMute", "");

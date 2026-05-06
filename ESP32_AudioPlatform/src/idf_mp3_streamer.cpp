@@ -70,8 +70,9 @@ class StreamerImpl : public Streamer {
   }
 
   bool playImpl(const char* url) {
-    if (!url || strncmp(url, "http://", 7) != 0) {
-      ESP_LOGW(TAG, "play: ignoring non-http URL: %s", url ? url : "(null)");
+    if (!url) return false;
+    if (strncmp(url, "http://", 7) != 0 && url[0] != '/') {
+      ESP_LOGW(TAG, "play: need http:// or absolute path: %s", url);
       return false;
     }
     ensureTask();
@@ -80,6 +81,10 @@ class StreamerImpl : public Streamer {
     strlcpy(cmd_.url, url, sizeof(cmd_.url));
     playing_.store(true);
     position_ms_.store(0);
+    // Gate A2DP before the decode task runs so SBC cannot splice into voice PCM.
+    if (url[0] == '/') {
+      local_mp3_gate_.fetch_add(1, std::memory_order_relaxed);
+    }
     xSemaphoreGive(mutex_);
     return true;
   }
@@ -106,20 +111,46 @@ class StreamerImpl : public Streamer {
   }
 
   bool isPlayingImpl() const { return playing_.load(); }
+  bool isPlayingLocalFileImpl() const { return local_mp3_gate_.load(std::memory_order_relaxed) > 0; }
   uint32_t positionMsImpl() const { return position_ms_.load(); }
   uint32_t durationMsImpl() const { return duration_ms_.load(); }
   void setDurationMsImpl(uint32_t ms) { duration_ms_.store(ms); }
+
+  /** After closing a SPIFFS decode session, drain ring tail then release A2DP/Snap gate. */
+  void drainTailAndReleaseLocalGate() {
+    if (!engine_) {
+      local_mp3_gate_.fetch_sub(1, std::memory_order_relaxed);
+      return;
+    }
+    // Stay above `AUDIO_LOW_WATER_MS` while draining or `process()` flips to
+    // rebuffer and returns silence (heard as missing boot / first-play audio).
+    constexpr size_t kTailFrames =
+        (size_t)((uint64_t)geelen::SAMPLE_RATE * (geelen::AUDIO_LOW_WATER_MS + 40) / 1000);
+    for (int i = 0; i < 800; ++i) {
+      if (engine_->bufferedFrames() <= kTailFrames) break;
+      vTaskDelay(pdMS_TO_TICKS(15));
+    }
+    local_mp3_gate_.fetch_sub(1, std::memory_order_relaxed);
+  }
 
  private:
   static void taskTrampoline(void* arg) {
     static_cast<StreamerImpl*>(arg)->taskLoop();
   }
 
-  // Closes socket and resets per-stream state.
+  // Closes socket / file and resets per-stream state.
   void closeStream() {
-    if (sock_ >= 0) { close(sock_); sock_ = -1; }
+    if (sock_ >= 0) {
+      close(sock_);
+      sock_ = -1;
+    }
+    if (file_) {
+      fclose(file_);
+      file_ = nullptr;
+    }
     in_fill_ = 0;
     byte_offset_ = 0;
+    eof_ = false;
     if (decoder_) {
       MP3FreeDecoder(decoder_);
       decoder_ = nullptr;
@@ -210,16 +241,77 @@ class StreamerImpl : public Streamer {
     return true;
   }
 
+  bool openFile(const char* path) {
+    file_ = fopen(path, "rb");
+    if (!file_) {
+      ESP_LOGW(TAG, "fopen failed: %s", path ? path : "(null)");
+      return false;
+    }
+    content_length_ = 0;
+    if (byte_offset_ > 0) {
+      if (fseek(file_, (long)byte_offset_, SEEK_SET) != 0) {
+        ESP_LOGW(TAG, "fseek failed offset=%lu", (unsigned long)byte_offset_);
+        fclose(file_);
+        file_ = nullptr;
+        return false;
+      }
+    }
+    return true;
+  }
+
   // Drive one decode cycle: fill buffer from socket if needed, decode
   // one frame, push to engine. Returns false if the stream ended.
   bool pumpOnce() {
-    // Fill input buffer if low.
-    if (in_fill_ < 2048) {
-      int r = recv(sock_, in_buf_ + in_fill_, kInBufBytes - in_fill_, 0);
-      if (r <= 0) return false;
-      in_fill_ += r;
-      byte_offset_ += r;
+    // Back-pressure: Helix decode runs several × realtime, so for short SPIFFS
+    // clips the producer would race ahead and `feedPCM` would silently drop
+    // samples once the engine ring fills (audible as the tail of a clip
+    // being cut off — e.g. "Bluetooth" without "mode"). Pace the decoder
+    // to roughly realtime by waiting whenever the engine has a healthy
+    // buffer ahead.
+    //
+    // CRITICAL: this threshold must sit ABOVE the engine's prefill mark
+    // (`AUDIO_PREFILL_MS` in audio_engine.h). Otherwise the audio task waits
+    // for more buffered PCM than we ever allow the decoder to accumulate —
+    // classic deadlock, silent boot prompts until BT music fills the ring.
+    // Ring capacity is ~2 s; 1100 ms stays above a 500–1000 ms prefill with
+    // margin below the cap.
+    if (engine_) {
+      constexpr size_t kHighWaterFrames =
+          (size_t)((uint64_t)geelen::SAMPLE_RATE * 1100 / 1000);  // ~1.1 s
+      while (engine_->bufferedFrames() > kHighWaterFrames) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+      }
     }
+    // Fill input buffer if low. Track EOF separately so we can keep decoding
+    // whatever frames are already buffered after the source dries up — Helix
+    // frames are up to ~1.7 KB each and we keep up to 2 KB of slack, so a
+    // hard `return false` on the first read of zero bytes was discarding the
+    // last ~100–200 ms of every clip (audible as "Bluetooth" instead of
+    // "Bluetooth Mode", and a snipped tail on every other prompt).
+    if (!eof_ && in_fill_ < 2048) {
+      if (file_) {
+        size_t n = fread(in_buf_ + in_fill_, 1, kInBufBytes - in_fill_, file_);
+        if (n == 0) {
+          eof_ = true;
+        } else {
+          in_fill_ += n;
+          byte_offset_ += (uint32_t)n;
+        }
+      } else if (sock_ >= 0) {
+        int r = recv(sock_, in_buf_ + in_fill_, kInBufBytes - in_fill_, 0);
+        if (r <= 0) {
+          eof_ = true;
+        } else {
+          in_fill_ += (size_t)r;
+          byte_offset_ += (uint32_t)r;
+        }
+      } else {
+        return false;
+      }
+    }
+    // Once the source is drained AND the buffer is too small to hold even a
+    // minimal MP3 frame, the stream is genuinely done.
+    if (eof_ && in_fill_ < 64) return false;
 
     int sync = MP3FindSyncWord(in_buf_, in_fill_);
     if (sync < 0) {
@@ -346,22 +438,41 @@ class StreamerImpl : public Streamer {
 
       switch (c.kind) {
         case Command::Kind::Play: {
+          const bool replace_had_local = (file_ != nullptr);
           closeStream();
+          if (replace_had_local) drainTailAndReleaseLocalGate();
           strlcpy(current_url_, c.url, sizeof(current_url_));
-          if (!openUrl(current_url_, 0)) break;
+          if (strncmp(c.url, "http://", 7) == 0) {
+            if (!openUrl(current_url_, 0)) break;
+          } else if (c.url[0] == '/') {
+            if (!openFile(current_url_)) {
+              local_mp3_gate_.fetch_sub(1, std::memory_order_relaxed);
+              break;
+            }
+          } else {
+            break;
+          }
           decoder_ = MP3InitDecoder();
           break;
         }
         case Command::Kind::Resume: {
           if (!decoder_ && current_url_[0]) {
-            if (!openUrl(current_url_, byte_offset_)) break;
+            if (strncmp(current_url_, "http://", 7) == 0) {
+              if (!openUrl(current_url_, byte_offset_)) break;
+            } else if (current_url_[0] == '/') {
+              if (!openFile(current_url_)) break;
+            } else {
+              break;
+            }
             decoder_ = MP3InitDecoder();
           }
           break;
         }
         case Command::Kind::Pause:
         case Command::Kind::Stop: {
+          const bool stop_had_local = (file_ != nullptr);
           closeStream();
+          if (stop_had_local) drainTailAndReleaseLocalGate();
           if (c.kind == Command::Kind::Stop) {
             current_url_[0] = 0;
             position_ms_.store(0);
@@ -371,10 +482,12 @@ class StreamerImpl : public Streamer {
         case Command::Kind::None: break;
       }
 
-      if (playing_.load() && sock_ >= 0 && decoder_) {
+      if (playing_.load() && decoder_ && (sock_ >= 0 || file_)) {
         if (!pumpOnce()) {
           ESP_LOGI(TAG, "stream ended");
+          const bool ended_local = (file_ != nullptr);
           closeStream();
+          if (ended_local) drainTailAndReleaseLocalGate();
           playing_.store(false);
           position_ms_.store(0);
         }
@@ -388,17 +501,23 @@ class StreamerImpl : public Streamer {
   Command cmd_{};
   std::atomic<bool> task_started_{false};
   std::atomic<bool> playing_{false};
+  /** A2DP gate: incremented when a `/…` play is queued, decremented when that file is closed. */
+  std::atomic<int> local_mp3_gate_{0};
   std::atomic<uint32_t> position_ms_{0};
   std::atomic<uint32_t> duration_ms_{0};
 
   char current_url_[256]{};
   int sock_{-1};
+  FILE* file_{nullptr};
   unsigned char* in_buf_{nullptr};
   size_t in_fill_{0};
   int16_t* out_buf_{nullptr};
   HMP3Decoder decoder_{nullptr};
   uint32_t byte_offset_{0};
   uint32_t content_length_{0};
+  /** Set when the underlying source (file or socket) has no more bytes to
+   *  yield; we then keep decoding from `in_buf_` until it is exhausted. */
+  bool eof_{false};
 
   geelen::AudioEngine* engine_{nullptr};
 };
@@ -415,10 +534,17 @@ void Streamer::setEngine(geelen::AudioEngine* eng) {
   static_cast<StreamerImpl*>(this)->setEngineInternal(eng);
 }
 bool Streamer::play(const char* url)       { return static_cast<StreamerImpl*>(this)->playImpl(url); }
+bool Streamer::playFile(const char* path) {
+  if (!path || path[0] != '/') return false;
+  return static_cast<StreamerImpl*>(this)->playImpl(path);
+}
 void Streamer::pause()                     { static_cast<StreamerImpl*>(this)->pauseImpl(); }
 void Streamer::resume()                    { static_cast<StreamerImpl*>(this)->resumeImpl(); }
 void Streamer::stop()                      { static_cast<StreamerImpl*>(this)->stopImpl(); }
 bool Streamer::isPlaying() const           { return static_cast<const StreamerImpl*>(this)->isPlayingImpl(); }
+bool Streamer::isPlayingLocalFile() const {
+  return static_cast<const StreamerImpl*>(this)->isPlayingLocalFileImpl();
+}
 uint32_t Streamer::positionMs() const      { return static_cast<const StreamerImpl*>(this)->positionMsImpl(); }
 uint32_t Streamer::durationMs() const      { return static_cast<const StreamerImpl*>(this)->durationMsImpl(); }
 void Streamer::setDurationMs(uint32_t ms)  { static_cast<StreamerImpl*>(this)->setDurationMsImpl(ms); }

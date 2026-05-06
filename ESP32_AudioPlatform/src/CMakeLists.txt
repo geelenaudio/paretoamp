@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
     "idf_main.cpp"
     "audio_engine.cpp"
+    "eq_coeffs.cpp"
     "audio_util.cpp"
     "idf_config_manager.cpp"
     "idf_wifi_manager.cpp"
@@ -11,6 +12,8 @@ idf_component_register(
     "idf_logs.cpp"
     "idf_dlna.cpp"
     "idf_mp3_streamer.cpp"
+    "idf_voice_feedback.cpp"
+    "idf_test_tone.cpp"
     "idf_a2dp_sink.cpp"
     "idf_snapclient.cpp"
     "snapcast_protocol.cpp"
