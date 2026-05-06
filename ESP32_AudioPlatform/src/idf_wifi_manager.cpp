@@ -6,6 +6,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 
 #include "freertos/FreeRTOS.h"
@@ -25,6 +26,10 @@ static const char* AP_PASS = "geelen123";
 
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr int WIFI_GOT_IP_BIT = BIT1;
+
+// After STA disconnects, wait this long before starting the soft AP so a
+// quick router reboot / DHCP renew does not drop the user into captive mode.
+static constexpr int64_t kStaRecoverDelayUs = 8 * 1000 * 1000;
 
 static uint32_t ipToU32_(const esp_ip4_addr_t& ip) {
   return ip.addr;
@@ -56,6 +61,18 @@ bool WifiManager::begin(ConfigManager* cfg) {
 
   ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiManager::wifiEventHandler_, this, nullptr));
   ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiManager::wifiEventHandler_, this, nullptr));
+
+  esp_timer_create_args_t tmr{};
+  tmr.callback = &WifiManager::recoveryTimerCb_;
+  tmr.arg = this;
+  tmr.name = "wifi_sta_recover";
+  tmr.dispatch_method = ESP_TIMER_TASK;
+  esp_timer_handle_t th = nullptr;
+  if (esp_timer_create(&tmr, &th) != ESP_OK) {
+    ESP_LOGW(TAG, "STA recovery timer create failed — runtime AP fallback disabled");
+  } else {
+    recovery_timer_ = th;
+  }
 
   char ssid[WIFI_SSID_MAX] = {0};
   char pass[WIFI_PASS_MAX] = {0};
@@ -102,7 +119,7 @@ bool WifiManager::waitForStaIp_(uint32_t timeout_ms) {
   return (bits & WIFI_GOT_IP_BIT) != 0;
 }
 
-void WifiManager::startApFallback_() {
+void WifiManager::enableSoftApPhy_() {
   wifi_config_t ap_config{};
   std::strncpy((char*)ap_config.ap.ssid, AP_SSID, sizeof(ap_config.ap.ssid) - 1);
   std::strncpy((char*)ap_config.ap.password, AP_PASS, sizeof(ap_config.ap.password) - 1);
@@ -112,9 +129,54 @@ void WifiManager::startApFallback_() {
   ap_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
   if (std::strlen(AP_PASS) == 0) ap_config.ap.authmode = WIFI_AUTH_OPEN;
 
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+  // APSTA (not pure AP) so `esp_wifi_scan_start` works while we are showing
+  // the onboarding portal — `esp_wifi_scan_*` requires STA or APSTA mode.
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-  ESP_ERROR_CHECK(esp_wifi_start());
+
+  esp_err_t st = esp_wifi_start();
+  if (st != ESP_OK) {
+    // Often ESP_ERR_WIFI_CONN / ESP_ERR_INVALID_STATE when the driver is
+    // already running and we only changed mode — safe to continue.
+    ESP_LOGD(TAG, "esp_wifi_start after soft-AP config: %s", esp_err_to_name(st));
+  }
+}
+
+void WifiManager::cancelStaRecoveryTimer_() {
+  if (!recovery_timer_) return;
+  esp_timer_stop((esp_timer_handle_t)recovery_timer_);
+}
+
+void WifiManager::scheduleStaRecoveryCheck_() {
+  if (!recovery_timer_) return;
+  esp_timer_stop((esp_timer_handle_t)recovery_timer_);
+  esp_err_t e = esp_timer_start_once((esp_timer_handle_t)recovery_timer_, kStaRecoverDelayUs);
+  if (e != ESP_OK) {
+    ESP_LOGW(TAG, "STA recovery timer start: %s", esp_err_to_name(e));
+  }
+}
+
+void WifiManager::recoveryTimerCb_(void* arg) {
+  auto* self = static_cast<WifiManager*>(arg);
+  if (!self || !self->cfg_) return;
+  if (self->status_.sta_connected) return;
+  if (self->status_.ap_running) return;
+
+  char ssid[WIFI_SSID_MAX]{};
+  self->cfg_->getWifiSsid(ssid, sizeof(ssid));
+  if (ssid[0] == '\0') return;
+
+  ESP_LOGW(TAG, "STA still down after disconnect — starting soft AP for reconfiguration");
+  self->startApFallback_();
+}
+
+void WifiManager::startApFallback_() {
+  if (status_.ap_running) {
+    ESP_LOGD(TAG, "startApFallback_: soft AP already running");
+    return;
+  }
+
+  enableSoftApPhy_();
 
   status_.ap_running = true;
   status_.sta_connected = false;
@@ -152,9 +214,22 @@ void WifiManager::wifiEventHandler_(void* arg, esp_event_base_t event_base, int3
       auto* disc = (wifi_event_sta_disconnected_t*)event_data;
       int reason = disc ? (int)disc->reason : -1;
       ESP_LOGW(TAG, "STA disconnected (reason=%d)", reason);
+      self->status_.sta_connected = false;
+      self->status_.sta_ip = 0;
       xEventGroupClearBits((EventGroupHandle_t)self->event_group_, WIFI_CONNECTED_BIT | WIFI_GOT_IP_BIT);
+
+      // Runtime recovery: once STA drops and stays down, bring the setup AP
+      // back (same as cold-boot fallback) so the user can fix credentials.
+      if (self->cfg_ && !self->status_.ap_running) {
+        char ssid[WIFI_SSID_MAX]{};
+        self->cfg_->getWifiSsid(ssid, sizeof(ssid));
+        if (ssid[0] != '\0') {
+          self->scheduleStaRecoveryCheck_();
+        }
+      }
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    self->cancelStaRecoveryTimer_();
     auto* event = (ip_event_got_ip_t*)event_data;
     if (event) {
       self->status_.sta_ip = ipToU32_(event->ip_info.ip);

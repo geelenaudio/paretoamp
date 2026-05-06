@@ -18,6 +18,8 @@
 #include "idf_logs.h"
 #include "idf_dlna.h"
 #include "idf_mp3_streamer.h"
+#include "idf_voice_feedback.h"
+#include "idf_test_tone.h"
 
 static constexpr gpio_num_t PIN_I2S_WS = GPIO_NUM_25;
 static constexpr gpio_num_t PIN_I2S_BCK = GPIO_NUM_26;
@@ -78,6 +80,16 @@ static void apply_channels_from_cfg() {
 extern "C" void on_volume_changed()   { apply_volume_from_cfg(); }
 extern "C" void on_channels_changed() { apply_channels_from_cfg(); }
 
+/** Called from `idf_api.cpp` appendSystemMetrics — forwards to `g_engine`. */
+extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl, float* rr) {
+  float a, b, c, d;
+  g_engine.readOutputMeters(a, b, c, d);
+  if (pl) *pl = a;
+  if (pr) *pr = b;
+  if (rl) *rl = c;
+  if (rr) *rr = d;
+}
+
 // Push both EQ cascades from NVS into the engine, then apply headroom.
 // In Auto mode the headroom dB equals -peak gain of the enabled cascade(s)
 // so the post-EQ signal tops out at ≤ 0 dBFS regardless of input. In
@@ -90,16 +102,12 @@ static void apply_eq_from_cfg() {
   g_cfg.getEqCalibration(cal_nvs);
   g_cfg.getEqPreference(pref_nvs);
 
-  geelen::EqBand cal[geelen::AUDIO_EQ_BANDS];
-  geelen::EqBand pref[geelen::AUDIO_EQ_BANDS];
-  for (size_t i = 0; i < geelen::AUDIO_EQ_BANDS; ++i) {
-    cal[i]  = { cal_nvs[i].freq_hz,  cal_nvs[i].gain_db,  cal_nvs[i].q };
-    pref[i] = { pref_nvs[i].freq_hz, pref_nvs[i].gain_db, pref_nvs[i].q };
-  }
-  g_engine.setEqCurve(geelen::EQ_LAYER_CALIBRATION, cal,
-                      g_cfg.getEqCalibrationEnabled());
-  g_engine.setEqCurve(geelen::EQ_LAYER_PREFERENCE, pref,
-                      g_cfg.getEqPreferenceEnabled());
+  g_engine.setEqCurve(geelen::EQ_LAYER_CALIBRATION,
+                      reinterpret_cast<const geelen::EqBand*>(cal_nvs),
+                      g_cfg.getEqCalibrationActiveBands(), g_cfg.getEqCalibrationEnabled());
+  g_engine.setEqCurve(geelen::EQ_LAYER_PREFERENCE,
+                      reinterpret_cast<const geelen::EqBand*>(pref_nvs),
+                      g_cfg.getEqPreferenceActiveBands(), g_cfg.getEqPreferenceEnabled());
 
   float db = g_cfg.getHeadroomManualDb();
   if (g_cfg.getHeadroomMode() == geelen_idf::HeadroomMode::Auto) {
@@ -120,7 +128,9 @@ static bool init_i2s() {
   // Increase DMA buffering to tolerate bursty A2DP delivery + WiFi/BT coexist jitter.
   // Defaults (6 * 240 frames) are only ~33ms of audio at 44.1kHz stereo 16-bit.
   // Keep this moderate so BT controller can still allocate internal RAM.
-  // (~185ms: 16 * 512 frames)
+  // (~185ms: 16 * 512 frames). If `i2s_channel_write` often returns ESP_ERR_TIMEOUT (263)
+  // with written=0, try raising dma_desc_num / dma_frame_num (RAM tradeoff) or check
+  // Wi‑Fi/BT coexistence and core pinning — see audio_task vs other high-priority work.
   chan_cfg.dma_desc_num = 16;
   chan_cfg.dma_frame_num = 512;
   // When the engine stops writing (source went idle, Snapcast stream dropped,
@@ -175,19 +185,48 @@ static void amp_enable_after_i2s_stable() {
   ESP_LOGI("geelen", "Amp enable (GPIO %d) HIGH", (int)PIN_AMP_ENABLE);
 }
 
+/** Test tone shares the engine ring with voice prompts; start it only after boot clips finish. */
+static void test_tone_after_voice_task(void*) {
+  geelen_idf::voiceFeedbackWaitForBootDone(portMAX_DELAY);
+  geelen_idf::testToneStart(&g_engine, &g_cfg);
+  vTaskDelete(nullptr);
+}
+
+// APSTA onboarding keeps both Wi-Fi stacks resident; starting Bluedroid
+// immediately can exhaust the BT OSI timer pool (osi_alarm_new err 0x101).
+// We wait out the worst of boot/Wi-Fi churn, then start A2DP so users who
+// never fix Wi-Fi can still pair for audio.
+static constexpr int kBtDeferPollMs = 500;
+// 120 * 500 ms = 60 s max wait while still in captive AP-only mode.
+static constexpr int kBtDeferMaxPolls = 120;
+
+static void deferred_a2dp_start_task(void*) {
+  for (int i = 0; i < kBtDeferMaxPolls && g_wifi.isApOnly(); ++i) {
+    vTaskDelay(pdMS_TO_TICKS(kBtDeferPollMs));
+  }
+  if (!g_wifi.isApOnly()) {
+    ESP_LOGI("geelen", "Wi-Fi left AP-only mode; starting Bluetooth A2DP");
+  } else {
+    ESP_LOGW(
+        "geelen",
+        "Wi-Fi still in captive AP after %u s — starting Bluetooth anyway "
+        "(pair for audio without fixing Wi-Fi)",
+        (unsigned)((kBtDeferMaxPolls * kBtDeferPollMs) / 1000));
+  }
+  g_a2dp.begin("Geelen Audio");
+  vTaskDelete(nullptr);
+}
+
 static void audio_task(void*) {
-  // During steady playback, g_engine.process() blocks inside i2s_channel_write
-  // until a DMA descriptor drains (~3 ms per 128-frame chunk) — that blocking
-  // write is what paces this loop to realtime. Adding a vTaskDelay(1) on top
-  // of it would cap the drain at ~128 frames / 10 ms ≈ 12.8 kHz, i.e. ~29% of
-  // realtime; the Snapclient producer (44.1 kHz) would then out-run us and
-  // peg the ring buffer full of stale audio (buf=~88200, overflows climbing,
-  // hearable as constant "Knister" crackling).
+  // Steady playback: process() blocks in i2s_channel_write (portMAX_DELAY) —
+  // DMA is the pacer; we must not vTaskDelay(1) on every iteration or we'd cap
+  // drain rate and starve the ring (Snap/A2DP would see overflows / Pkt dropped).
   //
-  // Only sleep a tick when process() early-returned, i.e. prefill / rebuffer
-  // / I2S backpressure with written=0 — in those cases nothing blocked
-  // internally, so we'd otherwise busy-spin Core 1 and starve IDLE1.
-  while (true) {
+  // Prefill / rebuffer / empty-ring paths return false *without* touching I2S.
+  // A tight loop there would peg Core 1 at 100 % and starve BT stack tasks
+  // (symptom: BT_APPL "Pkt dropped", no audible voice prompts). Yield one tick
+  // only on those early returns so producers and the controller can run.
+  for (;;) {
     if (!g_engine.process()) {
       vTaskDelay(1);
     }
@@ -215,11 +254,12 @@ extern "C" void app_main(void) {
   geelen_idf::logsInit();
   ESP_LOGI("geelen", "Geelen Audio Amp – ESP-IDF env boot");
   g_cfg.begin();
+  geelen_idf::configStartDebouncedSaveTask(&g_cfg);
   // Start the CPU sampler early so its calibration baseline has seconds of
   // mostly-idle time to settle before WiFi/BT/audio kick in.
   geelen_idf::cpuSamplerStart();
   g_wifi.begin(&g_cfg);
-  g_http.begin(&g_cfg);
+  g_http.begin(&g_cfg, &g_wifi);
 
   g_a2dp.setEngine(&g_engine);
 
@@ -239,6 +279,10 @@ extern "C" void app_main(void) {
   apply_eq_from_cfg();
   amp_enable_after_i2s_stable();
 
+  geelen_idf::mp3::streamer()->setEngine(&g_engine);
+  geelen_idf::voiceFeedbackSetContext(&g_cfg, &g_wifi, &g_engine);
+  geelen_idf::voiceFeedbackScheduleBoot();
+
   const geelen_idf::AudioSource src = g_cfg.getAudioSource();
   ESP_LOGI("geelen", "Selected source: %u", (unsigned)src);
 
@@ -249,21 +293,43 @@ extern "C" void app_main(void) {
   // waiting here — on cold boot without saved credentials this runs
   // before netif has an IP and send_alive_burst() then spews a useless
   // 0.0.0.0 LOCATION until the next announce interval.
-  if (g_cfg.getDlnaEnabled()) {
-    geelen_idf::mp3::streamer()->setEngine(&g_engine);
+  if (g_cfg.getDlnaEnabled() && src != geelen_idf::AudioSource::TestTone) {
     geelen_idf::dlna::start((httpd_handle_t)g_http.nativeHandle(), &g_cfg);
   }
 
-  xTaskCreatePinnedToCore(audio_task, "audio", 4096, nullptr, 20, nullptr, 1);
+  // Stack sized for: process() locals (process_buf 512 B, work[] 1 KB) +
+  // ESP_LOGI vsnprintf 256 B + i2s_channel_write internal frames + FreeRTOS
+  // overhead. 4 KB was the historical value but left zero margin once voice
+  // prompts started feeding the engine; 6 KB adds headroom without measurable
+  // RAM cost. (The IirDelaySnapshot rollback that used to cost ~1.5 KB is gone.)
+  xTaskCreatePinnedToCore(audio_task, "audio", 6144, nullptr, 20, nullptr, 1);
 
-  // Start BT Classic A2DP sink only when BT is selected.
-  if (src == geelen_idf::AudioSource::Bluetooth) g_a2dp.begin("Geelen Audio");
+  // Start BT Classic A2DP sink only when BT is selected. Defer if we are
+  // still in captive APSTA onboarding — see deferred_a2dp_start_task.
+  if (src == geelen_idf::AudioSource::Bluetooth) {
+    if (!g_wifi.isApOnly()) {
+      g_a2dp.begin("Geelen Audio");
+    } else {
+      ESP_LOGW("geelen",
+               "AP-only Wi-Fi onboarding: deferring Bluetooth ~%u s (or until STA "
+               "gets an IP) to avoid Bluedroid init OOM; then A2DP starts anyway",
+               (unsigned)((kBtDeferMaxPolls * kBtDeferPollMs) / 1000));
+      xTaskCreate(deferred_a2dp_start_task, "bt_defer", 4096, nullptr, 5, nullptr);
+    }
+  }
 
   char host[geelen_idf::SNAPCAST_HOST_MAX] = {0};
   g_cfg.getSnapcastHost(host, sizeof(host));
   const bool snap_on = host[0] != '\0';
 
-  if (src == geelen_idf::AudioSource::Network) {
+  if (src == geelen_idf::AudioSource::TestTone) {
+    BaseType_t ok = xTaskCreatePinnedToCore(test_tone_after_voice_task, "tt-after-voice", 3072, nullptr,
+                                            4, nullptr, 1);
+    if (ok != pdPASS) {
+      ESP_LOGW("geelen", "tt-after-voice task failed; starting test tone without voice wait");
+      geelen_idf::testToneStart(&g_engine, &g_cfg);
+    }
+  } else if (src == geelen_idf::AudioSource::Network) {
     if (snap_on) {
       ESP_LOGI("geelen", "Snapclient loop starting -> %s:%u", host,
                (unsigned)g_cfg.getSnapcastPort());

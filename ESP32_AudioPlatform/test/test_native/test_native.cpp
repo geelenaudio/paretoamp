@@ -1,11 +1,13 @@
 /**
- * Native unit tests – audio_util (gainDbToLinear) and snapcast_protocol (parseSnapcastBaseHeader).
+ * Native unit tests – audio_util (gainDbToLinear), snapcast_protocol, eq_coeffs.
  * Run with: pio test -e native
  */
 
 #include <unity.h>
 #include "audio_util.h"
 #include "snapcast_protocol.h"
+#include "eq_coeffs.h"
+#include "eq_types.h"
 #include <cstring>
 #include <cmath>
 
@@ -133,6 +135,62 @@ void test_buildSnapcastHelloFrame_null_inputs(void) {
       nullptr, sizeof(out), "m", "h", "c", "v", "o", "a", 1));
 }
 
+static geelen::EqBand makeBand(float f, float g, float q, geelen::EqFilterType ty, uint8_t slope) {
+  geelen::EqBand b{};
+  b.freq_hz = f;
+  b.gain_db = g;
+  b.q = q;
+  b.type = ty;
+  b.slope_db_oct = slope;
+  return b;
+}
+
+void test_eqBuildStageList_bell_bypass_zero_gain(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  bands[0] = makeBand(1000.f, 0.f, 1.2f, geelen::EqFilterType::Bell, 12);
+  geelen::EqStage st[geelen::EQ_MAX_STAGES_PER_LAYER];
+  size_t n = geelen::eqBuildStageList(44100.f, bands, 1, st);
+  TEST_ASSERT_EQUAL_size_t(0u, n);
+}
+
+void test_eqBuildStageList_bell_three_db_one_stage(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  bands[0] = makeBand(1000.f, 3.f, 1.2f, geelen::EqFilterType::Bell, 12);
+  geelen::EqStage st[geelen::EQ_MAX_STAGES_PER_LAYER];
+  size_t n = geelen::eqBuildStageList(44100.f, bands, 1, st);
+  TEST_ASSERT_EQUAL_size_t(1u, n);
+  TEST_ASSERT_EQUAL_UINT8((uint8_t)geelen::EqStageKind::Biquad, (uint8_t)st[0].kind);
+}
+
+void test_eqBuildStageList_lowpass_24_two_biquads(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  bands[0] = makeBand(5000.f, 0.f, 1.f, geelen::EqFilterType::LowPass, 24);
+  geelen::EqStage st[geelen::EQ_MAX_STAGES_PER_LAYER];
+  size_t n = geelen::eqBuildStageList(44100.f, bands, 1, st);
+  TEST_ASSERT_EQUAL_size_t(2u, n);
+  TEST_ASSERT_EQUAL_UINT8((uint8_t)geelen::EqStageKind::Biquad, (uint8_t)st[0].kind);
+  TEST_ASSERT_EQUAL_UINT8((uint8_t)geelen::EqStageKind::Biquad, (uint8_t)st[1].kind);
+}
+
+void test_eqBuildStageList_lowpass_6_one_pole(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  bands[0] = makeBand(1000.f, 0.f, 1.f, geelen::EqFilterType::LowPass, 6);
+  geelen::EqStage st[geelen::EQ_MAX_STAGES_PER_LAYER];
+  size_t n = geelen::eqBuildStageList(44100.f, bands, 1, st);
+  TEST_ASSERT_EQUAL_size_t(1u, n);
+  TEST_ASSERT_EQUAL_UINT8((uint8_t)geelen::EqStageKind::OnePoleLp, (uint8_t)st[0].kind);
+}
+
+void test_eqLinearMagProduct_bell_boost_at_centre(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  bands[0] = makeBand(1000.f, 6.f, 1.f, geelen::EqFilterType::Bell, 12);
+  geelen::EqStage st[geelen::EQ_MAX_STAGES_PER_LAYER];
+  size_t n = geelen::eqBuildStageList(44100.f, bands, 1, st);
+  float lin = geelen::eqLinearMagProduct(st, n, 1000.f, 44100.f);
+  float expected = powf(10.f, 6.f / 20.f);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f * expected, expected, lin);
+}
+
 int main(int argc, char** argv) {
   (void)argc;
   (void)argv;
@@ -147,5 +205,10 @@ int main(int argc, char** argv) {
   RUN_TEST(test_buildSnapcastHelloFrame_roundtrip);
   RUN_TEST(test_buildSnapcastHelloFrame_out_too_small);
   RUN_TEST(test_buildSnapcastHelloFrame_null_inputs);
+  RUN_TEST(test_eqBuildStageList_bell_bypass_zero_gain);
+  RUN_TEST(test_eqBuildStageList_bell_three_db_one_stage);
+  RUN_TEST(test_eqBuildStageList_lowpass_24_two_biquads);
+  RUN_TEST(test_eqBuildStageList_lowpass_6_one_pole);
+  RUN_TEST(test_eqLinearMagProduct_bell_boost_at_centre);
   return UNITY_END();
 }

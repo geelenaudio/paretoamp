@@ -2,6 +2,7 @@
 
 #include "idf_api.h"
 #include "idf_config_manager.h"
+#include "eq_types.h"
 #include "idf_cpu_sampler.h"
 
 #include "esp_http_server.h"
@@ -24,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 #include <cmath>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -51,6 +53,8 @@ extern "C" void on_channels_changed() __attribute__((weak));
 // computed by sweeping the engine's biquad responses. Returns 0 if the
 // hook is absent so the UI still has a usable number.
 extern "C" float compute_eq_peak_db() __attribute__((weak));
+extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl, float* rr);
+extern "C" void testToneNotifyParamsUpdated(void) __attribute__((weak));
 
 static esp_err_t send_json(httpd_req_t* req, cJSON* root) {
   char* out = cJSON_PrintUnformatted(root);
@@ -147,6 +151,7 @@ static const char* modeName(AudioSource s) {
     case AudioSource::Bluetooth: return "bluetooth";
     case AudioSource::Network:   return "snapclient";
     case AudioSource::Dlna:      return "dlna";
+    case AudioSource::TestTone:  return "test_tone";
   }
   return "bluetooth";
 }
@@ -158,7 +163,33 @@ static bool parseModeName(const char* s, AudioSource* out) {
     *out = AudioSource::Network; return true;
   }
   if (!strcmp(s, "dlna") || !strcmp(s, "upnp")) { *out = AudioSource::Dlna; return true; }
+  if (!strcmp(s, "test_tone") || !strcmp(s, "testtone") || !strcmp(s, "tone")) {
+    *out = AudioSource::TestTone;
+    return true;
+  }
   return false;
+}
+
+static const char* eqTypeToStr(geelen::EqFilterType t) {
+  switch (t) {
+    case geelen::EqFilterType::Bell: return "bell";
+    case geelen::EqFilterType::LowShelf: return "low_shelf";
+    case geelen::EqFilterType::HighShelf: return "high_shelf";
+    case geelen::EqFilterType::Notch: return "notch";
+    case geelen::EqFilterType::LowPass: return "low_pass";
+    case geelen::EqFilterType::HighPass: return "high_pass";
+    default: return "bell";
+  }
+}
+
+static void strToEqType(const char* s, geelen::EqFilterType* out) {
+  if (!s || !out) return;
+  if (!strcasecmp(s, "low_shelf")) *out = geelen::EqFilterType::LowShelf;
+  else if (!strcasecmp(s, "high_shelf")) *out = geelen::EqFilterType::HighShelf;
+  else if (!strcasecmp(s, "notch")) *out = geelen::EqFilterType::Notch;
+  else if (!strcasecmp(s, "low_pass")) *out = geelen::EqFilterType::LowPass;
+  else if (!strcasecmp(s, "high_pass")) *out = geelen::EqFilterType::HighPass;
+  else *out = geelen::EqFilterType::Bell;
 }
 
 static cJSON* bandToJson(const ParametricBand& b) {
@@ -166,6 +197,8 @@ static cJSON* bandToJson(const ParametricBand& b) {
   cJSON_AddNumberToObject(o, "freq", b.freq_hz);
   cJSON_AddNumberToObject(o, "gain_db", b.gain_db);
   cJSON_AddNumberToObject(o, "q", b.q);
+  cJSON_AddStringToObject(o, "type", eqTypeToStr(b.type));
+  cJSON_AddNumberToObject(o, "slope_db_oct", b.slope_db_oct);
   return o;
 }
 
@@ -173,13 +206,29 @@ static bool jsonToBand(const cJSON* o, ParametricBand* out) {
   if (!cJSON_IsObject(o) || !out) return false;
   out->freq_hz = (float)jdouble(o, "freq", out->freq_hz);
   out->gain_db = (float)jdouble(o, "gain_db", out->gain_db);
-  out->q       = (float)jdouble(o, "q", out->q);
+  out->q = (float)jdouble(o, "q", out->q);
+  const cJSON* tj = cJSON_GetObjectItemCaseSensitive(o, "type");
+  if (cJSON_IsString(tj) && tj->valuestring) strToEqType(tj->valuestring, &out->type);
+  else if (cJSON_IsNumber(tj)) {
+    int v = (int)cJSON_GetNumberValue(tj);
+    if (v >= 0 && v <= (int)geelen::EqFilterType::HighPass) out->type = (geelen::EqFilterType)v;
+  }
+  const cJSON* sj = cJSON_GetObjectItemCaseSensitive(o, "slope_db_oct");
+  if (cJSON_IsNumber(sj)) {
+    int slo = (int)cJSON_GetNumberValue(sj);
+    if (slo == 6 || slo == 12 || slo == 24) out->slope_db_oct = (uint8_t)slo;
+  }
+  if (out->slope_db_oct != 6 && out->slope_db_oct != 12 && out->slope_db_oct != 24) out->slope_db_oct = 12;
+  out->_pad[0] = out->_pad[1] = 0;
   return true;
 }
 
-static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool enabled) {
+static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool enabled, uint8_t band_count) {
   cJSON* o = cJSON_CreateObject();
   cJSON_AddBoolToObject(o, "enabled", enabled);
+  if (band_count < 1) band_count = 1;
+  if (band_count > (uint8_t)PARAMETRIC_BANDS) band_count = (uint8_t)PARAMETRIC_BANDS;
+  cJSON_AddNumberToObject(o, "band_count", band_count);
   cJSON* arr = cJSON_CreateArray();
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) cJSON_AddItemToArray(arr, bandToJson(bands[i]));
   cJSON_AddItemToObject(o, "bands", arr);
@@ -192,6 +241,23 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   auto* cfg = (ConfigManager*)req->user_ctx;
   if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
 
+  char etag[24];
+  snprintf(etag, sizeof(etag), "\"%08lx\"", (unsigned long)cfg->stateVersion());
+
+  char inm[80] = {0};
+  if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK) {
+    const char* cm = inm;
+    while (*cm == ' ' || *cm == '\t') ++cm;
+    if (cm[0] == 'W' && cm[1] == '/') cm += 2;
+    if (strcmp(cm, etag) == 0) {
+      // Status first — some httpd builds reject header/body ordering otherwise.
+      httpd_resp_set_status(req, "304 Not Modified");
+      httpd_resp_set_hdr(req, "ETag", etag);
+      httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+      return httpd_resp_send(req, nullptr, 0);
+    }
+  }
+
   cJSON* root = cJSON_CreateObject();
 
   char dev_name[DEV_NAME_MAX];
@@ -202,6 +268,7 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   cJSON_AddStringToObject(root, "firmware", desc ? desc->version : "dev");
 
   cJSON_AddStringToObject(root, "mode", modeName(cfg->getAudioSource()));
+  cJSON_AddBoolToObject(root, "voice_feedback", cfg->getVoiceFeedbackEnabled());
 
   cJSON* vol = cJSON_CreateObject();
   cJSON_AddNumberToObject(vol, "l", cfg->getVolumeL());
@@ -232,8 +299,10 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   ParametricBand cal[PARAMETRIC_BANDS], pref[PARAMETRIC_BANDS];
   cfg->getEqCalibration(cal);
   cfg->getEqPreference(pref);
-  cJSON_AddItemToObject(eq, "calibration", curveToJson(cal, cfg->getEqCalibrationEnabled()));
-  cJSON_AddItemToObject(eq, "preference",  curveToJson(pref, cfg->getEqPreferenceEnabled()));
+  cJSON_AddItemToObject(eq, "calibration",
+                        curveToJson(cal, cfg->getEqCalibrationEnabled(), cfg->getEqCalibrationActiveBands()));
+  cJSON_AddItemToObject(eq, "preference",
+                        curveToJson(pref, cfg->getEqPreferenceEnabled(), cfg->getEqPreferenceActiveBands()));
   cJSON* hr = cJSON_CreateObject();
   cJSON_AddStringToObject(hr, "mode",
                           cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
@@ -246,43 +315,30 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   cJSON_AddNumberToObject(eq, "active_slot", cfg->getEqPreferenceSlot());
   cJSON_AddItemToObject(root, "eq", eq);
 
+  cJSON* tt = cJSON_CreateObject();
+  cJSON_AddNumberToObject(tt, "freq_hz", cfg->getTestToneFreqHz());
+  cJSON_AddNumberToObject(tt, "amp_db", cfg->getTestToneAmpDb());
+  cJSON_AddNumberToObject(tt, "pan", cfg->getTestTonePan());
+  cJSON_AddNumberToObject(tt, "mode", cfg->getTestToneMode());
+  cJSON_AddNumberToObject(tt, "sweep_s", cfg->getTestToneSweepS());
+  cJSON_AddNumberToObject(tt, "sweep_lo_hz", cfg->getTestToneSweepLoHz());
+  cJSON_AddNumberToObject(tt, "sweep_hi_hz", cfg->getTestToneSweepHiHz());
+  cJSON_AddNumberToObject(tt, "dual_f2_hz", cfg->getTestToneDualF2Hz());
+  cJSON_AddItemToObject(root, "test_tone", tt);
+
+  httpd_resp_set_hdr(req, "ETag", etag);
   return send_json(req, root);
 }
 
-// ---- /api/system (runtime metrics) ---------------------------------------
+// ---- /api/system (runtime metrics + identity) ----------------------------
 
-// Best-effort runtime snapshot: uptime, free heap, PSRAM, chip, WiFi link
-// info, CPU load. CPU load comes from the idle-hook sampler
-// (idf_cpu_sampler); WiFi from esp_wifi_sta_get_ap_info. Everything here is
-// cheap enough to be called once per second from the SPA Overview page.
-static esp_err_t handle_get_system(httpd_req_t* req) {
-  cJSON* root = cJSON_CreateObject();
-
-  // Uptime from the monotonic timer.
+static void appendSystemMetrics(cJSON* root) {
   uint64_t us = esp_timer_get_time();
   cJSON_AddNumberToObject(root, "uptime_s", (double)(us / 1000000ULL));
+  cJSON_AddNumberToObject(root, "free_heap", (double)esp_get_free_heap_size());
+  cJSON_AddNumberToObject(root, "min_free_heap", (double)esp_get_minimum_free_heap_size());
+  cJSON_AddNumberToObject(root, "free_psram", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-  cJSON_AddNumberToObject(root, "free_heap",        (double)esp_get_free_heap_size());
-  cJSON_AddNumberToObject(root, "min_free_heap",    (double)esp_get_minimum_free_heap_size());
-  cJSON_AddNumberToObject(root, "free_psram",       (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-
-  esp_chip_info_t chip{};
-  esp_chip_info(&chip);
-  cJSON* c = cJSON_CreateObject();
-  const char* model = "ESP32";
-  switch (chip.model) {
-    case CHIP_ESP32:   model = "ESP32";   break;
-    case CHIP_ESP32S2: model = "ESP32-S2"; break;
-    case CHIP_ESP32S3: model = "ESP32-S3"; break;
-    case CHIP_ESP32C3: model = "ESP32-C3"; break;
-    default: break;
-  }
-  cJSON_AddStringToObject(c, "model", model);
-  cJSON_AddNumberToObject(c, "revision", chip.revision);
-  cJSON_AddNumberToObject(c, "cores", chip.cores);
-  cJSON_AddItemToObject(root, "chip", c);
-
-  // WiFi / IP. Only available in STA mode once associated.
   cJSON* wifi = cJSON_CreateObject();
   wifi_ap_record_t ap{};
   if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
@@ -315,26 +371,48 @@ static esp_err_t handle_get_system(httpd_req_t* req) {
   cJSON_AddNumberToObject(cpu, "core1_pct", c1);
   cJSON_AddItemToObject(root, "cpu", cpu);
 
-  // Firmware identity: version / compile time / IDF version / ELF SHA256.
-  // Everything here is baked at link time and survives OTA swaps.
+  float pl = -90.f, pr = -90.f, rl = -90.f, rr = -90.f;
+  geelen_engine_read_output_meters(&pl, &pr, &rl, &rr);
+  cJSON* audio = cJSON_CreateObject();
+  cJSON* outm = cJSON_CreateObject();
+  cJSON_AddNumberToObject(outm, "peak_l_db", (double)pl);
+  cJSON_AddNumberToObject(outm, "peak_r_db", (double)pr);
+  cJSON_AddNumberToObject(outm, "rms_l_db", (double)rl);
+  cJSON_AddNumberToObject(outm, "rms_r_db", (double)rr);
+  cJSON_AddItemToObject(audio, "out", outm);
+  cJSON_AddItemToObject(root, "audio", audio);
+}
+
+static void appendSystemIdentity(cJSON* root) {
+  esp_chip_info_t chip{};
+  esp_chip_info(&chip);
+  cJSON* c = cJSON_CreateObject();
+  const char* model = "ESP32";
+  switch (chip.model) {
+    case CHIP_ESP32:   model = "ESP32";   break;
+    case CHIP_ESP32S2: model = "ESP32-S2"; break;
+    case CHIP_ESP32S3: model = "ESP32-S3"; break;
+    case CHIP_ESP32C3: model = "ESP32-C3"; break;
+    default: break;
+  }
+  cJSON_AddStringToObject(c, "model", model);
+  cJSON_AddNumberToObject(c, "revision", chip.revision);
+  cJSON_AddNumberToObject(c, "cores", chip.cores);
+  cJSON_AddItemToObject(root, "chip", c);
+
   const esp_app_desc_t* desc = esp_app_get_description();
   cJSON* fw = cJSON_CreateObject();
-  cJSON_AddStringToObject(fw, "version",  desc ? desc->version      : "dev");
-  cJSON_AddStringToObject(fw, "project",  desc ? desc->project_name : "");
-  cJSON_AddStringToObject(fw, "build_date", desc ? desc->date       : "");
-  cJSON_AddStringToObject(fw, "build_time", desc ? desc->time       : "");
-  cJSON_AddStringToObject(fw, "idf_ver",  desc ? desc->idf_ver      : "");
-  // ELF SHA256, 32 bytes → 64 hex chars. Truncated server-side to avoid
-  // spraying NUL terminators into the JSON.
-  // `esp_app_get_elf_sha256` formats it as a NUL-terminated hex string
-  // directly, so we only need a 65-byte buffer and zero post-processing.
+  cJSON_AddStringToObject(fw, "version", desc ? desc->version : "dev");
+  cJSON_AddStringToObject(fw, "project", desc ? desc->project_name : "");
+  cJSON_AddStringToObject(fw, "build_date", desc ? desc->date : "");
+  cJSON_AddStringToObject(fw, "build_time", desc ? desc->time : "");
+  cJSON_AddStringToObject(fw, "idf_ver", desc ? desc->idf_ver : "");
   char sha_hex[65] = {0};
   if (esp_app_get_elf_sha256(sha_hex, sizeof(sha_hex)) > 0) {
     cJSON_AddStringToObject(fw, "elf_sha256", sha_hex);
   }
   cJSON_AddItemToObject(root, "firmware", fw);
 
-  // Network identity: STA and softAP MACs + hostname.
   cJSON* net = cJSON_CreateObject();
   uint8_t mac[6] = {0};
   char mac_buf[18];
@@ -353,6 +431,7 @@ static esp_err_t handle_get_system(httpd_req_t* req) {
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     cJSON_AddStringToObject(net, "bt_mac", mac_buf);
   }
+  esp_netif_t* nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (nif) {
     const char* host = nullptr;
     if (esp_netif_get_hostname(nif, &host) == ESP_OK && host) {
@@ -360,7 +439,24 @@ static esp_err_t handle_get_system(httpd_req_t* req) {
     }
   }
   cJSON_AddItemToObject(root, "net", net);
+}
 
+static esp_err_t handle_get_system(httpd_req_t* req) {
+  cJSON* root = cJSON_CreateObject();
+  appendSystemMetrics(root);
+  appendSystemIdentity(root);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_get_system_metrics(httpd_req_t* req) {
+  cJSON* root = cJSON_CreateObject();
+  appendSystemMetrics(root);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_get_system_identity(httpd_req_t* req) {
+  cJSON* root = cJSON_CreateObject();
+  appendSystemIdentity(root);
   return send_json(req, root);
 }
 
@@ -380,7 +476,6 @@ static esp_err_t handle_get_volume(httpd_req_t* req) {
       if (v < 0) v = 0;
       if (v > 100) v = 100;
       cfg->setVolume((uint8_t)v);
-      cfg->save();
       if (&on_volume_changed) on_volume_changed();
     }
   }
@@ -414,7 +509,6 @@ static esp_err_t handle_post_volume(httpd_req_t* req) {
 
   cfg->setVolumeLR((uint8_t)l, (uint8_t)r);
   cfg->setMuted(muted);
-  cfg->save();
   cJSON_Delete(body);
 
   if (&on_volume_changed) on_volume_changed();
@@ -445,7 +539,6 @@ static esp_err_t handle_post_channels(httpd_req_t* req) {
 
   cfg->setStereoMode(mode);
   cfg->setChannels(l_on, r_on);
-  cfg->save();
   cJSON_Delete(body);
 
   if (&on_channels_changed) on_channels_changed();
@@ -475,7 +568,8 @@ static esp_err_t handle_post_mode(httpd_req_t* req) {
   AudioSource next = AudioSource::Bluetooth;
   if (!mode || !parseModeName(mode, &next)) {
     cJSON_Delete(body);
-    return send_err_json(req, HTTPD_400_BAD_REQUEST, "mode must be one of bluetooth|snapclient|dlna");
+    return send_err_json(req, HTTPD_400_BAD_REQUEST,
+                         "mode must be one of bluetooth|snapclient|dlna|test_tone");
   }
   AudioSource prev = cfg->getAudioSource();
   cfg->setAudioSource(next);
@@ -519,7 +613,6 @@ static esp_err_t handle_post_snapcast(httpd_req_t* req) {
 
   cfg->setSnapcastHost(host);
   cfg->setSnapcastPort((uint16_t)port);
-  cfg->save();
   cJSON_Delete(body);
 
   if (&on_snapcast_config_changed) on_snapcast_config_changed();
@@ -545,13 +638,30 @@ static esp_err_t handle_post_dlna(httpd_req_t* req) {
   const char* name = jstr(body, "name", nullptr);
   cfg->setDlnaEnabled(enabled);
   if (name && *name) cfg->setDeviceName(name);
-  cfg->save();
   cJSON_Delete(body);
 
   cJSON* rj = cJSON_CreateObject();
   cJSON_AddBoolToObject(rj, "enabled", enabled);
   char dn[DEV_NAME_MAX]; cfg->getDeviceName(dn, sizeof(dn));
   cJSON_AddStringToObject(rj, "name", dn);
+  return send_json(req, rj);
+}
+
+// ---- /api/voice-feedback -------------------------------------------------
+
+static esp_err_t handle_post_voice_feedback(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  bool enabled = jbool(body, "enabled", cfg->getVoiceFeedbackEnabled());
+  cfg->setVoiceFeedbackEnabled(enabled);
+  cJSON_Delete(body);
+
+  cJSON* rj = cJSON_CreateObject();
+  cJSON_AddBoolToObject(rj, "enabled", cfg->getVoiceFeedbackEnabled());
   return send_json(req, rj);
 }
 
@@ -566,7 +676,6 @@ static esp_err_t handle_post_device_name(httpd_req_t* req) {
   const char* n = jstr(body, "name", nullptr);
   if (!n || !*n) { cJSON_Delete(body); return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required"); }
   cfg->setDeviceName(n);
-  cfg->save();
   cJSON_Delete(body);
 
   cJSON* rj = cJSON_CreateObject();
@@ -596,12 +705,18 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
 
   const bool is_cal = !strcmp(layer, "calibration");
 
-  // Load current curve, overlay any bands the request provides (array of
-  // length 10, or partial — we iterate by index so the client can send just
-  // a single edited band if they want).
   ParametricBand bands[PARAMETRIC_BANDS];
   if (is_cal) cfg->getEqCalibration(bands);
-  else        cfg->getEqPreference(bands);
+  else cfg->getEqPreference(bands);
+
+  const cJSON* bcj = cJSON_GetObjectItemCaseSensitive(body, "band_count");
+  if (cJSON_IsNumber(bcj)) {
+    int v = (int)cJSON_GetNumberValue(bcj);
+    if (v >= 1 && v <= (int)PARAMETRIC_BANDS) {
+      if (is_cal) cfg->setEqCalibrationActiveBands((uint8_t)v);
+      else cfg->setEqPreferenceActiveBands((uint8_t)v);
+    }
+  }
 
   const cJSON* arr = cJSON_GetObjectItemCaseSensitive(body, "bands");
   if (cJSON_IsArray(arr)) {
@@ -624,7 +739,6 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
     cfg->setEqPreference(bands);
     cfg->setEqPreferenceEnabled(enabled);
   }
-  cfg->save();
   cJSON_Delete(body);
 
   if (&on_eq_changed) on_eq_changed();
@@ -632,7 +746,8 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
   // Reply with the full curve as stored (post-clamp) so the UI can
   // reconcile. We also include the updated headroom block — any EQ edit
   // can change the peak gain and thus the auto headroom.
-  cJSON* rj = curveToJson(bands, enabled);
+  const uint8_t out_bc = is_cal ? cfg->getEqCalibrationActiveBands() : cfg->getEqPreferenceActiveBands();
+  cJSON* rj = curveToJson(bands, enabled, out_bc);
   cJSON_AddStringToObject(rj, "layer", layer);
   cJSON* hr = cJSON_CreateObject();
   cJSON_AddStringToObject(hr, "mode",
@@ -656,7 +771,6 @@ static esp_err_t handle_post_eq_headroom(httpd_req_t* req) {
   double manual_db = jdouble(body, "manual_db", cfg->getHeadroomManualDb());
   if (manual_db > 0.0) manual_db = 0.0;
   cfg->setHeadroom(mode, (float)manual_db);
-  cfg->save();
   cJSON_Delete(body);
 
   if (&on_eq_changed) on_eq_changed();
@@ -671,30 +785,74 @@ static esp_err_t handle_post_eq_headroom(httpd_req_t* req) {
 
 // ---- /api/eq/presets -----------------------------------------------------
 
-// On-disk slot layout. 32 B name prefix + 10 × 12 B bands = 152 B. Plus
-// reserved padding so struct evolution doesn't break old slots.
-struct PresetFile {
+static constexpr uint32_t kPresetMagic = 0x32504745u;  // 'EGP2' LE
+static constexpr uint16_t kPresetVersion = 2;
+
+#pragma pack(push, 1)
+struct PresetFileV2 {
+  uint32_t magic;
+  uint16_t version;
+  uint8_t band_count;
+  uint8_t reserved;
   char name[PRESET_NAME_MAX];
   ParametricBand bands[PARAMETRIC_BANDS];
-  uint8_t reserved[8];  // pad to 168 B
 };
+#pragma pack(pop)
+
+static void presetMigrate12(const uint8_t* src120, ParametricBand out[PARAMETRIC_BANDS]) {
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
+    float f, g, q;
+    memcpy(&f, src120 + i * 12, sizeof(float));
+    memcpy(&g, src120 + i * 12 + 4, sizeof(float));
+    memcpy(&q, src120 + i * 12 + 8, sizeof(float));
+    out[i].freq_hz = f;
+    out[i].gain_db = g;
+    out[i].q = q;
+    out[i].type = geelen::EqFilterType::Bell;
+    out[i].slope_db_oct = 12;
+    out[i]._pad[0] = out[i]._pad[1] = 0;
+  }
+}
 
 static void presetPath(char out[64], size_t idx) {
   snprintf(out, 64, "%s/pref_%u.bin", PRESETS_DIR, (unsigned)idx);
 }
 
-static bool presetRead(size_t idx, PresetFile* out) {
-  char path[64]; presetPath(path, idx);
+static bool presetReadV2(size_t idx, PresetFileV2* out) {
+  char path[64];
+  presetPath(path, idx);
   int fd = open(path, O_RDONLY);
   if (fd < 0) return false;
-  ssize_t r = read(fd, out, sizeof(*out));
+  uint8_t buf[256];
+  ssize_t r = read(fd, buf, sizeof(buf));
   close(fd);
-  return r == (ssize_t)sizeof(*out);
+  constexpr ssize_t kOld = (ssize_t)(PRESET_NAME_MAX + PARAMETRIC_BANDS * 12u + 8u);
+  constexpr ssize_t kNew = (ssize_t)sizeof(PresetFileV2);
+  if (r >= kNew) {
+    memcpy(out, buf, sizeof(*out));
+    if (out->magic == kPresetMagic && out->version == kPresetVersion) {
+      if (out->band_count < 1 || out->band_count > (uint8_t)PARAMETRIC_BANDS)
+        out->band_count = (uint8_t)PARAMETRIC_BANDS;
+      return true;
+    }
+  }
+  if (r >= kOld) {
+    memcpy(out->name, buf, PRESET_NAME_MAX);
+    out->name[PRESET_NAME_MAX - 1] = '\0';
+    presetMigrate12(buf + PRESET_NAME_MAX, out->bands);
+    out->magic = kPresetMagic;
+    out->version = kPresetVersion;
+    out->band_count = (uint8_t)PARAMETRIC_BANDS;
+    out->reserved = 0;
+    return true;
+  }
+  return false;
 }
 
-static bool presetWrite(size_t idx, const PresetFile* in) {
+static bool presetWriteV2(size_t idx, const PresetFileV2* in) {
   (void)mkdir(PRESETS_DIR, 0777);
-  char path[64]; presetPath(path, idx);
+  char path[64];
+  presetPath(path, idx);
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd < 0) return false;
   ssize_t w = write(fd, in, sizeof(*in));
@@ -720,8 +878,8 @@ static esp_err_t handle_get_presets(httpd_req_t* req) {
   for (size_t i = 0; i < PRESET_SLOT_COUNT; ++i) {
     cJSON* s = cJSON_CreateObject();
     cJSON_AddNumberToObject(s, "index", i);
-    PresetFile pf{};
-    const bool saved = presetRead(i, &pf);
+    PresetFileV2 pf{};
+    const bool saved = presetReadV2(i, &pf);
     if (saved) {
       pf.name[PRESET_NAME_MAX - 1] = '\0';
       cJSON_AddStringToObject(s, "name", pf.name);
@@ -803,15 +961,19 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     cJSON* body = parse_body(req);
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
-    PresetFile pf{};
+    PresetFileV2 pf{};
+    pf.magic = kPresetMagic;
+    pf.version = kPresetVersion;
+    pf.band_count = cfg->getEqPreferenceActiveBands();
+    pf.reserved = 0;
     if (name && *name) strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     else snprintf(pf.name, PRESET_NAME_MAX, "Preset %u", (unsigned)(idx + 1));
+    pf.name[PRESET_NAME_MAX - 1] = '\0';
     cfg->getEqPreference(pf.bands);
-    const bool ok = presetWrite(idx, &pf);
+    const bool ok = presetWriteV2(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
     cfg->setEqPreferenceSlot((uint8_t)idx);
-    cfg->save();
     cJSON* rj = cJSON_CreateObject();
     cJSON_AddNumberToObject(rj, "index", (double)idx);
     cJSON_AddStringToObject(rj, "name", pf.name);
@@ -820,17 +982,18 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
   }
 
   if (!strcmp(action, "load")) {
-    PresetFile pf{};
-    if (!presetRead(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
+    PresetFileV2 pf{};
+    if (!presetReadV2(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
     cfg->setEqPreference(pf.bands);
+    cfg->setEqPreferenceActiveBands(pf.band_count);
     cfg->setEqPreferenceSlot((uint8_t)idx);
-    cfg->save();
     if (&on_eq_changed) on_eq_changed();
     cJSON* rj = cJSON_CreateObject();
     cJSON_AddNumberToObject(rj, "index", (double)idx);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
     cJSON_AddStringToObject(rj, "name", pf.name);
-    cJSON_AddItemToObject(rj, "preference", curveToJson(pf.bands, cfg->getEqPreferenceEnabled()));
+    cJSON_AddItemToObject(rj, "preference",
+                          curveToJson(pf.bands, cfg->getEqPreferenceEnabled(), cfg->getEqPreferenceActiveBands()));
     return send_json(req, rj);
   }
 
@@ -839,11 +1002,11 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
     if (!name || !*name) { cJSON_Delete(body); return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required"); }
-    PresetFile pf{};
-    if (!presetRead(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
+    PresetFileV2 pf{};
+    if (!presetReadV2(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
     strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
-    const bool ok = presetWrite(idx, &pf);
+    const bool ok = presetWriteV2(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
     cJSON* rj = cJSON_CreateObject();
@@ -853,6 +1016,212 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
   }
 
   return send_err_json(req, HTTPD_404_NOT_FOUND, "unknown preset action");
+}
+
+// ---- /api/test-tone -------------------------------------------------------
+
+static esp_err_t handle_get_test_tone(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+  cJSON* r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "freq_hz", cfg->getTestToneFreqHz());
+  cJSON_AddNumberToObject(r, "amp_db", cfg->getTestToneAmpDb());
+  cJSON_AddNumberToObject(r, "pan", cfg->getTestTonePan());
+  cJSON_AddNumberToObject(r, "mode", cfg->getTestToneMode());
+  cJSON_AddNumberToObject(r, "sweep_s", cfg->getTestToneSweepS());
+  cJSON_AddNumberToObject(r, "sweep_lo_hz", cfg->getTestToneSweepLoHz());
+  cJSON_AddNumberToObject(r, "sweep_hi_hz", cfg->getTestToneSweepHiHz());
+  cJSON_AddNumberToObject(r, "dual_f2_hz", cfg->getTestToneDualF2Hz());
+  return send_json(req, r);
+}
+
+static esp_err_t handle_post_test_tone(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  const float freq = (float)jdouble(body, "freq_hz", cfg->getTestToneFreqHz());
+  const float amp = (float)jdouble(body, "amp_db", cfg->getTestToneAmpDb());
+  const float pan = (float)jdouble(body, "pan", cfg->getTestTonePan());
+  int mode_i = jint(body, "mode", (int)cfg->getTestToneMode());
+  if (mode_i < 0) mode_i = 0;
+  if (mode_i > 10) mode_i = 10;
+  const float sweep_s = (float)jdouble(body, "sweep_s", cfg->getTestToneSweepS());
+  const float slo = (float)jdouble(body, "sweep_lo_hz", cfg->getTestToneSweepLoHz());
+  const float shi = (float)jdouble(body, "sweep_hi_hz", cfg->getTestToneSweepHiHz());
+  const float df2 = (float)jdouble(body, "dual_f2_hz", cfg->getTestToneDualF2Hz());
+  cfg->setTestToneParams(freq, amp, pan, (uint8_t)mode_i, sweep_s, slo, shi, df2);
+  cJSON_Delete(body);
+
+  if (&testToneNotifyParamsUpdated) testToneNotifyParamsUpdated();
+
+  cJSON* r = cJSON_CreateObject();
+  cJSON_AddBoolToObject(r, "ok", true);
+  cJSON_AddNumberToObject(r, "freq_hz", cfg->getTestToneFreqHz());
+  cJSON_AddNumberToObject(r, "amp_db", cfg->getTestToneAmpDb());
+  cJSON_AddNumberToObject(r, "pan", cfg->getTestTonePan());
+  cJSON_AddNumberToObject(r, "mode", cfg->getTestToneMode());
+  cJSON_AddNumberToObject(r, "sweep_s", cfg->getTestToneSweepS());
+  cJSON_AddNumberToObject(r, "sweep_lo_hz", cfg->getTestToneSweepLoHz());
+  cJSON_AddNumberToObject(r, "sweep_hi_hz", cfg->getTestToneSweepHiHz());
+  cJSON_AddNumberToObject(r, "dual_f2_hz", cfg->getTestToneDualF2Hz());
+  return send_json(req, r);
+}
+
+// ---- /api/wifi/scan + /api/wifi/state ------------------------------------
+
+// `esp_wifi_scan_start` requires STA or APSTA mode. The captive AP fallback in
+// `idf_wifi_manager.cpp` already runs APSTA; in normal STA mode we are also
+// fine. We block (synchronous scan) for ~3 s to keep the handler simple.
+static esp_err_t handle_get_wifi_scan(httpd_req_t* req) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  esp_wifi_get_mode(&mode);
+  if (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA) {
+    return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan needs STA/APSTA mode");
+  }
+
+  wifi_scan_config_t scan{};
+  scan.show_hidden = false;
+  // Block until results are in (~3 s, depending on channel dwell). Captive
+  // portal browsers tolerate this; the scan endpoint is not on the audio path.
+  esp_err_t e = esp_wifi_scan_start(&scan, true);
+  if (e != ESP_OK) {
+    return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(e));
+  }
+
+  uint16_t n = 0;
+  esp_wifi_scan_get_ap_num(&n);
+  if (n > 32) n = 32;  // cap to keep the JSON small
+  wifi_ap_record_t* recs = nullptr;
+  if (n > 0) {
+    recs = (wifi_ap_record_t*)calloc(n, sizeof(wifi_ap_record_t));
+    if (!recs) {
+      esp_wifi_clear_ap_list();
+      return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+    }
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) {
+      free(recs);
+      return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan get failed");
+    }
+  }
+
+  // Dedupe by SSID, keep strongest RSSI per name. Vendors broadcast the same
+  // SSID on 2.4 / 5 GHz; we pick the best signal.
+  struct Entry { char ssid[33]; int8_t rssi; uint8_t channel; uint8_t auth; };
+  Entry uniq[32];
+  size_t uniq_n = 0;
+  for (uint16_t i = 0; i < n; ++i) {
+    const wifi_ap_record_t& r = recs[i];
+    if (r.ssid[0] == '\0') continue;
+    bool merged = false;
+    for (size_t j = 0; j < uniq_n; ++j) {
+      if (strncmp(uniq[j].ssid, (const char*)r.ssid, 32) == 0) {
+        if (r.rssi > uniq[j].rssi) {
+          uniq[j].rssi = r.rssi;
+          uniq[j].channel = r.primary;
+          uniq[j].auth = (uint8_t)r.authmode;
+        }
+        merged = true;
+        break;
+      }
+    }
+    if (!merged && uniq_n < 32) {
+      strncpy(uniq[uniq_n].ssid, (const char*)r.ssid, sizeof(uniq[uniq_n].ssid) - 1);
+      uniq[uniq_n].ssid[sizeof(uniq[uniq_n].ssid) - 1] = '\0';
+      uniq[uniq_n].rssi = r.rssi;
+      uniq[uniq_n].channel = r.primary;
+      uniq[uniq_n].auth = (uint8_t)r.authmode;
+      uniq_n++;
+    }
+  }
+  free(recs);
+
+  // Sort by RSSI desc (small N, simple insertion sort).
+  for (size_t i = 1; i < uniq_n; ++i) {
+    Entry tmp = uniq[i];
+    size_t j = i;
+    while (j > 0 && uniq[j - 1].rssi < tmp.rssi) {
+      uniq[j] = uniq[j - 1];
+      --j;
+    }
+    uniq[j] = tmp;
+  }
+  if (uniq_n > 24) uniq_n = 24;
+
+  cJSON* root = cJSON_CreateObject();
+  cJSON* arr = cJSON_CreateArray();
+  for (size_t i = 0; i < uniq_n; ++i) {
+    cJSON* it = cJSON_CreateObject();
+    cJSON_AddStringToObject(it, "ssid", uniq[i].ssid);
+    cJSON_AddNumberToObject(it, "rssi", uniq[i].rssi);
+    cJSON_AddNumberToObject(it, "channel", uniq[i].channel);
+    cJSON_AddNumberToObject(it, "auth", uniq[i].auth);
+    cJSON_AddItemToArray(arr, it);
+  }
+  cJSON_AddItemToObject(root, "networks", arr);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_get_wifi_state(httpd_req_t* req) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  esp_wifi_get_mode(&mode);
+
+  bool ap_running = (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
+  bool sta_connected = false;
+  char ssid[33] = {0};
+  int rssi = 0;
+  uint8_t channel = 0;
+  wifi_ap_record_t ap{};
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    sta_connected = true;
+    strncpy(ssid, (const char*)ap.ssid, sizeof(ssid) - 1);
+    rssi = ap.rssi;
+    channel = ap.primary;
+  }
+
+  char ip_buf[16] = "0.0.0.0";
+  esp_netif_t* nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (nif) {
+    esp_netif_ip_info_t ip{};
+    if (esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr != 0) {
+      snprintf(ip_buf, sizeof(ip_buf), "%u.%u.%u.%u",
+               (unsigned)((ip.ip.addr >> 0) & 0xff),
+               (unsigned)((ip.ip.addr >> 8) & 0xff),
+               (unsigned)((ip.ip.addr >> 16) & 0xff),
+               (unsigned)((ip.ip.addr >> 24) & 0xff));
+    }
+  }
+
+  char ap_ssid[33] = {0};
+  esp_netif_t* ap_nif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  char ap_ip_buf[16] = "0.0.0.0";
+  if (ap_running && ap_nif) {
+    esp_netif_ip_info_t ip{};
+    if (esp_netif_get_ip_info(ap_nif, &ip) == ESP_OK) {
+      snprintf(ap_ip_buf, sizeof(ap_ip_buf), "%u.%u.%u.%u",
+               (unsigned)((ip.ip.addr >> 0) & 0xff),
+               (unsigned)((ip.ip.addr >> 8) & 0xff),
+               (unsigned)((ip.ip.addr >> 16) & 0xff),
+               (unsigned)((ip.ip.addr >> 24) & 0xff));
+    }
+    wifi_config_t wc{};
+    if (esp_wifi_get_config(WIFI_IF_AP, &wc) == ESP_OK) {
+      strncpy(ap_ssid, (const char*)wc.ap.ssid, sizeof(ap_ssid) - 1);
+    }
+  }
+
+  cJSON* root = cJSON_CreateObject();
+  cJSON_AddBoolToObject(root, "ap_only", ap_running && !sta_connected);
+  cJSON_AddBoolToObject(root, "ap_running", ap_running);
+  cJSON_AddBoolToObject(root, "sta_connected", sta_connected);
+  cJSON_AddStringToObject(root, "ssid", ssid);
+  cJSON_AddNumberToObject(root, "rssi", rssi);
+  cJSON_AddNumberToObject(root, "channel", channel);
+  cJSON_AddStringToObject(root, "ip", ip_buf);
+  cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
+  cJSON_AddStringToObject(root, "ap_ip", ap_ip_buf);
+  return send_json(req, root);
 }
 
 // ---- /api/reset -----------------------------------------------------------
@@ -905,16 +1274,25 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
     u.method = method;
     u.handler = fn;
     u.user_ctx = cfg;
-    httpd_register_uri_handler(h, &u);
+    esp_err_t e = httpd_register_uri_handler(h, &u);
+    if (e != ESP_OK) {
+      ESP_LOGE(TAG, "httpd_register_uri_handler failed uri=%s method=%d: %s", uri, (int)method,
+               esp_err_to_name(e));
+    }
   };
 
   reg("/api/state",              HTTP_GET,    handle_get_state);
   reg("/api/system",             HTTP_GET,    handle_get_system);
+  reg("/api/system/metrics",     HTTP_GET,    handle_get_system_metrics);
+  reg("/api/system/identity",    HTTP_GET,    handle_get_system_identity);
+  reg("/api/test-tone",          HTTP_GET,    handle_get_test_tone);
+  reg("/api/test-tone",          HTTP_POST,   handle_post_test_tone);
   reg("/api/volume",             HTTP_POST,   handle_post_volume);
   reg("/api/channels",           HTTP_POST,   handle_post_channels);
   reg("/api/mode",               HTTP_POST,   handle_post_mode);
   reg("/api/snapcast",           HTTP_POST,   handle_post_snapcast);  // Overrides legacy form handler; JSON-only.
   reg("/api/dlna",               HTTP_POST,   handle_post_dlna);
+  reg("/api/voice-feedback",     HTTP_POST,   handle_post_voice_feedback);
   reg("/api/device-name",        HTTP_POST,   handle_post_device_name);
   reg("/api/eq",                 HTTP_POST,   handle_post_eq);
   reg("/api/eq/headroom",        HTTP_POST,   handle_post_eq_headroom);
@@ -924,6 +1302,8 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/eq/presets/*",       HTTP_POST,   handle_presets_route);
   reg("/api/eq/presets/*",       HTTP_DELETE, handle_presets_route);
   reg("/api/reset",              HTTP_POST,   handle_post_reset);
+  reg("/api/wifi/scan",          HTTP_GET,    handle_get_wifi_scan);
+  reg("/api/wifi/state",         HTTP_GET,    handle_get_wifi_state);
 }
 
 }  // namespace geelen_idf

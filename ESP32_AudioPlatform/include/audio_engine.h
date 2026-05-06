@@ -1,51 +1,32 @@
 /**
- * Audio Engine – 10-band EQ, PSRAM ring buffer, I2S output.
+ * Audio Engine – parametric EQ (multi-stage), PSRAM ring buffer, I2S output.
  * Feed PCM via feedPCM(); call process() to drain buffer → EQ → I2S.
  */
 
 #ifndef GEELEN_AUDIO_ENGINE_H
 #define GEELEN_AUDIO_ENGINE_H
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 
+#include "eq_coeffs.h"
+#include "eq_types.h"
+
 namespace geelen {
 
-constexpr size_t AUDIO_EQ_BANDS = 10;
-// Two cascades (calibration + preference), each 10 bands, fed one after
-// the other before the per-channel volume stage.
+constexpr size_t AUDIO_EQ_BANDS = EQ_MAX_BANDS;
 constexpr size_t AUDIO_EQ_LAYERS = 2;
 constexpr int EQ_LAYER_CALIBRATION = 0;
-constexpr int EQ_LAYER_PREFERENCE  = 1;
-
-// Parametric band, same wire shape as firmware config. Gain in dB, Q and
-// frequency in natural units.
-struct EqBand {
-  float freq_hz;
-  float gain_db;
-  float q;
-};
+constexpr int EQ_LAYER_PREFERENCE = 1;
 
 constexpr int SAMPLE_RATE = 44100;
-// 2 seconds of stereo 16-bit PCM at 44.1kHz (frames, not int16 samples)
 constexpr size_t RING_BUF_SAMPLES = (size_t)SAMPLE_RATE * 2;
 constexpr size_t RING_BUF_BYTES = RING_BUF_SAMPLES * sizeof(int16_t) * 2;
 
-// Buffering strategy:
-// - Prefill before starting playback to absorb BT/WiFi scheduling jitter.
-// - If we drop too low, pause and rebuffer.
-//
-// The Snapclient is deliberately "dumb" (no TimeProvider, no drift correction),
-// so once playback starts the ring level stays at whatever prefill we picked —
-// server and I2S both run at 44.1 kHz. That means the prefill IS the runtime
-// margin against WiFi/BT-coex jitter, not just a startup setting. 400 ms was
-// too tight: a single 200 ms WiFi burst would drop us under low-water and
-// cause an audible rebuffer, and shorter ones would empty the 185 ms DMA
-// pipeline and click. ~1 s is empirically stable and matches the snapserver's
-// default `buffer` setting, so the TCP socket stops accumulating once we're
-// at steady state. Low-water bumped to match: rebuffer a little earlier, so
-// gaps are a soft reset instead of a cliff-edge stutter.
-constexpr uint32_t AUDIO_PREFILL_MS = 1000;
+/** PCM buffered before first I2S chunk. 1 s made voice/boot clips wait too long
+ *  for first sound; 500 ms is still ample for A2DP/DLNA jitter on this ring. */
+constexpr uint32_t AUDIO_PREFILL_MS = 500;
 constexpr uint32_t AUDIO_LOW_WATER_MS = 300;
 
 class AudioEngine {
@@ -54,98 +35,100 @@ class AudioEngine {
   ~AudioEngine();
 
   bool begin();
-  /** Set I2S TX channel handle (new driver). Pass from main after i2s_channel_init_std_mode. */
   void setI2SChannel(void* tx_handle);
-  // Legacy graphic-EQ entry point: interprets the int8 array as per-band
-  // dB gain at fixed centre frequencies and writes it into the calibration
-  // cascade with a default Q of 1.2. Kept as a compatibility shim for
-  // code paths that haven't been rewritten to setEqCurve yet.
   void setEQGains(const int8_t gains[AUDIO_EQ_BANDS]);
-  // Phase 5 parametric entry point. Replaces the given cascade's bands
-  // and on/off state and rebuilds its biquad coefficients. Safe to call
-  // from any task: the audio task reads coefficients atomically per block.
-  //
-  // `layer` is one of EQ_LAYER_CALIBRATION / EQ_LAYER_PREFERENCE.
-  void setEqCurve(int layer, const EqBand bands[AUDIO_EQ_BANDS], bool enabled);
-  // Linear gain applied after both EQ cascades and mono/channel processing,
-  // expressed in dB. Must be ≤ 0 (otherwise clipping becomes likely). Used
-  // to implement automatic headroom: the API layer sweeps computeEqPeakGainDb()
-  // and passes the negative of that to keep peak output at ≤ 0 dB.
+  /** `active_band_count` in 1..AUDIO_EQ_BANDS; only first N bands are used. */
+  void setEqCurve(int layer, const EqBand bands[AUDIO_EQ_BANDS], uint8_t active_band_count, bool enabled);
   void setHeadroomDb(float db);
-  // Compute the maximum combined |H(f)| of the enabled cascades across
-  // 20 Hz..20 kHz (dense log-spaced sweep). Returns dB. If both cascades
-  // are disabled the result is 0 dB. Deterministic — pure function of the
-  // stored coefficients, safe to call from any task.
+  /** Peak gain of enabled EQ (dB); thread-safe, uses a cache invalidated by `setEqCurve`. */
   float computeEqPeakGainDb() const;
-  // Master volume (applies to both channels equally). Kept for legacy callers;
-  // new code should use setVolumeLR for independent channels.
   void setVolume(uint8_t vol_percent);
-  // Per-channel volume (0..100 each). Each channel is independently
-  // attenuated before I2S.
   void setVolumeLR(uint8_t l_pct, uint8_t r_pct);
-  // Hard mute: zero both outputs until cleared. Mute overrides volume but
-  // preserves the saved levels so un-muting restores what the user set.
   void setMuted(bool muted);
-  // Channel routing:
-  //   l_on / r_on : if false, the corresponding output is silenced.
-  //   mono        : if true, L and R are averaged ((L+R)/2) and the result
-  //                 is fed to both enabled outputs. Downstream the usual
-  //                 per-channel gain / on-off still applies, so "mono ->
-  //                 L only" correctly sums to L and silences R.
   void setChannels(bool l_on, bool r_on, bool mono);
 
   void feedPCM(const uint8_t* data, size_t len_bytes);
-  // Returns true if bytes were written to I2S (i.e. the call blocked briefly
-  // inside i2s_channel_write and yielded CPU naturally). Returns false if the
-  // call early-returned — prefill, rebuffer, underrun, or I2S backpressure
-  // with written=0. Callers driving process() from a tight task loop should
-  // vTaskDelay(1) when it returns false, so the task doesn't busy-spin the
-  // core during those quiet windows.
   bool process();
 
   bool isRunning() const { return running_; }
-  /** Current buffered audio (frames at 44.1kHz stereo). Useful for drift control. */
   size_t bufferedFrames() const;
 
+  /** Post-DSP peak / RMS (dBFS-ish), for `/api/system/metrics` and the test page. */
+  void readOutputMeters(float& peak_l_db, float& peak_r_db, float& rms_l_db, float& rms_r_db) const;
+
  private:
+  void updateOutputMeters(const int16_t* buf, size_t num_frames);
   size_t ringFillSamples() const;
+  /** Like `ringFillSamples()` but caller must hold `feed_mutex_` (or be single-threaded). */
+  size_t ringFillSamplesLocked() const;
   void initBiquads();
   void rebuildCascade(int layer);
   void processSamples(int16_t* buf, size_t num_frames);
 
-  // Per-cascade coefficients + per-channel biquad state.
+  // (rollback IirDelaySnapshot was used by the old "retry on I2S timeout" path;
+  // removed in the I2S/Core‑1 fix — `processSamples` now always commits its
+  // result and the I2S write is one blocking call paced by DMA.)
+
   struct Cascade {
     EqBand bands[AUDIO_EQ_BANDS];
-    float  b0[AUDIO_EQ_BANDS], b1[AUDIO_EQ_BANDS], b2[AUDIO_EQ_BANDS];
-    float  a1[AUDIO_EQ_BANDS], a2[AUDIO_EQ_BANDS];
-    float  x1[AUDIO_EQ_BANDS][2], x2[AUDIO_EQ_BANDS][2];
-    float  y1[AUDIO_EQ_BANDS][2], y2[AUDIO_EQ_BANDS][2];
-    bool   enabled;
+    uint8_t active_band_count;
+    EqStage stages[EQ_MAX_STAGES_PER_LAYER];
+    uint8_t stage_count;
+    float zx1[EQ_MAX_STAGES_PER_LAYER][2];
+    float zx2[EQ_MAX_STAGES_PER_LAYER][2];
+    float zy1[EQ_MAX_STAGES_PER_LAYER][2];
+    float zy2[EQ_MAX_STAGES_PER_LAYER][2];
+    bool enabled;
   };
   Cascade cascades_[AUDIO_EQ_LAYERS];
+  /** Serializes EQ structure updates vs `processSamples` (same core as feed is still racy with A2DP). */
+  void* eq_mutex_{nullptr};
+  mutable bool eq_peak_valid_{false};
+  mutable float eq_peak_db_{0.f};
 
-  float headroom_linear_;  // 10^(db/20); <= 1.0
-  float volume_;           // legacy master (ganged) volume, 0..1
-  float volume_l_;         // per-channel linear gain, 0..1
+  float computeEqPeakGainDbUnlocked() const;
+
+  float headroom_linear_;
+  float volume_;
+  float volume_l_;
   float volume_r_;
   bool muted_;
   bool l_on_;
   bool r_on_;
-  bool mono_;              // true -> sum L+R before per-channel gain
+  bool mono_;
 
   int16_t* ring_buf_;
   volatile size_t ring_head_;
   volatile size_t ring_tail_;
   size_t ring_cap_;
   bool running_;
-  void* i2s_tx_handle_;  /* i2s_chan_handle_t from driver/i2s_std.h */
+  void* i2s_tx_handle_;
+  /** `SemaphoreHandle_t` — serializes multi-writer `feedPCM` (A2DP, Snapcast, MP3). */
+  void* feed_mutex_{nullptr};
 
   bool playing_;
   uint32_t underruns_;
   uint32_t overflows_;
+  /** Counts only real `i2s_channel_write` errors (`ESP_ERR_*`), not benign DMA backpressure. */
+  uint32_t i2s_tx_errors_;
+  /** Monotonic µs inside `i2s_channel_write` (mostly blocked on DMA — expected pacing, not CPU burn). */
+  uint64_t i2s_blocked_us_total_;
+  /** Snapshot of `i2s_blocked_us_total_` at the last per-second stats line. */
+  uint64_t last_stats_blocked_us_;
   unsigned long last_stats_ms_;
+  uint64_t last_contention_log_us_;
+  uint64_t last_i2s_backpressure_log_us_;
+  /** Smoothed inter-chunk true-peak limiter (avoids zipper/crackle from per-chunk uniform scale steps). */
+  float intersample_limiter_gain_;
+
+  /** Linear 0..1 peak hold with per-chunk decay (updated from `process()` after EQ). */
+  mutable std::atomic<float> meter_peak_lin_l_{0.f};
+  mutable std::atomic<float> meter_peak_lin_r_{0.f};
+  /** Mean-square linear 0..1, EMA-smoothed per chunk. */
+  mutable std::atomic<float> meter_rms_ms_l_{0.f};
+  mutable std::atomic<float> meter_rms_ms_r_{0.f};
 };
 
 }  // namespace geelen
 
-#endif  // GEELEN_AUDIO_ENGINE_H
+#endif

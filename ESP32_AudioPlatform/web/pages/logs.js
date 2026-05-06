@@ -57,8 +57,14 @@ export default function Logs({ toast }) {
   const bufferRef = useRef([]); // full history, trimmed to MAX_BUFFER
   const seqRef = useRef(0);
   const esRef = useRef(null);
+  const pausedRef = useRef(false);
 
-  // Open / tear down the SSE connection together with the component.
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (!paused) setEntries(bufferRef.current.slice());
+  }, [paused]);
+
+  // Open / tear down the SSE connection once per mount (pause only gates UI updates).
   useEffect(() => {
     const es = new EventSource("/api/logs/stream");
     esRef.current = es;
@@ -73,7 +79,7 @@ export default function Logs({ toast }) {
         if (bufferRef.current.length > MAX_BUFFER) {
           bufferRef.current.splice(0, bufferRef.current.length - MAX_BUFFER);
         }
-        if (!paused) setEntries(bufferRef.current.slice());
+        if (!pausedRef.current) setEntries(bufferRef.current.slice());
       } catch {
         // Drop malformed frame silently; the SSE heartbeat comments end up here too.
       }
@@ -82,7 +88,7 @@ export default function Logs({ toast }) {
       es.close();
       esRef.current = null;
     };
-  }, [paused]);
+  }, []);
 
   // Auto-scroll to bottom whenever new entries arrive (if enabled).
   useEffect(() => {

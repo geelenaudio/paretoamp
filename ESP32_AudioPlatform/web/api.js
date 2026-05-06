@@ -47,6 +47,7 @@ export const api = {
         snapcast: { host: legacy.snap_host || "", port: legacy.snap_port || 1704 },
         device_name: "Geelen Audio",
         firmware: "dev",
+        voice_feedback: true,
         _legacy: true,
       };
     }
@@ -55,6 +56,24 @@ export const api = {
   async getSystem() {
     try { return await j("GET", "/api/system"); }
     catch (_) { return { _unimplemented: true }; }
+  },
+
+  async getSystemMetrics() {
+    try { return await j("GET", "/api/system/metrics"); }
+    catch (_) { return { _unimplemented: true }; }
+  },
+
+  async getSystemIdentity() {
+    try { return await j("GET", "/api/system/identity"); }
+    catch (_) { return { _unimplemented: true }; }
+  },
+
+  async getTestTone() {
+    return await j("GET", "/api/test-tone");
+  },
+
+  async setTestTone(patch) {
+    return await j("POST", "/api/test-tone", patch);
   },
 
   async setVolume(percentL, percentR, muted) {
@@ -71,7 +90,8 @@ export const api = {
     try {
       return await j("POST", "/api/mode", { mode });
     } catch (_) {
-      const s = mode === "bluetooth" ? 0 : 1;
+      const map = { bluetooth: 0, snapclient: 1, dlna: 2, test_tone: 3 };
+      const s = map[mode] ?? 0;
       return await j("POST", `/api/source?s=${s}`);
     }
   },
@@ -86,6 +106,10 @@ export const api = {
 
   async setDlna(patch) {
     return await j("POST", "/api/dlna", patch);
+  },
+
+  async setVoiceFeedback(enabled) {
+    return await j("POST", "/api/voice-feedback", { enabled: !!enabled });
   },
 
   async setDeviceName(name) {
@@ -117,5 +141,16 @@ export const api = {
     });
     if (!res.ok) throw new Error(res.statusText);
     return res.json();
+  },
+
+  // Wi-Fi onboarding helpers used by the /wifi page and (in AP-only mode)
+  // by the inline captive setup form. /scan is a synchronous active scan
+  // on the firmware side and can take ~3 s.
+  async getWifiScan() {
+    return await j("GET", "/api/wifi/scan");
+  },
+
+  async getWifiState() {
+    return await j("GET", "/api/wifi/state");
   },
 };

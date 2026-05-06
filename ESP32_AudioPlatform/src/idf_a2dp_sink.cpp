@@ -3,6 +3,8 @@
 #include "idf_a2dp_sink.h"
 
 #include "audio_engine.h"
+#include "idf_mp3_streamer.h"
+#include "idf_voice_feedback.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -39,6 +41,8 @@ static void btAppGapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param
   (void)param;
   if (event == ESP_BT_GAP_AUTH_CMPL_EVT) {
     ESP_LOGI(TAG, "GAP auth complete");
+  } else if (event == ESP_BT_GAP_PIN_REQ_EVT) {
+    voiceFeedbackOnBtPairing();
   }
 }
 
@@ -87,6 +91,9 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
     case ESP_A2D_CONNECTION_STATE_EVT:
       if (param) {
         ESP_LOGI(TAG, "Conn state: %d", (int)param->conn_stat.state);
+        if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+          voiceFeedbackOnA2dpConnected();
+        }
       }
       break;
     case ESP_A2D_AUDIO_STATE_EVT:
@@ -119,6 +126,12 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
 
 void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
   if (!engine_ || !data || len == 0) return;
+  // Voice prompts use the same ring via `feedPCM`. SBC callbacks would splice
+  // music PCM into the middle of a clip (missing Wi‑Fi / "… Mode" tails, no
+  // "Bluetooth connected" over the prompt). Drop BT PCM until SPIFFS MP3 ends.
+  if (geelen_idf::mp3::streamer()->isPlayingLocalFile() || geelen_idf::voiceFeedbackBootPromptsActive()) {
+    return;
+  }
 
   // Data is stereo 16-bit PCM decoded from SBC by Bluedroid.
   const int16_t* in = reinterpret_cast<const int16_t*>(data);

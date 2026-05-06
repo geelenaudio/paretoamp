@@ -6,10 +6,8 @@
 //   - dlna      : Native UPnP/AV renderer, configurable name (ordinal 2)
 //
 // Every card renders a "Select" CTA plus the mode's own inline settings.
-// Changing the *active* mode causes a reboot if either the previous or new
-// mode involves Bluetooth (the BT controller has to be loaded/unloaded at
-// boot); the API response tells us `{reboot: true}` in that case and we
-// surface a toast.
+// Changing the active mode reboots the device so the firmware can rebuild its
+// task graph (BT stack, Snapclient, DLNA, test-tone generator).
 //
 // Saving a mode's settings (Snapcast host, DLNA name) is independent of
 // selecting it — you can pre-configure Snapcast while BT is active, then
@@ -43,6 +41,14 @@ const MODES = [
     blurb:
       "Appear as a UPnP/AV MediaRenderer on the LAN. Control from BubbleUPnP, " +
       "VLC, Kodi, or the native app of most NAS/streaming services.",
+  },
+  {
+    id: "test_tone",
+    label: "Test bench",
+    icon: "〰",
+    blurb:
+      "Built-in sine generator through the full DSP chain. Use for room checks " +
+      "and wiring verification. Adjust frequency and level on the Test page after boot.",
   },
 ];
 
@@ -160,9 +166,9 @@ export default function Mode({ api, toast }) {
       const r = await api.setMode(mode);
       if (r.reboot) {
         toast("Rebooting to switch source. Reconnect in ~15 s.", "warn", 6000);
-      } else {
-        toast(`Mode: ${mode}`, "ok");
+        return;
       }
+      toast(`Mode: ${mode}`, "ok");
       await refresh();
     } catch (e) { toast(String(e), "err"); }
     finally { setBusy(false); }
@@ -188,14 +194,44 @@ export default function Mode({ api, toast }) {
     finally { setBusy(false); }
   }
 
+  async function saveVoiceFeedback(enabled) {
+    setBusy(true);
+    try {
+      await api.setVoiceFeedback(enabled);
+      toast("Voice feedback saved", "ok");
+      await refresh();
+    } catch (e) { toast(String(e), "err"); }
+    finally { setBusy(false); }
+  }
+
   if (!state) return html`<div class="stub">Loading…</div>`;
 
   return html`
     <h1 class="page__title">Mode</h1>
     <p class="page__subtitle">
-      Pick which source drives the amplifier. Switching to or from Bluetooth
-      requires a reboot so the BT controller can start or stop cleanly.
+      Pick which source drives the amplifier. Any mode change reboots the device
+      so the firmware can start or stop Bluetooth, Snapclient, DLNA, or the test generator.
     </p>
+
+    <div class="card" style="margin-bottom: var(--sp-5); max-width: 520px;">
+      <div class="card__title">Voice feedback</div>
+      <p style="color: var(--fg-1); margin: var(--sp-3) 0;">
+        Short spoken cues from built-in clips (Wi‑Fi and input mode at boot;
+        Bluetooth connected and pairing while in BT mode).
+      </p>
+      <label style="display:flex; align-items:center; gap: var(--sp-3);">
+        <span class="switch">
+          <input
+            type="checkbox"
+            checked=${!!state.voice_feedback}
+            onChange=${(e) => saveVoiceFeedback(e.target.checked)}
+            disabled=${busy}
+          />
+          <span class="switch__slider"></span>
+        </span>
+        <span>Enable voice prompts</span>
+      </label>
+    </div>
 
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr))">
       ${MODES.map((m) => {

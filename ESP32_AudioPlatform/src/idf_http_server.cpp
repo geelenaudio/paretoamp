@@ -13,6 +13,7 @@
 #include "idf_api.h"
 #include "idf_config_manager.h"
 #include "idf_logs.h"
+#include "idf_wifi_manager.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -29,6 +30,11 @@
 namespace geelen_idf {
 
 static const char* TAG = "HTTP";
+
+// Singleton pointer set in HttpServer::begin so static URI handlers (which
+// only get user_ctx = ConfigManager*) can also see the Wi-Fi state. It is
+// only used for read-only `isApOnly()` probing — never owned here.
+static WifiManager* s_wifi = nullptr;
 
 // Schedule a graceful restart (no-op if already scheduled). Lives here rather
 // than in idf_api.cpp so both the legacy handlers and the new JSON handlers
@@ -49,6 +55,118 @@ a{color:#6ab0ff}code{background:#1a1f26;padding:2px 6px;border-radius:4px;font-f
 <p>The firmware is running but the SPA assets are missing from SPIFFS. Upload them with:</p>
 <p><code>pio run -t uploadfs -e amped-esp32-idf</code></p>
 <p>Legacy API probes: <a href="/api/status">/api/status</a></p>
+</body></html>)raw";
+
+// Wi‑Fi onboarding portal shown at `/` (and on captive-portal probe URLs)
+// while the device runs the AP fallback. Self-contained so it works even
+// when SPIFFS is empty / not yet uploaded. Posts form-encoded creds to
+// `POST /api/wifi`, reads nearby SSIDs from `GET /api/wifi/scan`.
+static const char SETUP_HTML[] = R"raw(<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Geelen Audio — Wi-Fi setup</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:0;background:#0b0d10;color:#eef1f5;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:480px;margin:0 auto;padding:24px}
+h1{font-size:22px;margin:0 0 4px;letter-spacing:.2px}
+.sub{color:#9aa3b0;margin:0 0 20px;font-size:14px}
+.card{background:#11161c;border:1px solid #1f2630;border-radius:10px;padding:18px;margin-bottom:14px}
+label{display:block;font-size:13px;color:#9aa3b0;margin:14px 0 6px}
+label:first-child{margin-top:0}
+input,select{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #2a323d;background:#0e1318;color:#eef1f5;font:inherit}
+input:focus,select:focus{outline:none;border-color:#6ab0ff}
+button{width:100%;padding:12px 14px;border-radius:8px;border:none;background:#6ab0ff;color:#0b0d10;font:inherit;font-weight:600;cursor:pointer;margin-top:18px}
+button[disabled]{opacity:.55;cursor:default}
+.row{display:flex;gap:8px;align-items:center}
+.row button{margin:0;flex:0 0 auto;background:#1f2630;color:#eef1f5;width:auto;padding:11px 14px}
+.bar{display:inline-block;width:36px;height:6px;background:#1f2630;border-radius:3px;vertical-align:middle;margin-left:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:#6ab0ff}
+.muted{color:#9aa3b0;font-size:13px}
+.err{color:#ef9a9a;font-size:13px;margin-top:6px;min-height:1.2em}
+.busy{display:none;text-align:center;padding:20px}
+.busy.show{display:block}
+.spinner{width:28px;height:28px;border:3px solid #2a323d;border-top-color:#6ab0ff;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.lock{color:#9aa3b0;margin-left:6px}
+</style></head><body>
+<main>
+  <h1>Wi-Fi setup</h1>
+  <p class="sub">Pick your network so the amplifier can reach the internet and Snapcast/DLNA hosts.</p>
+  <form id="f" class="card" autocomplete="off">
+    <label for="ssid">Network <span id="status" class="muted"></span></label>
+    <div class="row">
+      <select id="ssid" name="ssid"><option value="">Scanning…</option></select>
+      <button type="button" id="rescan" title="Rescan">↻</button>
+      <button type="button" id="manual" title="Type SSID manually">A</button>
+    </div>
+    <input id="ssid_text" name="ssid_text" placeholder="Network name" style="display:none;margin-top:8px" />
+    <label for="pass">Password</label>
+    <input id="pass" name="pass" type="password" autocomplete="new-password" />
+    <div id="err" class="err"></div>
+    <button id="save" type="submit">Save & connect</button>
+  </form>
+  <div id="busy" class="card busy">
+    <div class="spinner"></div>
+    <div>Saving and rebooting…</div>
+    <p class="muted">Reconnect your phone/laptop to its normal Wi-Fi. The amplifier will join <span id="targetssid">your network</span> in <span id="cd">15</span> s.</p>
+  </div>
+</main>
+<script>
+(function(){
+  var sel=document.getElementById('ssid'),text=document.getElementById('ssid_text'),
+      pass=document.getElementById('pass'),err=document.getElementById('err'),
+      st=document.getElementById('status'),f=document.getElementById('f'),
+      busy=document.getElementById('busy'),save=document.getElementById('save'),
+      cd=document.getElementById('cd'),tg=document.getElementById('targetssid'),
+      rescan=document.getElementById('rescan'),manual=document.getElementById('manual'),
+      manualOn=false;
+  function setManual(on){
+    manualOn=on;
+    sel.style.display=on?'none':'';
+    text.style.display=on?'':'none';
+    if(on)text.focus();
+  }
+  manual.onclick=function(){setManual(!manualOn)};
+  function pct(rssi){var v=Math.max(0,Math.min(100,Math.round((rssi+90)/60*100)));return v}
+  function lockIcon(auth){return auth>0?' \u{1F512}':''}
+  function refresh(){
+    st.textContent='Scanning…';
+    sel.innerHTML='<option value="">Scanning…</option>';
+    fetch('/api/wifi/scan').then(function(r){return r.json()}).then(function(j){
+      var nets=(j&&j.networks)||[];
+      if(!nets.length){sel.innerHTML='<option value="">No networks found</option>';st.textContent='';setManual(true);return}
+      sel.innerHTML=nets.map(function(n){
+        return '<option value="'+(n.ssid||'').replace(/"/g,'&quot;')+'">'+
+          (n.ssid||'').replace(/</g,'&lt;')+' ('+n.rssi+' dBm'+lockIcon(n.auth)+')</option>'
+      }).join('');
+      st.textContent=nets.length+' nearby';
+    }).catch(function(e){
+      sel.innerHTML='<option value="">Scan failed</option>';
+      st.textContent='';
+      setManual(true);
+    });
+  }
+  rescan.onclick=function(e){e.preventDefault();refresh()};
+  refresh();
+  f.onsubmit=function(e){
+    e.preventDefault();
+    var ssid=manualOn?text.value.trim():sel.value;
+    if(!ssid){err.textContent='Pick or type a network name.';return}
+    err.textContent='';
+    save.disabled=true;
+    var body='ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass.value);
+    fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+      .then(function(r){if(!r.ok)throw new Error(r.status);return r.json()})
+      .then(function(){
+        f.style.display='none';busy.classList.add('show');tg.textContent=ssid;
+        var n=15;cd.textContent=n;
+        var t=setInterval(function(){n--;cd.textContent=n;if(n<=0)clearInterval(t)},1000);
+      })
+      .catch(function(e2){err.textContent='Save failed: '+e2;save.disabled=false});
+  };
+})();
+</script>
 </body></html>)raw";
 
 void scheduleRestart(unsigned delay_ms) {
@@ -160,6 +278,65 @@ static esp_err_t serve_file(httpd_req_t* req, const char* fs_path_no_gz,
   return ESP_OK;
 }
 
+// Send the inline Wi-Fi setup page. Used both for the captive `/` redirect
+// and for OS captive-portal probe URLs (Android `/generate_204`, iOS
+// `/hotspot-detect.html`, Windows `/connecttest.txt`, Firefox `/canonical.html`,
+// GNOME `/check_network_status.txt`, RFC 8908 `/.well-known/captive-portal/*`).
+// Ubuntu NetworkManager uses `http://connectivity-check.ubuntu.com/` (path `/`,
+// host resolved by our captive DNS) — that is already covered by `/` in AP-only
+// mode; the extra paths catch Linux stacks that probe CAPPORT / GNOME first.
+// Returning a 200 + non-trivial HTML on those probes is what makes the OS
+// pop its built-in captive sheet automatically.
+static esp_err_t send_setup_page(httpd_req_t* req) {
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, SETUP_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handle_captive_probe(httpd_req_t* req) {
+  // In AP-only mode, return the setup page so phones surface their
+  // captive-portal sheet automatically. In STA mode the probe still works
+  // (e.g. Android explicitly hitting our IP from the same LAN) — pretend
+  // to be the upstream "no captive" responder so we don't trigger a
+  // false-positive captive popup on the user's normal network.
+  const bool ap_only = s_wifi && s_wifi->isApOnly();
+  if (ap_only) return send_setup_page(req);
+
+  const char* uri = req->uri;
+  if (strstr(uri, "/generate_204") || strstr(uri, "/gen_204")) {
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, nullptr, 0);
+  }
+  // iOS / Windows / Firefox style: return the canonical "success" body.
+  static const char kIosSuccess[] =
+      "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, kIosSuccess, HTTPD_RESP_USE_STRLEN);
+}
+
+static bool path_is_captive_probe(const char* path) {
+  static const char* const kProbes[] = {
+      "/hotspot-detect.html",     // iOS / macOS
+      "/library/test/success.html",
+      "/generate_204",             // Android / ChromeOS
+      "/gen_204",
+      "/connecttest.txt",          // Windows
+      "/ncsi.txt",
+      "/redirect",
+      "/canonical.html",           // Firefox
+      "/check_network_status.txt", // GNOME / nmcheck.gnome.org (many Linux desktops)
+      // RFC 8908 CAPPORT + common variants (systemd, NetworkManager builds, phones).
+      "/.well-known/captive-portal",
+      "/.well-known/captive-portal/",
+  };
+  for (const char* p : kProbes) {
+    if (strcmp(path, p) == 0) return true;
+  }
+  // Subpaths under CAPPORT, e.g. `/.well-known/captive-portal/api` or `.../status`.
+  if (!strncmp(path, "/.well-known/captive-portal/", 28)) return true;
+  return false;
+}
+
 static esp_err_t handle_static(httpd_req_t* req) {
   // `req->uri` includes query string. Strip it first.
   const char* uri = req->uri;
@@ -172,6 +349,20 @@ static esp_err_t handle_static(httpd_req_t* req) {
   // below; a leading `..` would escape the static root.
   if (strstr(path, "..")) {
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "nope");
+  }
+
+  // AP-only mode: hijack `/` and any "looks like a page" miss with the
+  // inline Wi-Fi onboarding portal. Static SPA assets (.js, .css, …) keep
+  // working so the SPA can still load if the user navigates there
+  // explicitly, but the default landing is the setup form. Captive probe
+  // URLs are also intercepted (they have their own dedicated handler when
+  // registered, but the catch-all logic here covers them too if probes
+  // arrive with a different URI shape).
+  const bool ap_only = s_wifi && s_wifi->isApOnly();
+  if (ap_only) {
+    if (path[0] == '\0' || strcmp(path, "/") == 0 || path_is_captive_probe(path)) {
+      return send_setup_page(req);
+    }
   }
 
   // Route rewrites for non-file URLs that should still map to static assets:
@@ -202,6 +393,9 @@ static esp_err_t handle_static(httpd_req_t* req) {
   const bool looks_like_page =
       !strchr(path, '.') && strncmp(path, "/api/", 5) != 0;
   if (looks_like_page) {
+    // In AP-only mode the setup page is the right thing to show on any
+    // unknown route (avoids a blank screen if SPIFFS is empty).
+    if (ap_only) return send_setup_page(req);
     if (serve_file(req, "/spiffs/web/index.html", "text/html; charset=utf-8") == ESP_OK) {
       return ESP_OK;
     }
@@ -249,7 +443,6 @@ static esp_err_t handle_volume(httpd_req_t* req) {
       if (v < 0) v = 0;
       if (v > 100) v = 100;
       cfg->setVolume((uint8_t)v);
-      cfg->save();
     }
   }
 
@@ -273,17 +466,15 @@ static esp_err_t handle_source(httpd_req_t* req) {
     }
   }
   if (s < 0) s = 0;
-  if (s > 1) s = 1;
+  if (s > 3) s = 3;
   cfg->setAudioSource((AudioSource)s);
   cfg->save();
 
   unsigned pu = (unsigned)prev;
   unsigned nu = (unsigned)cfg->getAudioSource();
-  const bool bt_edge = (nu == 0u || pu == 0u);
-  const bool reboot = (pu != nu && bt_edge);
+  const bool reboot = (pu != nu);
   if (reboot) {
-    ESP_LOGI(TAG, "Audio source %u -> %u: rebooting to (un)load BT stack",
-             pu, nu);
+    ESP_LOGI(TAG, "Audio source %u -> %u: rebooting to reconfigure", pu, nu);
     scheduleRestart(500);
   }
 
@@ -335,17 +526,19 @@ static esp_err_t handle_wifi(httpd_req_t* req) {
   return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
-bool HttpServer::begin(ConfigManager* cfg) {
+bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   cfg_ = cfg;
+  wifi_ = wifi;
+  s_wifi = wifi;  // expose to static handlers
   if (!cfg_) return false;
   if (server_) return true;
 
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
   config.lru_purge_enable = true;
-  // Phase 1 registers ~16 /api/* handlers + 4 legacy + the static catch-all
-  // + headroom for Phase 7 (SSE) and beyond. Default is 8; bump generously.
-  config.max_uri_handlers = 32;
+  // Phase 1+ registers many /api/* handlers + legacy + SSE + static. If this
+  // is too low, httpd_register_uri_handler fails silently unless we log it.
+  config.max_uri_handlers = 48;
   // Enable wildcard matching so `/*` actually fires for /foo.js.gz, /vendor/…,
   // /pages/…. Without this the catch-all only matches the literal string `/*`.
   config.uri_match_fn = httpd_uri_match_wildcard;
@@ -353,9 +546,9 @@ bool HttpServer::begin(ConfigManager* cfg) {
   // plus we keep one long-lived detached socket for the SSE log stream
   // (see idf_logs.cpp). The default (7) leaves exactly zero headroom, so
   // the SSE plus a page reload would lock other requests out until LRU
-  // purge kicked in. Bump generously within LWIP's CONFIG_LWIP_MAX_SOCKETS
-  // (=10) budget and reserve one of those slots for async handlers.
-  config.max_open_sockets = 8;
+  // purge kicked in. Keep below CONFIG_LWIP_MAX_SOCKETS (see sdkconfig.defaults);
+  // httpd also reserves a few FDs internally — values above the cap can misbehave.
+  config.max_open_sockets = 10;
   config.backlog_conn = 8;
   // Tighter timeouts so a half-closed peer frees its socket sooner rather
   // than sitting in the LRU list. 5 s is plenty for any legitimate LAN
@@ -365,7 +558,16 @@ bool HttpServer::begin(ConfigManager* cfg) {
   // The static + API handlers allocate a few KiB of locals on the stack
   // (json assembly, 1 KiB file-serving buffer). Default of 4 KiB is tight
   // with FP prints in cJSON.
-  config.stack_size = 6 * 1024;
+  // Large JSON handlers (e.g. GET /api/state) need comfortable headroom.
+  config.stack_size = 8 * 1024;
+  // Pin httpd to Core 0 — that's where lwip/Wi-Fi/BT already live, so all
+  // network-bound work (accept, recv, parse, send) runs on the same core
+  // and avoids inter-core hand-offs. It also keeps httpd off Core 1 which
+  // is dedicated to audio (audio_task, A2DP I2S writes, snapclient). When
+  // httpd had no affinity it would migrate to whichever core was idle —
+  // usually Core 1 — and contend with audio jitter, occasionally producing
+  // `httpd_accept_conn errno 113` under load.
+  config.core_id = 0;
 
   httpd_handle_t h = nullptr;
   if (httpd_start(&h, &config) != ESP_OK) return false;
@@ -377,8 +579,8 @@ bool HttpServer::begin(ConfigManager* cfg) {
   //   GET  /api/status        — scalar snapshot (Phase 1 ships GET /api/state)
   //   GET  /api/volume?v=N    — convenience GET (Phase 1 adds POST JSON)
   //   POST /api/source?s=N    — old Bluetooth/Network toggle
-  //   POST /api/wifi          — form-encoded creds (form is still the only
-  //                             path here until we ship a WiFi page)
+  //   POST /api/wifi          — form-encoded creds (also driven by the new
+  //                             /wifi SPA page and the inline AP-mode portal)
   httpd_uri_t status_uri{ .uri="/api/status",   .method=HTTP_GET,  .handler=handle_status,   .user_ctx=cfg_ };
   httpd_uri_t vol_uri{    .uri="/api/volume",   .method=HTTP_GET,  .handler=handle_volume,   .user_ctx=cfg_ };
   httpd_uri_t src_uri{    .uri="/api/source",   .method=HTTP_POST, .handler=handle_source,   .user_ctx=cfg_ };
@@ -391,6 +593,39 @@ bool HttpServer::begin(ConfigManager* cfg) {
   // Phase 1 JSON API (POST /api/state, POST /api/volume JSON, /api/mode,
   // /api/channels, /api/eq, /api/reset, …). Lives in idf_api.cpp.
   registerApiHandlers(h, cfg_);
+
+  // Captive-portal probe handlers. Registering them as their own URIs
+  // (before the catch-all `/*`) means we can return a 200 + the setup
+  // page directly even when device IS in STA mode (which is what makes
+  // OS captive sheets pop). When already in STA mode the probes still
+  // get HTML but the OS interprets them as "internet works" because
+  // the response includes our success-html-shaped iOS variant. These
+  // handlers also win over the SPA shell on Wi-Fi-less iOS Safari which
+  // probes during initial AP join.
+  static const char* const kCaptiveUris[] = {
+      "/hotspot-detect.html",
+      "/library/test/success.html",
+      "/generate_204",
+      "/gen_204",
+      "/connecttest.txt",
+      "/ncsi.txt",
+      "/redirect",
+      "/canonical.html",
+      "/check_network_status.txt",
+      "/.well-known/captive-portal",
+      "/.well-known/captive-portal/",
+  };
+  for (const char* p : kCaptiveUris) {
+    httpd_uri_t u{};
+    u.uri = p;
+    u.method = HTTP_GET;
+    u.handler = handle_captive_probe;
+    u.user_ctx = cfg_;
+    esp_err_t e = httpd_register_uri_handler(h, &u);
+    if (e != ESP_OK) {
+      ESP_LOGW(TAG, "captive probe register %s failed: %s", p, esp_err_to_name(e));
+    }
+  }
 
   // SSE endpoint for the Logs page. Registered before the catch-all so
   // /api/logs/stream wins over the static handler's /* pattern.

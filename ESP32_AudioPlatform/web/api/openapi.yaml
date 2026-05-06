@@ -13,10 +13,11 @@ info:
     the device is expected to live on a trusted LAN.
 
     Legacy compatibility endpoints (`GET /api/status`, `POST /api/source`,
-    `POST /api/wifi`, `GET /api/volume?v=`) are retained as pragma but not
-    documented here; they exist only to keep older scripts working and will
-    be removed once the SPA fully owns configuration.
-  version: 0.3.0
+    `GET /api/volume?v=`) are retained as pragma but not documented here;
+    they exist only to keep older scripts working and will be removed
+    once the SPA fully owns configuration. `POST /api/wifi` is documented
+    under the `WiFi` tag — it is still the primary credential-save path.
+  version: 0.3.1
   contact:
     name: Geelen Audio
     url: https://github.com/geelen/ESP32_AudioPlatform
@@ -44,6 +45,12 @@ tags:
     description: Dual parametric EQ (calibration + preference), presets, headroom.
   - name: Admin
     description: Device name, granular reset.
+  - name: WiFi
+    description: |
+      Wi-Fi onboarding and status. `POST /api/wifi` (form-encoded) is the
+      primary credential-save path used by both the AP-mode captive setup
+      page and the SPA `/wifi` page. `GET /api/wifi/scan` and
+      `GET /api/wifi/state` back those UIs.
   - name: Logs
     description: Live log streaming (SSE).
 
@@ -75,6 +82,7 @@ paths:
                 channels: { stereo_mono: "stereo", l_on: true, r_on: true }
                 snapcast: { host: "10.0.80.34", port: 1704 }
                 dlna: { enabled: false, name: "Geelen Audio" }
+                voice_feedback: true
                 eq:
                   calibration:
                     enabled: true
@@ -208,6 +216,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SnapcastSetting" }
 
+  /api/voice-feedback:
+    post:
+      tags: [Audio]
+      summary: Spoken status cues (SPIFFS MP3)
+      description: |
+        Enables or disables voice prompts (Wi‑Fi/mode at boot, Bluetooth
+        connected, pairing). Stored in NVS; takes effect immediately for
+        runtime events; boot clips use the setting active when the boot task runs.
+      operationId: setVoiceFeedback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VoiceFeedbackSetting" }
+            example: { enabled: false }
+      responses:
+        "200":
+          description: New setting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VoiceFeedbackSetting" }
+
   /api/dlna:
     post:
       tags: [Sources]
@@ -261,12 +291,22 @@ paths:
       tags: [EQ]
       summary: Update an EQ layer
       description: |
-        Writes a 10-band parametric curve and/or toggles the layer enable
-        for one of the two cascades. `bands` may be a partial array; bands
-        are merged by index so the client can ship a single edited band.
+        Writes the parametric curve (up to 10 logical bands per layer) and/or
+        toggles the layer enable for calibration or preference. The device
+        always stores **10** band slots; `band_count` selects how many are
+        **active** in the DSP (1–10). Inactive tail slots are kept in NVS but
+        not processed.
 
-        The firmware clamps `freq` to 20 Hz..20 kHz, `gain_db` to
-        ±18 dB, and `q` to 0.1..10.0 before storage.
+        `bands` may be a partial array; entries are merged by index with the
+        current curve so the client can send a single edited band.
+
+        Each band has a `type` (`bell`, `low_shelf`, `high_shelf`, `notch`,
+        `low_pass`, `high_pass`) and optional `slope_db_oct` (**6**, **12**, or
+        **24**) for low-pass / high-pass only.
+
+        The firmware clamps frequencies, gains, and Q before storage. The JSON
+        response includes `headroom` (auto attenuation may change when the
+        EQ chain changes).
       operationId: setEqLayer
       requestBody:
         required: true
@@ -276,19 +316,23 @@ paths:
             example:
               layer: "preference"
               enabled: true
+              band_count: 6
               bands:
-                - { freq: 60,   gain_db: 3.0, q: 1.0 }
-                - { freq: 8000, gain_db: 2.0, q: 0.8 }
+                - { freq: 60, gain_db: 3.0, q: 1.0, type: "bell" }
+                - { freq: 8000, gain_db: 2.0, q: 0.8, type: "high_shelf" }
       responses:
         "200":
-          description: The full curve after clamping.
+          description: The full curve after clamping, plus layer id and headroom.
           content:
             application/json:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/EqCurve"
                   - type: object
-                    properties: { layer: { type: string, enum: [calibration, preference] } }
+                    required: [layer, headroom]
+                    properties:
+                      layer: { type: string, enum: [calibration, preference] }
+                      headroom: { $ref: "#/components/schemas/HeadroomSetting" }
 
   /api/eq/headroom:
     post:
@@ -444,6 +488,93 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/wifi:
+    post:
+      tags: [WiFi]
+      summary: Save Wi-Fi credentials and reboot
+      description: |
+        Form-encoded credential save (`application/x-www-form-urlencoded`,
+        body `ssid=…&pass=…`). On success the device persists the creds to
+        NVS and reboots after ~800 ms. The same handler is used by the
+        AP-mode inline setup page (`/`) and by the SPA `/wifi` page.
+      operationId: setWifi
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [ssid]
+              properties:
+                ssid: { type: string, maxLength: 32 }
+                pass: { type: string, maxLength: 64, description: "WPA2 PSK; omit to keep current password." }
+      responses:
+        "200":
+          description: Credentials saved; device is rebooting.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/wifi/scan:
+    get:
+      tags: [WiFi]
+      summary: Scan nearby Wi-Fi networks
+      description: |
+        Synchronous active scan (~3 s). Requires the radio to be in STA or
+        APSTA mode; the AP-fallback uses APSTA so this works during
+        onboarding. Returns up to 24 entries, deduplicated by SSID and
+        sorted by RSSI descending.
+      operationId: getWifiScan
+      responses:
+        "200":
+          description: Scan results.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  networks:
+                    type: array
+                    items: { $ref: "#/components/schemas/WifiNetwork" }
+              example:
+                networks:
+                  - { ssid: "home-5g",  rssi: -52, channel: 36, auth: 4 }
+                  - { ssid: "neighbor", rssi: -78, channel: 6,  auth: 3 }
+        "500":
+          description: Scan failed (radio in wrong mode or driver error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/wifi/state:
+    get:
+      tags: [WiFi]
+      summary: Current Wi-Fi link state
+      description: |
+        Snapshot of STA + AP state. The SPA Overview page reads this to
+        decide whether to render the "Setup hotspot active" banner; the
+        `/wifi` page uses it for the status header.
+      operationId: getWifiState
+      responses:
+        "200":
+          description: Current Wi-Fi state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WifiState" }
+              example:
+                ap_only: false
+                ap_running: false
+                sta_connected: true
+                ssid: "home-5g"
+                rssi: -58
+                channel: 36
+                ip: "10.0.80.34"
+                ap_ssid: ""
+                ap_ip: "0.0.0.0"
+
   /api/logs/stream:
     get:
       tags: [Logs]
@@ -513,26 +644,50 @@ components:
         enabled: { type: boolean }
         name: { type: string, maxLength: 32 }
 
+    VoiceFeedbackSetting:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+
     EqBand:
       type: object
       description: |
-        One peaking-EQ band. Note the frequency field is `freq` (not
-        `freq_hz`) — firmware emits it that way and the SPA consumes it
-        verbatim. Always use `freq` on both request bodies and responses.
+        One EQ band. Frequency is `freq` (not `freq_hz`) on the wire. For
+        `notch`, gain is ignored at runtime. For `low_pass` / `high_pass`,
+        `slope_db_oct` selects 6 / 12 / 24 dB/oct (first-order or RBJ stacks);
+        `gain_db` is ignored for those types. `q` is not used for 6 dB/oct
+        LP/HP (single-pole); for 12/24 dB/oct the implementation uses a
+        Butterworth Q (~0.707) internally.
       required: [freq, gain_db, q]
       properties:
-        freq:    { type: number, minimum: 20,  maximum: 20000, description: "Centre frequency in Hz" }
-        gain_db: { type: number, minimum: -18, maximum: 18, description: "Peak/dip in dB" }
-        q:       { type: number, minimum: 0.1, maximum: 10.0, description: "Quality factor (higher = narrower band)" }
+        freq:    { type: number, minimum: 20,  maximum: 20000, description: "Centre or corner frequency in Hz" }
+        gain_db: { type: number, minimum: -18, maximum: 18, description: "Gain in dB (bell / shelves; ignored for notch and LP/HP)" }
+        q:       { type: number, minimum: 0.1, maximum: 100.0, description: "Quality factor (notch may use higher Q; LP/HP use fixed Q for 12/24 dB/oct)" }
+        type:
+          type: string
+          enum: [bell, low_shelf, high_shelf, notch, low_pass, high_pass]
+          default: bell
+        slope_db_oct:
+          type: integer
+          enum: [6, 12, 24]
+          default: 12
+          description: "Rolloff for low_pass and high_pass only."
 
     EqCurve:
       type: object
       properties:
         enabled: { type: boolean }
+        band_count:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Number of logical bands processed for this layer.
         bands:
           type: array
           minItems: 10
           maxItems: 10
+          description: Always 10 entries; only the first `band_count` are active in DSP.
           items: { $ref: "#/components/schemas/EqBand" }
 
     EqLayerUpdate:
@@ -541,6 +696,11 @@ components:
       properties:
         layer: { type: string, enum: [calibration, preference] }
         enabled: { type: boolean }
+        band_count:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Active logical bands (1–10); optional if unchanged.
         bands:
           type: array
           items: { $ref: "#/components/schemas/EqBand" }
@@ -600,6 +760,7 @@ components:
         channels:    { $ref: "#/components/schemas/ChannelSetting" }
         snapcast:    { $ref: "#/components/schemas/SnapcastSetting" }
         dlna:        { $ref: "#/components/schemas/DlnaSetting" }
+        voice_feedback: { type: boolean, description: "Spoken SPIFFS MP3 cues (boot + BT events)." }
         eq:
           type: object
           properties:
@@ -664,6 +825,32 @@ components:
       properties:
         t:    { type: integer, description: "Device uptime in ms" }
         line: { type: string, description: "Raw log line, ANSI-stripped on the client" }
+
+    WifiNetwork:
+      type: object
+      properties:
+        ssid:    { type: string, maxLength: 32 }
+        rssi:    { type: integer, description: "dBm; typical -30 (close) to -90 (weak)" }
+        channel: { type: integer, description: "Primary channel" }
+        auth:
+          type: integer
+          description: |
+            wifi_auth_mode_t enum from esp-idf:
+            0=open, 1=WEP, 2=WPA-PSK, 3=WPA2-PSK, 4=WPA/WPA2-PSK,
+            5=Enterprise, 6=WPA3-PSK, 7=WPA2/WPA3-PSK, 8=WAPI.
+
+    WifiState:
+      type: object
+      properties:
+        ap_only:       { type: boolean, description: "AP fallback is up and STA has no IP yet." }
+        ap_running:    { type: boolean }
+        sta_connected: { type: boolean }
+        ssid:          { type: string, description: "STA SSID (when connected)" }
+        rssi:          { type: integer }
+        channel:       { type: integer }
+        ip:            { type: string, description: "STA IPv4 dotted-quad; '0.0.0.0' when not connected" }
+        ap_ssid:       { type: string, description: "AP fallback SSID (when ap_running)" }
+        ap_ip:         { type: string, description: "AP fallback IPv4 (typically 192.168.4.1)" }
 
     Error:
       type: object

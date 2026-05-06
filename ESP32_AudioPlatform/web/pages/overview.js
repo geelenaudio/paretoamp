@@ -62,13 +62,15 @@ function modeLabel(mode) {
   if (mode === "bluetooth") return "Bluetooth A2DP";
   if (mode === "snapclient") return "Snapclient";
   if (mode === "dlna") return "DLNA renderer";
+  if (mode === "test_tone") return "Test bench";
   return mode || "—";
 }
 
-export default function Overview({ api }) {
+export default function Overview({ api, navigate }) {
   const [state, setState] = useState(null);
   const [sys, setSys] = useState(null);
   const [err, setErr] = useState(null);
+  const [wifiState, setWifiState] = useState(null);
   const inflight = useRef(false);
 
   // One-shot config fetch.
@@ -77,6 +79,18 @@ export default function Overview({ api }) {
     api.getState().then(
       (s) => { if (!cancelled) setState(s); },
       (e) => { if (!cancelled) setErr(String(e)); },
+    );
+    return () => { cancelled = true; };
+  }, []);
+
+  // One-shot Wi-Fi state fetch — used to render the AP-only setup banner.
+  // Cheap (returns from RAM-resident WifiManager state); only called once
+  // because the banner is only relevant until the user reboots into STA.
+  useEffect(() => {
+    let cancelled = false;
+    api.getWifiState().then(
+      (s) => { if (!cancelled) setWifiState(s); },
+      () => { /* banner is best-effort */ },
     );
     return () => { cancelled = true; };
   }, []);
@@ -98,7 +112,7 @@ export default function Overview({ api }) {
       }
       inflight.current = true;
       try {
-        const data = await api.getSystem();
+        const data = await api.getSystemMetrics();
         if (!cancelled && !data._unimplemented) setSys(data);
       } catch {
         // Swallow transient errors; next tick will retry.
@@ -132,6 +146,22 @@ export default function Overview({ api }) {
   return html`
     <h1 class="page__title">Overview</h1>
     <p class="page__subtitle">Live status for ${state.device_name || "this device"}.</p>
+
+    ${wifiState && wifiState.ap_only
+      ? html`<div class="card" style="border-color:var(--warn);margin-bottom:var(--sp-4)">
+          <div class="card__title" style="color:var(--warn)">Setup hotspot active</div>
+          <p style="margin:6px 0 10px">
+            The amplifier hasn't joined a Wi-Fi network yet, so it's running its own
+            <strong>${wifiState.ap_ssid || "Geelen-Audio"}</strong> hotspot.
+          </p>
+          <button
+            type="button"
+            class="btn btn--primary"
+            onClick=${() => navigate && navigate("/wifi")}>
+            Configure Wi-Fi
+          </button>
+        </div>`
+      : ""}
 
     <div class="grid">
       <div class="card card--metric">
