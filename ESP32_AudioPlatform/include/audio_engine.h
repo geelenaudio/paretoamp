@@ -13,6 +13,15 @@
 #include "eq_coeffs.h"
 #include "eq_types.h"
 
+// Set to 1 (or pass -DVERBOSE_AUDIO_LOG=1) to surface fine-grained gating logs
+// for the boot-prompt path: prefill waits in `AudioEngine::process()`, MP3
+// streamer back-pressure release in `pumpOnce`, and `bufferedFrames` snapshots
+// around the voice-feedback drain. Off by default — these fire many times per
+// second and would otherwise drown the normal log stream.
+#ifndef VERBOSE_AUDIO_LOG
+#define VERBOSE_AUDIO_LOG 0
+#endif
+
 namespace geelen {
 
 constexpr size_t AUDIO_EQ_BANDS = EQ_MAX_BANDS;
@@ -51,6 +60,12 @@ class AudioEngine {
   bool process();
 
   bool isRunning() const { return running_; }
+  /** True while `process()` is actively draining the ring to I2S — i.e. past
+   *  prefill and not currently in a rebuffer cycle. Producers (e.g. the MP3
+   *  streamer's `pumpOnce` back-pressure spin) read this to decide whether
+   *  to throttle: throttling before the engine has ever crossed prefill can
+   *  livelock the boot-prompt path at the prefill threshold. */
+  bool isOutputActive() const { return playing_.load(std::memory_order_relaxed); }
   size_t bufferedFrames() const;
 
   /** Post-DSP peak / RMS (dBFS-ish), for `/api/system/metrics` and the test page. */
@@ -106,7 +121,11 @@ class AudioEngine {
   /** `SemaphoreHandle_t` — serializes multi-writer `feedPCM` (A2DP, Snapcast, MP3). */
   void* feed_mutex_{nullptr};
 
-  bool playing_;
+  /** Atomic so producers (`AudioEngine::isOutputActive()` callers on other
+   *  tasks) can observe the prefill→playing transition without taking
+   *  `feed_mutex_`. Writers still hold the mutex; the atomic just removes
+   *  the data race on the unlocked read path. */
+  std::atomic<bool> playing_;
   uint32_t underruns_;
   uint32_t overflows_;
   /** Counts only real `i2s_channel_write` errors (`ESP_ERR_*`), not benign DMA backpressure. */

@@ -10,7 +10,6 @@
 
 #include "snapcast_protocol.h"
 #include "audio_engine.h"
-#include "idf_mp3_streamer.h"
 #include "idf_voice_feedback.h"
 
 #include "esp_log.h"
@@ -268,8 +267,9 @@ void Snapclient::tick() {
       off = ts_left;
       ts_consumed = geelen::SNAPCAST_WIRE_CHUNK_TS_SIZE;
     }
-    if (!geelen_idf::mp3::streamer()->isPlayingLocalFile() &&
-        !geelen_idf::voiceFeedbackBootPromptsActive()) {
+    // Single source of truth for "voice prompt owns the ring": gate on it so
+    // WireChunks don't splice into the middle of "Snapcast mode" / mode-clip.
+    if (!geelen_idf::voiceFeedbackActive()) {
       engine_->feedPCM(buf_ + off, (size_t)n - off);
     }
   }

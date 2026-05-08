@@ -13,6 +13,7 @@
 #include "idf_api.h"
 #include "idf_config_manager.h"
 #include "idf_logs.h"
+#include "idf_state_stream.h"
 #include "idf_wifi_manager.h"
 
 #include "esp_http_server.h"
@@ -548,6 +549,9 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   // the SSE plus a page reload would lock other requests out until LRU
   // purge kicked in. Keep below CONFIG_LWIP_MAX_SOCKETS (see sdkconfig.defaults);
   // httpd also reserves a few FDs internally — values above the cap can misbehave.
+  // NOTE: 10 is intentional. Bumping past this caused Bluedroid `hci_hal_env_init`
+  // to fail at `xQueueCreate` because httpd's session table grew the internal-DRAM
+  // working set just enough to starve the (small but cap-restricted) BT init heap.
   config.max_open_sockets = 10;
   config.backlog_conn = 8;
   // Tighter timeouts so a half-closed peer frees its socket sooner rather
@@ -560,14 +564,33 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   // with FP prints in cJSON.
   // Large JSON handlers (e.g. GET /api/state) need comfortable headroom.
   config.stack_size = 8 * 1024;
-  // Pin httpd to Core 0 — that's where lwip/Wi-Fi/BT already live, so all
-  // network-bound work (accept, recv, parse, send) runs on the same core
-  // and avoids inter-core hand-offs. It also keeps httpd off Core 1 which
-  // is dedicated to audio (audio_task, A2DP I2S writes, snapclient). When
-  // httpd had no affinity it would migrate to whichever core was idle —
-  // usually Core 1 — and contend with audio jitter, occasionally producing
-  // `httpd_accept_conn errno 113` under load.
-  config.core_id = 0;
+  // Run httpd on Core 1, NOT Core 0. Counter-intuitive — earlier code pinned
+  // it to Core 0 to "stay near lwip/Wi-Fi/BT" — but during BT music playback
+  // Core 0 is already saturated by:
+  //   - Wi-Fi task              (prio 23)
+  //   - BT controller           (prio 23)
+  //   - lwip TCPIP              (prio 18)
+  //   - Bluedroid (BTC/BTA)     (prio 12–13)
+  //   - …everything else        (≤ 5)
+  // …leaving the default-priority httpd task (prio 5) effectively starved.
+  // Symptom: `/api/state` polls take seconds, the SPA UI freezes, browser
+  // retries fire `httpd_accept_conn errno 113` bursts (client gives up before
+  // accept() runs).
+  //
+  // Core 1 hosts `audio_task` at prio 20, but that task spends ~75% of every
+  // second blocked in `i2s_channel_write` (DMA-paced — see [Audio] dma_wait
+  // stats). httpd at prio 10 runs uninterrupted in that 75% window and
+  // immediately yields the 25% busy slice to audio. Lwip socket calls go
+  // through the TCPIP thread message queue regardless of caller core, so
+  // there is no extra IPC penalty for serving requests from Core 1.
+  //
+  // Priority 10 chosen so:
+  //   - `audio_task` (20) preempts httpd unconditionally → audio is uncontended
+  //   - httpd preempts `dlna-mp3` (5), `voice` (3), idle (0) on Core 1
+  //   - httpd stays below lwip TCPIP (18) so the network stack can drain
+  //     packets while httpd is parsing one.
+  config.core_id = 1;
+  config.task_priority = 10;
 
   httpd_handle_t h = nullptr;
   if (httpd_start(&h, &config) != ESP_OK) return false;
@@ -630,6 +653,10 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   // SSE endpoint for the Logs page. Registered before the catch-all so
   // /api/logs/stream wins over the static handler's /* pattern.
   geelen_idf::logsRegisterStream(h);
+
+  // SSE endpoint for the SPA's push-based device state. Same registration
+  // ordering rationale as the logs stream — must be ahead of `/*`.
+  geelen_idf::stateStreamRegister(h);
 
   // Catch-all static handler, registered last so the /api/* URIs win by
   // prefix-specificity above it.

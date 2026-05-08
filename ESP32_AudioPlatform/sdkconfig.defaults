@@ -25,6 +25,25 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=32768
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
+# Allocator notes — DO NOT CHANGE WITHOUT TESTING ALL THREE PATHS:
+#   1. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` was tried twice and
+#      reverted. Kconfig forces STATIC TX buffers as a side-effect when
+#      that option is enabled (preallocates 16 × ~1.5 KiB upfront and
+#      keeps the handle table in internal DRAM), which drops the
+#      pre-Bluedroid heap from 38 KiB → 21 KiB and triggers
+#      `BTU_StartUp Unable to allocate resources for bt_workqueue`. The
+#      defaults file can't override the Kconfig dep; would need a
+#      Kconfig.projbuild patch or an IDF-version bump.
+#   2. `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` was tried and reverted.
+#      Lowering the threshold pushed BT host's small allocations
+#      (FreeRTOS queue/semaphore storage) into PSRAM, which BT-controller
+#      ISRs can't reach — produced `xQueueSemaphoreTake (pxQueue == NULL)`
+#      and `future_await (future != NULL)` panics during BT init.
+#   The 32 KiB defaults are the only stable combination on this build.
+#   To free runtime DRAM, prefer task-stack moves to PSRAM with
+#   `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)` — see the
+#   `voice` and `state-bc` tasks for the pattern.
+
 # Allow FreeRTOS task stacks to be allocated in PSRAM. Kept after removing cspot
 # because WiFi + BT + Snapclient coexist still fragments internal RAM quickly, and
 # this gives us headroom to move large task stacks out of DRAM if needed later.
@@ -64,6 +83,38 @@ CONFIG_BT_A2DP_ENABLE=y
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BTDM_CTRL_MODE_BTDM=n
+
+# We are a *single-phone A2DP sink*. We do NOT use BLE, GATT, SMP, RFCOMM,
+# HFP, or HID. Bluedroid's defaults preallocate state for all of these,
+# burning ~30 KiB of internal DRAM permanently — which on this board
+# (ESP32-WROVER, ~190 KiB internal heap after .bss) is the difference
+# between "phone connects + WiFi + httpd all coexist" and "phone connects,
+# heap drops to 700 B free, lwip_send returns ENOBUFS, and the SPA can't
+# load." Strip everything we don't need:
+#   - BLE off entirely → frees the host-side BLE/GATT/SMP envs
+#   - ACL connections capped at 1 (single phone) instead of 4 (host) / 2
+#     (controller); each unused ACL slot reserves ~2-4 KiB for HCI
+#     buffers + link policy state.
+#   - SMP bonds capped at 2 (current phone + spare) instead of 15.
+# Saved DRAM at the A2DP_CONNECTED moment (measured): ~700 B → ~24 KiB
+# free, which is enough headroom for parallel httpd workers + WiFi RX
+# malloc to keep the SPA reachable while music is playing.
+# CONFIG_BT_BLE_ENABLED is not set
+# CONFIG_BT_GATTS_ENABLE is not set
+# CONFIG_BT_GATTC_ENABLE is not set
+# CONFIG_BT_SMP_ENABLE is not set
+CONFIG_BT_ACL_CONNECTIONS=1
+CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=1
+CONFIG_BT_SMP_MAX_BONDS=2
+
+# AVRCP and OBEX off too. The application code already detects this and
+# logs `A2DP Enable without AVRC`. AVRCP cover-art client (`CT_COVER_ART`)
+# allocates ~6 KiB for AVDTP + image-receive scratch state; OBEX/GOEP
+# preallocates per-session buffers. Neither is exercised by an A2DP-sink
+# music player.
+# CONFIG_BT_AVRCP_ENABLED is not set
+# CONFIG_BT_AVRCP_CT_COVER_ART_ENABLED is not set
+# CONFIG_BT_GOEPC_ENABLED is not set
 
 # Reduce audio jitter/drift: disable WiFi modem sleep / station disconnect PM.
 # (Audio streaming is sensitive to scheduling jitter; Arduino default behavior is closer to "always on".)

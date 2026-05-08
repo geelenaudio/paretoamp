@@ -2,6 +2,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"  // xTaskCreatePinnedToCoreWithCaps
+#include "esp_heap_caps.h"           // MALLOC_CAP_SPIRAM
 #include "esp_log.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
@@ -19,7 +21,11 @@
 #include "idf_dlna.h"
 #include "idf_mp3_streamer.h"
 #include "idf_voice_feedback.h"
+#include "idf_voice_cache.h"
 #include "idf_test_tone.h"
+#include "idf_supervisor.h"
+#include "idf_state_stream.h"
+#include "idf_mode_manager.h"
 
 static constexpr gpio_num_t PIN_I2S_WS = GPIO_NUM_25;
 static constexpr gpio_num_t PIN_I2S_BCK = GPIO_NUM_26;
@@ -51,16 +57,10 @@ void on_snapcast_config_changed() {
 // is the simplest correct answer: the on-disk NVS already reflects the
 // new source, so app_main picks the right task graph after restart.
 //
-// The only transition that doesn't need the reboot is the no-op case
-// (same->same), which the API layer never actually invokes this hook for.
+// The reboot decision now lives inside `geelen_idf::ModeManager`, dispatched
+// via `EV_MODE_CHANGE_REQUESTED` (see idf_mode_manager.cpp). This file only
+// needs to expose `scheduleRestart` to other translation units.
 namespace geelen_idf { void scheduleRestart(unsigned delay_ms); }
-
-extern "C" void on_audio_source_changed(unsigned prev, unsigned next) {
-  if (prev == next) return;
-  ESP_LOGI("geelen", "Audio source %u -> %u: scheduling reboot to reconfigure task graph",
-           prev, next);
-  geelen_idf::scheduleRestart(500);
-}
 
 // Pull the latest per-channel volume + mute state out of NVS and push it
 // into the audio engine. Invoked by idf_api after POST /api/volume and
@@ -238,7 +238,14 @@ static void configure_uart_log_levels() {
   esp_log_level_set("*", ESP_LOG_INFO);
   esp_log_level_set("geelen", ESP_LOG_INFO);
   esp_log_level_set("wifi", ESP_LOG_WARN);
-  esp_log_level_set("httpd", ESP_LOG_WARN);
+  // The "httpd" tag fires `E httpd_accept_conn: error in accept (113)` +
+  // `W httpd_server: error accepting new connection` whenever a browser
+  // aborts a TCP connection between select() readiness and accept() — i.e.
+  // standard LAN behaviour during page reloads or SPA retry storms. Both
+  // are cosmetic (errno 113 = ERR_RTE = peer already gone). We silence the
+  // tag entirely; httpd_start failures and per-route errors are surfaced
+  // via our own "geelen" logging in idf_http_server.cpp / idf_api.cpp.
+  esp_log_level_set("httpd", ESP_LOG_NONE);
   esp_log_level_set("httpd_uri", ESP_LOG_WARN);
   esp_log_level_set("httpd_txrx", ESP_LOG_WARN);
   esp_log_level_set("httpd_parse", ESP_LOG_WARN);
@@ -253,12 +260,32 @@ extern "C" void app_main(void) {
   // the full boot log, including NVS / Wi-Fi banner lines.
   geelen_idf::logsInit();
   ESP_LOGI("geelen", "Geelen Audio Amp – ESP-IDF env boot");
+  // Bring up the control-plane event loop early so any subsystem that
+  // wants to post an event during init has somewhere to post it. Phase 0
+  // only logs events; Phases 1–4 migrate Wi-Fi / voice / mode / state-diff
+  // onto this bus. Failures are non-fatal — existing orchestration paths
+  // still drive the firmware.
+  geelen_idf::supervisorBegin();
   g_cfg.begin();
+  // Bring up the Mode Manager once the config is loaded so its log line
+  // shows the persisted source. No producers are wired through it yet
+  // (Phase 3 ships the FSM scaffold; later phases plug in concrete
+  // `IProducer` implementations for snap / test-tone / DLNA-stream).
+  geelen_idf::modeManager().begin(&g_cfg);
+  // SPIFFS is mounted by `g_cfg.begin()` — decode every voice prompt into
+  // PSRAM right after, before any subsystem can ask for one. This replaces
+  // the per-prompt Helix decode + streamer-singleton borrow with a small
+  // read-only PCM table; see idf_voice_cache.h for the rationale.
+  geelen_idf::voiceCacheInit();
   geelen_idf::configStartDebouncedSaveTask(&g_cfg);
   // Start the CPU sampler early so its calibration baseline has seconds of
   // mostly-idle time to settle before WiFi/BT/audio kick in.
   geelen_idf::cpuSamplerStart();
   g_wifi.begin(&g_cfg);
+  // Bring up the SSE broadcaster before httpd so the URI handler installed
+  // by `g_http.begin` sees an initialized broadcaster and never has to
+  // 503 a connecting SPA tab during the boot window.
+  geelen_idf::stateStreamInit(&g_cfg);
   g_http.begin(&g_cfg, &g_wifi);
 
   g_a2dp.setEngine(&g_engine);
@@ -281,6 +308,10 @@ extern "C" void app_main(void) {
 
   geelen_idf::mp3::streamer()->setEngine(&g_engine);
   geelen_idf::voiceFeedbackSetContext(&g_cfg, &g_wifi, &g_engine);
+  // Schedules the boot prompts and spawns the voice task. PCM comes
+  // straight from `voiceCacheInit()` — the prior 3.5 s "boot settle" wait
+  // existed only to let the Helix decoder + MP3 streamer race finish
+  // before the first prompt; with the cache there is nothing to race.
   geelen_idf::voiceFeedbackScheduleBoot();
 
   const geelen_idf::AudioSource src = g_cfg.getAudioSource();
@@ -302,6 +333,11 @@ extern "C" void app_main(void) {
   // overhead. 4 KB was the historical value but left zero margin once voice
   // prompts started feeding the engine; 6 KB adds headroom without measurable
   // RAM cost. (The IirDelaySnapshot rollback that used to cost ~1.5 KB is gone.)
+  // NOTE: stack stays in internal DRAM. PSRAM stack was attempted to free
+  // ~6 KiB DRAM but the runtime heap actually got *more* fragmented (the
+  // saved DRAM was eaten back by BT host + LwIP small allocs), so the move
+  // didn't translate into useful headroom. Audio task perf is also more
+  // sensitive to stack-access latency than other tasks; keep it internal.
   xTaskCreatePinnedToCore(audio_task, "audio", 6144, nullptr, 20, nullptr, 1);
 
   // Start BT Classic A2DP sink only when BT is selected. Defer if we are
@@ -317,6 +353,24 @@ extern "C" void app_main(void) {
       xTaskCreate(deferred_a2dp_start_task, "bt_defer", 4096, nullptr, 5, nullptr);
     }
   }
+
+  // (Historical) Phase 2 made the eager `mp3::streamer()->ensureTaskNow()`
+  // here obsolete: voice prompts no longer go through the MP3 streamer
+  // (they're PCM-cached at boot — see idf_voice_cache), so the only
+  // remaining caller is DLNA SOAP `Play`, which is initiated by an
+  // external UPnP request and can afford the lazy 20 KiB allocation.
+  //
+  // Skipping the eager spawn frees the dlna-mp3 task's 8 KiB stack +
+  // 12.5 KiB Helix in/out buffers (= 20 KiB internal DRAM) for the
+  // entire lifetime of the boot when DLNA isn't used. That headroom
+  // is what keeps WiFi RX malloc and httpd workers happy under
+  // sustained BT playback (without it, runtime DRAM steady-states at
+  // ~8 KiB free / ~3.5 KiB largest, and any TCP burst to httpd RSTs
+  // mid-handler with `wifi:m f null` warnings).
+  //
+  // The task is now created on demand inside `mp3::Streamer::playFile`
+  // via `ensureTaskNow()` — same call path, just deferred until first
+  // DLNA Play. See idf_mp3_streamer.cpp for the lazy-spawn site.
 
   char host[geelen_idf::SNAPCAST_HOST_MAX] = {0};
   g_cfg.getSnapcastHost(host, sizeof(host));

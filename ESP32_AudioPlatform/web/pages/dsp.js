@@ -485,13 +485,21 @@ export default function Dsp({ api, toast }) {
   const [active, setActive] = useState("preference");
   const commitT = useRef(null);
 
-  async function refresh() {
-    try {
-      const s = await api.getState();
+  // Subscribe but ONLY seed from the first frame: the page's optimistic
+  // in-progress edits live in `state.eq` and we don't want a delayed SSE
+  // snapshot (worst case 250 ms server debounce + 250 ms client debounce)
+  // to clobber a band the user is currently dragging. Multi-tab EQ sync
+  // would be a Phase 4b once we either move to JSON-Patch with per-key
+  // resolution or expose a "user is editing" flag.
+  useEffect(() => {
+    let seeded = false;
+    const stop = api.subscribeState((s) => {
+      if (seeded) return;
+      seeded = true;
       setState({ ...s, eq: normalizeEqState(s.eq || {}) });
-    } catch (e) { toast(String(e), "err"); }
-  }
-  useEffect(() => { refresh(); }, []);
+    });
+    return stop;
+  }, []);
 
   if (!state || !state.eq) return html`<div class="stub">Loading EQ…</div>`;
 

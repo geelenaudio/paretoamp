@@ -1,17 +1,20 @@
 // Overview page: a live status dashboard.
 //
 // Data model:
-//   - /api/state  : static-ish configuration (device name, mode, Snapcast
-//                   host). Fetched once on mount; we only re-fetch it after
-//                   mutations happen on other pages.
-//   - /api/system : runtime metrics (uptime, heap, PSRAM, WiFi RSSI, CPU
-//                   load per core). Polled every POLL_MS while the page is
+//   - /api/state/stream : push-based configuration snapshot (device name,
+//                   mode, volume, Snapcast host, …). The SPA subscribes once;
+//                   the firmware emits a fresh snapshot whenever ConfigManager's
+//                   stateVersion advances (debounced ~250 ms). No polling.
+//   - /api/system/metrics : runtime metrics (uptime, heap, PSRAM, WiFi RSSI,
+//                   CPU load per core). Polled every POLL_MS while the page is
 //                   visible. Automatic throttling-to-zero on tab hide keeps
-//                   the device's HTTP load minimal.
+//                   the device's HTTP load minimal. (Metrics stay on poll
+//                   because they're high-frequency live data; pushing them
+//                   would churn the SSE stream every tick.)
 //
-// The poll uses `setTimeout` in a chain (not `setInterval`) so a stalled
-// fetch can't pile up requests; if the previous request is still in flight
-// we skip the tick.
+// The metrics poll uses `setTimeout` in a chain (not `setInterval`) so a
+// stalled fetch can't pile up requests; if the previous request is still in
+// flight we skip the tick.
 
 import { html, useEffect, useState, useRef } from "/vendor/htm-preact.mjs";
 
@@ -73,14 +76,13 @@ export default function Overview({ api, navigate }) {
   const [wifiState, setWifiState] = useState(null);
   const inflight = useRef(false);
 
-  // One-shot config fetch.
+  // Push-based config subscription. The first frame arrives within one
+  // RTT of mount (the broadcaster sends an initial snapshot before
+  // detaching the socket); subsequent frames arrive only when a mutation
+  // bumps stateVersion.
   useEffect(() => {
-    let cancelled = false;
-    api.getState().then(
-      (s) => { if (!cancelled) setState(s); },
-      (e) => { if (!cancelled) setErr(String(e)); },
-    );
-    return () => { cancelled = true; };
+    const stop = api.subscribeState((s) => setState(s));
+    return stop;
   }, []);
 
   // One-shot Wi-Fi state fetch — used to render the AP-only setup banner.

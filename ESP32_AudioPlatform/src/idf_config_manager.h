@@ -66,6 +66,13 @@ enum class AudioSource : uint8_t {
 enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };
 enum class StereoMode : uint8_t { Stereo = 0, Mono = 1 };
 
+// Phase 5 — Wi-Fi power-save selector. Default `None` matches pre-Phase-5
+// behaviour (best for streaming, highest power draw). Users that operate
+// the device on battery / off-grid can flip this to MinModem to enable
+// the modem-sleep policy at the cost of a few ms of extra latency on
+// inbound packets — fine for the SPA but undesirable for Snapcast / DLNA.
+enum class WifiPsMode : uint8_t { None = 0, MinModem = 1, MaxModem = 2 };
+
 /** Wire format matches `geelen::EqBand` (16 bytes). */
 using ParametricBand = geelen::EqBand;
 
@@ -100,6 +107,7 @@ struct Config {
   char dev_name[DEV_NAME_MAX];
   bool dlna_on;
   bool voice_feedback;  // spoken SPIFFS prompts (mode / Wi‑Fi / BT)
+  WifiPsMode wifi_ps;   // Phase 5: Wi-Fi power-save selector
 };
 
 class ConfigManager {
@@ -176,6 +184,13 @@ class ConfigManager {
 
   bool getVoiceFeedbackEnabled() const { return config_.voice_feedback; }
   void setVoiceFeedbackEnabled(bool on);
+
+  // ---- Wi-Fi power-save (Phase 5) ---------------------------------------
+  // Persisted in NVS. The radio is reconfigured on next boot; we don't
+  // hot-apply because flipping ps mid-stream interacts badly with active
+  // BT coex.
+  WifiPsMode getWifiPsMode() const { return config_.wifi_ps; }
+  void setWifiPsMode(WifiPsMode mode);
 
   // ---- Test tone (NVS when in TestTone mode; live via /api/test-tone) ----
   float getTestToneFreqHz() const { return tt_freq_hz_; }

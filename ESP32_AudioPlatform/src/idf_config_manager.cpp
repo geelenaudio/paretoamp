@@ -53,6 +53,7 @@ static const char* NVS_KEY_EQ_HR_MANUAL  = "eq_hr_man";
 static const char* NVS_KEY_DEV_NAME      = "dev_name";
 static const char* NVS_KEY_DLNA_ON       = "dlna_on";
 static const char* NVS_KEY_VOICE_FB     = "voice_fb";
+static const char* NVS_KEY_WIFI_PS      = "wifi_ps";
 static const char* NVS_KEY_TT_FREQ     = "tt_freq";
 static const char* NVS_KEY_TT_AMP      = "tt_amp";
 static const char* NVS_KEY_TT_PAN      = "tt_pan";
@@ -175,6 +176,7 @@ void ConfigManager::loadDefaults() {
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   config_.dlna_on = false;
   config_.voice_feedback = true;
+  config_.wifi_ps = WifiPsMode::None;
 
   audio_source_ = AudioSource::Bluetooth;
   snapcast_host_[0] = '\0';
@@ -339,6 +341,11 @@ bool ConfigManager::load() {
 
   config_.dlna_on = nvsGetBool(h, NVS_KEY_DLNA_ON, false);
   config_.voice_feedback = nvsGetBool(h, NVS_KEY_VOICE_FB, true);
+  if (nvs_get_u8(h, NVS_KEY_WIFI_PS, &tmp8) == ESP_OK && tmp8 <= 2u) {
+    config_.wifi_ps = (WifiPsMode)tmp8;
+  } else {
+    config_.wifi_ps = WifiPsMode::None;
+  }
 
   uint8_t src = 0;
   bool source_needs_migration = false;
@@ -444,6 +451,7 @@ bool ConfigManager::save() {
     nvs_set_str(h, NVS_KEY_DEV_NAME, config_.dev_name);
     nvs_set_u8(h, NVS_KEY_DLNA_ON, config_.dlna_on ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_VOICE_FB, config_.voice_feedback ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_WIFI_PS, (uint8_t)config_.wifi_ps);
   }
   if (dm & D_TESTTONE) {
     nvs_set_blob(h, NVS_KEY_TT_FREQ, &tt_freq_hz_, sizeof(tt_freq_hz_));
@@ -745,6 +753,12 @@ void ConfigManager::setDlnaEnabled(bool on) {
 
 void ConfigManager::setVoiceFeedbackEnabled(bool on) {
   config_.voice_feedback = on;
+  markDirtyNet();
+}
+
+void ConfigManager::setWifiPsMode(WifiPsMode mode) {
+  if (config_.wifi_ps == mode) return;
+  config_.wifi_ps = mode;
   markDirtyNet();
 }
 

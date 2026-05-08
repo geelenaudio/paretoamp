@@ -3,10 +3,11 @@
 #include "idf_a2dp_sink.h"
 
 #include "audio_engine.h"
-#include "idf_mp3_streamer.h"
+#include "idf_events.h"
 #include "idf_voice_feedback.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 
 #include "esp_bt.h"
@@ -42,12 +43,31 @@ static void btAppGapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param
   if (event == ESP_BT_GAP_AUTH_CMPL_EVT) {
     ESP_LOGI(TAG, "GAP auth complete");
   } else if (event == ESP_BT_GAP_PIN_REQ_EVT) {
-    voiceFeedbackOnBtPairing();
+    // Post-only: the supervisor handles pairing-clip enqueue + debounce so
+    // BT host-task callbacks stay decoupled from the voice serializer.
+    eventPost(EV_A2DP_PAIRING, nullptr, 0);
   }
 }
 
 bool A2dpSink::begin(const char* device_name) {
   if (!device_name) device_name = "Geelen Audio";
+
+  // Bluedroid's host-side init (gatt_init / btu_init) allocates ~210 B
+  // queues + several KB of working memory from the BT-OSI heap, which is
+  // backed by the internal-DRAM `MALLOC_CAP_INTERNAL` pool. On this build
+  // (Wi-Fi up, A2DP, no BLE released) that pool is genuinely tight — the
+  // observed failure mode when it dips too low is a NULL `fixed_queue`
+  // returned silently by `osi_malloc` and a panic at the first enqueue
+  // (`assert fixed_queue_enqueue (queue != NULL)`). Log free + largest
+  // contiguous block here so future regressions are diagnosable from
+  // the boot UART log without rebuilding for heap_caps tracing.
+  const size_t free_int =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t lblk_int =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  ESP_LOGI(TAG, "Bluedroid pre-init heap: int8=%u B free, %u B largest; dma=%u B free",
+           (unsigned)free_int, (unsigned)lblk_int, (unsigned)free_dma);
 
   esp_err_t err = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
   if (err != ESP_OK) {
@@ -58,6 +78,17 @@ bool A2dpSink::begin(const char* device_name) {
   esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
   ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT));
+
+  // Phase 5 NOTE: an earlier iteration called
+  // `esp_coex_preference_set(ESP_COEX_PREFER_BT)` between
+  // `esp_bt_controller_enable` and `esp_bluedroid_init`. On IDF 5.5 with
+  // Classic-BT-only (BLE memory released above), that runtime call left
+  // Bluedroid in a state where `gatt_init`'s host-side queue setup hit
+  // a NULL `fixed_queue` and the device panicked on boot. The runtime
+  // function is also deprecated on recent IDFs in favour of sdkconfig
+  // tuning. Coex bias should now be configured via:
+  //   CONFIG_ESP_COEX_SW_COEXIST_PREFER_BT (or _BALANCE / _WIFI)
+  // in sdkconfig.amped-esp32-idf if we want to bias the arbiter.
 
   ESP_ERROR_CHECK(esp_bluedroid_init());
   ESP_ERROR_CHECK(esp_bluedroid_enable());
@@ -92,7 +123,9 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
       if (param) {
         ESP_LOGI(TAG, "Conn state: %d", (int)param->conn_stat.state);
         if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-          voiceFeedbackOnA2dpConnected();
+          eventPost(EV_A2DP_CONNECTED, nullptr, 0);
+        } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+          eventPost(EV_A2DP_DISCONNECTED, nullptr, 0);
         }
       }
       break;
@@ -126,10 +159,11 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
 
 void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
   if (!engine_ || !data || len == 0) return;
-  // Voice prompts use the same ring via `feedPCM`. SBC callbacks would splice
-  // music PCM into the middle of a clip (missing Wi‑Fi / "… Mode" tails, no
-  // "Bluetooth connected" over the prompt). Drop BT PCM until SPIFFS MP3 ends.
-  if (geelen_idf::mp3::streamer()->isPlayingLocalFile() || geelen_idf::voiceFeedbackBootPromptsActive()) {
+  // Voice prompts share the engine ring via `feedPCM`. While any prompt is in
+  // flight (including its tail-drain margin) the voice owner refcount is up;
+  // SBC PCM mixed in here would splice over the clip and we'd lose tails like
+  // "… Mode" or skip "Bluetooth connected" entirely. Single source of truth.
+  if (geelen_idf::voiceFeedbackActive()) {
     return;
   }
 

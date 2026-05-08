@@ -185,10 +185,18 @@ export default function TestTone({ api, toast }) {
   const [meters, setMeters] = useState({ pl: -90, pr: -90, rl: -90, rr: -90 });
   const pollRef = useRef(null);
 
-  async function load() {
-    try {
-      const s = await api.getState();
+  // Seed-once subscription: same rationale as the audio page — the user is
+  // editing the test-tone parameters live, so subsequent SSE snapshots
+  // would clobber an in-progress slider drag. The first frame populates
+  // every `setX` from `state.test_tone`; later frames keep `state.mode`
+  // fresh (drives the meter-poll effect below) but leave the editable
+  // numeric controls alone.
+  useEffect(() => {
+    let seeded = false;
+    const stop = api.subscribeState((s) => {
       setState(s);
+      if (seeded) return;
+      seeded = true;
       const tt = s.test_tone || {};
       if (tt.freq_hz != null) setFreq(tt.freq_hz);
       if (tt.amp_db != null) setAmp(tt.amp_db);
@@ -198,13 +206,8 @@ export default function TestTone({ api, toast }) {
       if (tt.sweep_lo_hz != null) setSweepLo(tt.sweep_lo_hz);
       if (tt.sweep_hi_hz != null) setSweepHi(tt.sweep_hi_hz);
       if (tt.dual_f2_hz != null) setDualF2(tt.dual_f2_hz);
-    } catch (e) {
-      toast(String(e), "err");
-    }
-  }
-
-  useEffect(() => {
-    load();
+    });
+    return stop;
   }, []);
 
   useEffect(() => {
