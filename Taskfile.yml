@@ -42,6 +42,22 @@ tasks:
     cmds:
       - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
 
+  fw:build:verbose:
+    desc: "Compile with -DVERBOSE_AUDIO_LOG=1 (boot-prompt + drain diagnostics)"
+    dir: "{{.FW_DIR}}"
+    env:
+      PLATFORMIO_BUILD_FLAGS: -DVERBOSE_AUDIO_LOG=1
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}}"
+
+  fw:upload:verbose:
+    desc: "Flash with -DVERBOSE_AUDIO_LOG=1 (boot-prompt + drain diagnostics)"
+    dir: "{{.FW_DIR}}"
+    env:
+      PLATFORMIO_BUILD_FLAGS: -DVERBOSE_AUDIO_LOG=1
+    cmds:
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
+
   fw:web:
     desc: Bundle the SPA (web/ -> data/web/ gzipped) + build + flash SPIFFS
     dir: "{{.FW_DIR}}"
@@ -68,6 +84,14 @@ tasks:
     cmds:
       - task: fw:upload
       - task: fw:web
+      - task: fw:monitor
+
+  fw:all:verbose:
+    desc: Build + flash firmware, then bundle + build + flash SPIFFS assets
+    cmds:
+      - task: fw:upload:verbose
+      - task: fw:web
+      - task: fw:monitor
 
   fw:monitor:
     desc: Attach serial monitor (115200, exception decoder, timestamps)

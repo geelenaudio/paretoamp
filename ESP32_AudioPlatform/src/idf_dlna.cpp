@@ -23,6 +23,7 @@
 
 #include "idf_config_manager.h"
 #include "idf_mp3_streamer.h"
+#include "idf_voice_feedback.h"
 #include "audio_engine.h"
 
 #include "freertos/FreeRTOS.h"
@@ -278,6 +279,10 @@ esp_err_t avt_handle(httpd_req_t* req, const char* action,
   }
 
   if (strcmp(action, "Play") == 0) {
+    // A casting app issuing Play during the boot mode clip would have the
+    // streamer abort the prompt and start music. Gate on the boot pair (15 s
+    // hard cap so the SOAP request never hangs forever).
+    voiceFeedbackWaitForBootDone(pdMS_TO_TICKS(15000));
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_current_uri[0]) {
       s_state = TransportState::Playing;

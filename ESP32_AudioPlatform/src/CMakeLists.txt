@@ -17,6 +17,11 @@ idf_component_register(
     "idf_a2dp_sink.cpp"
     "idf_snapclient.cpp"
     "snapcast_protocol.cpp"
+    "idf_events.cpp"
+    "idf_supervisor.cpp"
+    "idf_voice_cache.cpp"
+    "idf_state_stream.cpp"
+    "idf_mode_manager.cpp"
   INCLUDE_DIRS
     "."
     "../include"

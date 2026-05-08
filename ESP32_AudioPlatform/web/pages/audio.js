@@ -62,8 +62,18 @@ export default function Audio({ api, toast }) {
   const commitT = useRef(null);
 
   useEffect(() => {
-    api.getState().then((s) => {
+    // Seed once from the first push-based snapshot, then ignore subsequent
+    // frames so a slider drag isn't clobbered by an in-flight SSE update
+    // (the server-side debounce is 250 ms; the UI updates per-frame). The
+    // SSE channel still keeps `state` fresh for non-interactive fields like
+    // the mode badge in the page subtitle, which is why we keep updating
+    // the snapshot ref but only seed L/R/mute/channels on the very first
+    // delivery.
+    let seeded = false;
+    const stop = api.subscribeState((s) => {
       setState(s);
+      if (seeded) return;
+      seeded = true;
       const ll = s.volume?.l ?? 80;
       const rr = s.volume?.r ?? 80;
       setL(ll); setR(rr);
@@ -77,7 +87,8 @@ export default function Audio({ api, toast }) {
       // the per-channel view; default to split mode so they're not
       // surprised.
       if (Math.abs(ll - rr) > 2) setMode("split");
-    }).catch((e) => toast(String(e), "err"));
+    });
+    return stop;
   }, []);
 
   async function commitVolume(nextL, nextR, nextMuted) {

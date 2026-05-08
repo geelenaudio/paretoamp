@@ -1,5 +1,6 @@
 // ESP-IDF WiFi manager implementation (STA + AP fallback + minimal captive DNS)
 
+#include "idf_events.h"
 #include "idf_wifi_manager.h"
 #include "idf_config_manager.h"
 
@@ -27,9 +28,31 @@ static const char* AP_PASS = "geelen123";
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr int WIFI_GOT_IP_BIT = BIT1;
 
-// After STA disconnects, wait this long before starting the soft AP so a
-// quick router reboot / DHCP renew does not drop the user into captive mode.
-static constexpr int64_t kStaRecoverDelayUs = 8 * 1000 * 1000;
+// Phase 1 reconnect ladder. Each entry is the delay (µs) BEFORE the
+// next `esp_wifi_connect()` attempt after a STA_DISCONNECTED. Indexed
+// by `reconnect_attempts_`; the last entry is reused for every attempt
+// past `kMaxReconnectAttempts` if we somehow stay in retry mode (we
+// drop into AP-fallback well before that today).
+//
+// Rationale: the previous implementation waited a flat 8 s and then
+// flipped straight to AP fallback — i.e. zero reconnect attempts. The
+// most common Wi-Fi blip on this device is a 2–5 s router DHCP renew or
+// a Bluetooth coexistence stall; the new ladder retries before either
+// would clear, so the user almost never sees the captive AP unless the
+// SSID is genuinely unreachable.
+static constexpr int64_t kReconnectDelayUs[] = {
+    500'000,        //  500 ms — first attempt absorbs router blips
+    1'000'000,      //  1 s
+    2'000'000,      //  2 s
+    5'000'000,      //  5 s
+    10'000'000,     // 10 s
+    30'000'000,     // 30 s — cap reused for every subsequent attempt
+};
+static constexpr size_t kReconnectLadderLen =
+    sizeof(kReconnectDelayUs) / sizeof(kReconnectDelayUs[0]);
+// After this many consecutive failed attempts (~50 s of cumulative
+// backoff), trigger the AP fallback so the user can reconfigure.
+static constexpr uint8_t kMaxReconnectAttempts = 6;
 
 static uint32_t ipToU32_(const esp_ip4_addr_t& ip) {
   return ip.addr;
@@ -53,9 +76,27 @@ bool WifiManager::begin(ConfigManager* cfg) {
   wifi_init_config_t cfg_wifi = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg_wifi));
 
-  // Audio streaming needs deterministic scheduling; disable WiFi power save.
-  // This matches typical Arduino-core behavior and avoids long-term audio drift/overflows.
-  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+  // Phase 5 — apply persisted Wi-Fi power-save mode. Default `None` keeps
+  // the legacy behaviour (best for streaming, highest power draw); users
+  // who care about battery life can opt into `MinModem` from the SPA.
+  // We translate via a switch (rather than casting straight to wifi_ps_type_t)
+  // so an unknown enum value can never reach the driver and so the IDF
+  // header is the only place that knows the underlying integer codes.
+  wifi_ps_type_t ps = WIFI_PS_NONE;
+  const char* ps_name = "NONE";
+  switch (cfg_->getWifiPsMode()) {
+    case WifiPsMode::None:     ps = WIFI_PS_NONE;       ps_name = "NONE"; break;
+    case WifiPsMode::MinModem: ps = WIFI_PS_MIN_MODEM;  ps_name = "MIN_MODEM"; break;
+    case WifiPsMode::MaxModem: ps = WIFI_PS_MAX_MODEM;  ps_name = "MAX_MODEM"; break;
+  }
+  esp_err_t ps_err = esp_wifi_set_ps(ps);
+  if (ps_err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_wifi_set_ps(%s) failed: %s — falling back to NONE",
+             ps_name, esp_err_to_name(ps_err));
+    esp_wifi_set_ps(WIFI_PS_NONE);
+  } else {
+    ESP_LOGI(TAG, "Wi-Fi power-save: %s", ps_name);
+  }
 
   event_group_ = xEventGroupCreate();
 
@@ -63,15 +104,15 @@ bool WifiManager::begin(ConfigManager* cfg) {
   ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiManager::wifiEventHandler_, this, nullptr));
 
   esp_timer_create_args_t tmr{};
-  tmr.callback = &WifiManager::recoveryTimerCb_;
+  tmr.callback = &WifiManager::reconnectTimerCb_;
   tmr.arg = this;
-  tmr.name = "wifi_sta_recover";
+  tmr.name = "wifi_sta_reconn";
   tmr.dispatch_method = ESP_TIMER_TASK;
   esp_timer_handle_t th = nullptr;
   if (esp_timer_create(&tmr, &th) != ESP_OK) {
-    ESP_LOGW(TAG, "STA recovery timer create failed — runtime AP fallback disabled");
+    ESP_LOGW(TAG, "STA reconnect timer create failed — runtime reconnect disabled");
   } else {
-    recovery_timer_ = th;
+    reconnect_timer_ = th;
   }
 
   char ssid[WIFI_SSID_MAX] = {0};
@@ -142,21 +183,28 @@ void WifiManager::enableSoftApPhy_() {
   }
 }
 
-void WifiManager::cancelStaRecoveryTimer_() {
-  if (!recovery_timer_) return;
-  esp_timer_stop((esp_timer_handle_t)recovery_timer_);
+void WifiManager::cancelStaReconnectTimer_() {
+  if (!reconnect_timer_) return;
+  esp_timer_stop((esp_timer_handle_t)reconnect_timer_);
 }
 
-void WifiManager::scheduleStaRecoveryCheck_() {
-  if (!recovery_timer_) return;
-  esp_timer_stop((esp_timer_handle_t)recovery_timer_);
-  esp_err_t e = esp_timer_start_once((esp_timer_handle_t)recovery_timer_, kStaRecoverDelayUs);
+void WifiManager::scheduleStaReconnect_() {
+  if (!reconnect_timer_) return;
+  esp_timer_stop((esp_timer_handle_t)reconnect_timer_);
+
+  const size_t idx = (reconnect_attempts_ < kReconnectLadderLen)
+                         ? (size_t)reconnect_attempts_
+                         : (kReconnectLadderLen - 1);
+  const int64_t delay = kReconnectDelayUs[idx];
+  ESP_LOGI(TAG, "STA reconnect attempt %u in %lld ms",
+           (unsigned)(reconnect_attempts_ + 1), (long long)(delay / 1000));
+  esp_err_t e = esp_timer_start_once((esp_timer_handle_t)reconnect_timer_, delay);
   if (e != ESP_OK) {
-    ESP_LOGW(TAG, "STA recovery timer start: %s", esp_err_to_name(e));
+    ESP_LOGW(TAG, "STA reconnect timer start: %s", esp_err_to_name(e));
   }
 }
 
-void WifiManager::recoveryTimerCb_(void* arg) {
+void WifiManager::reconnectTimerCb_(void* arg) {
   auto* self = static_cast<WifiManager*>(arg);
   if (!self || !self->cfg_) return;
   if (self->status_.sta_connected) return;
@@ -164,10 +212,27 @@ void WifiManager::recoveryTimerCb_(void* arg) {
 
   char ssid[WIFI_SSID_MAX]{};
   self->cfg_->getWifiSsid(ssid, sizeof(ssid));
-  if (ssid[0] == '\0') return;
+  if (ssid[0] == '\0') return;  // never configured — nothing to reconnect to
 
-  ESP_LOGW(TAG, "STA still down after disconnect — starting soft AP for reconfiguration");
-  self->startApFallback_();
+  ++self->reconnect_attempts_;
+
+  // Threshold reached → flip to AP fallback (same outcome as the legacy
+  // 8 s timer, but only after we've actually exhausted the ladder).
+  if (self->reconnect_attempts_ > kMaxReconnectAttempts) {
+    ESP_LOGW(TAG, "STA reconnect ladder exhausted (%u attempts) — starting soft AP",
+             (unsigned)self->reconnect_attempts_);
+    self->startApFallback_();
+    return;
+  }
+
+  ESP_LOGI(TAG, "STA reconnect attempt %u: esp_wifi_connect()",
+           (unsigned)self->reconnect_attempts_);
+  esp_err_t r = esp_wifi_connect();
+  if (r != ESP_OK) {
+    // Common when driver is mid-disconnect; just queue the next ladder step.
+    ESP_LOGD(TAG, "esp_wifi_connect() returned %s", esp_err_to_name(r));
+    self->scheduleStaReconnect_();
+  }
 }
 
 void WifiManager::startApFallback_() {
@@ -183,6 +248,12 @@ void WifiManager::startApFallback_() {
   status_.sta_ip = 0;
 
   ESP_LOGI(TAG, "AP started: %s / %s (IP is usually 192.168.4.1)", AP_SSID, AP_PASS);
+
+  // Phase 1: notify the supervisor (and any future Mode Manager / DLNA
+  // SSDP gating) that we are now AP-only. Posted from both the cold-boot
+  // fallback path (`begin()`) and the runtime ladder-exhausted path so
+  // every transition into AP-only generates exactly one event.
+  eventPost(EV_WIFI_AP_FALLBACK, nullptr, 0);
 
   // Start captive DNS responder task
   xTaskCreatePinnedToCore(&WifiManager::dnsTask_, "dns", 4096, this, 3, nullptr, 0);
@@ -212,24 +283,30 @@ void WifiManager::wifiEventHandler_(void* arg, esp_event_base_t event_base, int3
       xEventGroupSetBits((EventGroupHandle_t)self->event_group_, WIFI_CONNECTED_BIT);
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
       auto* disc = (wifi_event_sta_disconnected_t*)event_data;
-      int reason = disc ? (int)disc->reason : -1;
-      ESP_LOGW(TAG, "STA disconnected (reason=%d)", reason);
+      uint8_t reason = disc ? (uint8_t)disc->reason : 0;
+      ESP_LOGW(TAG, "STA disconnected (reason=%u)", (unsigned)reason);
       self->status_.sta_connected = false;
       self->status_.sta_ip = 0;
       xEventGroupClearBits((EventGroupHandle_t)self->event_group_, WIFI_CONNECTED_BIT | WIFI_GOT_IP_BIT);
 
-      // Runtime recovery: once STA drops and stays down, bring the setup AP
-      // back (same as cold-boot fallback) so the user can fix credentials.
+      ev_wifi_down_t payload{reason};
+      eventPost(EV_WIFI_DOWN, &payload, sizeof(payload));
+
+      // Phase 1 reconnect ladder. Skip the ladder entirely once the soft
+      // AP is up: at that point the user is reconfiguring, and we don't
+      // want a stale STA reconnect to flip the radio out from under the
+      // captive portal.
       if (self->cfg_ && !self->status_.ap_running) {
         char ssid[WIFI_SSID_MAX]{};
         self->cfg_->getWifiSsid(ssid, sizeof(ssid));
         if (ssid[0] != '\0') {
-          self->scheduleStaRecoveryCheck_();
+          self->scheduleStaReconnect_();
         }
       }
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-    self->cancelStaRecoveryTimer_();
+    self->cancelStaReconnectTimer_();
+    self->reconnect_attempts_ = 0;  // success resets the ladder
     auto* event = (ip_event_got_ip_t*)event_data;
     if (event) {
       self->status_.sta_ip = ipToU32_(event->ip_info.ip);
@@ -237,6 +314,10 @@ void WifiManager::wifiEventHandler_(void* arg, esp_event_base_t event_base, int3
     }
     self->status_.sta_connected = true;
     xEventGroupSetBits((EventGroupHandle_t)self->event_group_, WIFI_GOT_IP_BIT);
+
+    ev_wifi_up_t payload{self->status_.sta_ip};
+    eventPost(EV_WIFI_UP, &payload, sizeof(payload));
+
     self->stopAp_();
   }
 }

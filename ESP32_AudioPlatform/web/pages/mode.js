@@ -151,11 +151,14 @@ export default function Mode({ api, toast }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  async function refresh() {
-    try { setState(await api.getState()); }
-    catch (e) { toast(String(e), "err"); }
-  }
-  useEffect(() => { refresh(); }, []);
+  // Push-based subscription replaces the manual `refresh()` after every
+  // mutation: the firmware re-publishes the snapshot when stateVersion
+  // bumps (which `setMode`, `setSnapcast`, `setDlna`, `setVoiceFeedback`
+  // all trigger via markDirty*). One round-trip per mutation, not two.
+  useEffect(() => {
+    const stop = api.subscribeState((s) => setState(s));
+    return stop;
+  }, []);
 
   const active = state ? (state.mode || (state.source === 0 ? "bluetooth" : "snapclient")) : null;
 
@@ -169,7 +172,6 @@ export default function Mode({ api, toast }) {
         return;
       }
       toast(`Mode: ${mode}`, "ok");
-      await refresh();
     } catch (e) { toast(String(e), "err"); }
     finally { setBusy(false); }
   }
@@ -179,7 +181,6 @@ export default function Mode({ api, toast }) {
     try {
       await api.setSnapcast(host, port);
       toast("Snapcast settings saved", "ok");
-      await refresh();
     } catch (e) { toast(String(e), "err"); }
     finally { setBusy(false); }
   }
@@ -189,7 +190,6 @@ export default function Mode({ api, toast }) {
     try {
       await api.setDlna(patch);
       toast("DLNA settings saved", "ok");
-      await refresh();
     } catch (e) { toast(String(e), "err"); }
     finally { setBusy(false); }
   }
@@ -199,7 +199,6 @@ export default function Mode({ api, toast }) {
     try {
       await api.setVoiceFeedback(enabled);
       toast("Voice feedback saved", "ok");
-      await refresh();
     } catch (e) { toast(String(e), "err"); }
     finally { setBusy(false); }
   }

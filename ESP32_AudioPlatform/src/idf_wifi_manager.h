@@ -30,9 +30,10 @@ class WifiManager {
   void startApFallback_();
   void stopAp_();
   void enableSoftApPhy_();
-  void scheduleStaRecoveryCheck_();
-  void cancelStaRecoveryTimer_();
-  static void recoveryTimerCb_(void* arg);
+  /** Schedule the next STA reconnect with exponential backoff (Phase 1). */
+  void scheduleStaReconnect_();
+  void cancelStaReconnectTimer_();
+  static void reconnectTimerCb_(void* arg);
 
   static void wifiEventHandler_(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
   static void dnsTask_(void* arg);
@@ -44,7 +45,11 @@ class WifiManager {
 
   void* event_group_{nullptr};
   int dns_sock_{-1};
-  void* recovery_timer_{nullptr};  // esp_timer_handle_t
+  void* reconnect_timer_{nullptr};  // esp_timer_handle_t
+  /** Consecutive reconnect attempts since the last successful IP acquisition.
+   *  Drives the backoff ladder in `scheduleStaReconnect_`; reset to 0 on
+   *  IP_EVENT_STA_GOT_IP and on cold start. */
+  uint8_t reconnect_attempts_{0};
 };
 
 }  // namespace geelen_idf

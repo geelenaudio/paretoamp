@@ -8,8 +8,22 @@
 // Submitting the form posts form-encoded creds to POST /api/wifi (same
 // endpoint the inline AP-mode portal uses) and shows a 15 s reboot
 // countdown so the user knows when to expect the device back online.
+//
+// The Settings card at the bottom hosts power-user knobs (Wi-Fi power-save
+// today; pencil in further radio toggles here as they land). It subscribes
+// to the SSE state stream rather than polling so a flip from another tab
+// is reflected immediately.
 
 import { html, useEffect, useState } from "/vendor/htm-preact.mjs";
+
+// Wi-Fi power-save options. `value` matches the firmware's wire format
+// (POST /api/wifi/power-save accepts these strings); `label` is what the
+// user sees in the segmented control.
+const WIFI_PS_OPTIONS = [
+  { value: "none",      label: "Off",        hint: "Best for streaming. Highest power draw." },
+  { value: "min_modem", label: "Min modem",  hint: "Modem-sleep. ~1–2 ms extra inbound latency." },
+  { value: "max_modem", label: "Max modem",  hint: "Aggressive sleep. Visible audio glitches likely." },
+];
 
 function rssiPct(rssi) {
   if (rssi == null) return 0;
@@ -33,6 +47,11 @@ export default function Wifi({ api, toast }) {
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState(null);
+  // Settings card — Wi-Fi power-save selector. Mirrors `state.wifi.power_save`
+  // from /api/state. `psBusy` gates the buttons during the POST round-trip
+  // so a fast double-tap doesn't fire two requests.
+  const [ps, setPs] = useState(null);
+  const [psBusy, setPsBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +61,34 @@ export default function Wifi({ api, toast }) {
     );
     return () => { cancelled = true; };
   }, []);
+
+  // Subscribe to the SSE device-state stream for the power-save value so
+  // a flip from another tab / curl reflects here instantly. We keep the
+  // one-shot getWifiState() above for the live STA status block (RSSI,
+  // IP, AP fallback) which is not part of the persisted state snapshot.
+  useEffect(() => {
+    const stop = api.subscribeState((s) => {
+      const next = s && s.wifi && s.wifi.power_save;
+      if (next) setPs(next);
+    });
+    return stop;
+  }, []);
+
+  async function onChangePs(next) {
+    if (psBusy || next === ps) return;
+    setPsBusy(true);
+    const prev = ps;
+    setPs(next); // optimistic — SSE will reaffirm
+    try {
+      await api.setWifiPowerSave(next);
+      toast && toast("Saved. Reboot to apply.", "ok");
+    } catch (e) {
+      setPs(prev);
+      toast && toast(`Save failed: ${e.message || e}`, "err", 5000);
+    } finally {
+      setPsBusy(false);
+    }
+  }
 
   async function rescan() {
     setScanning(true);
@@ -191,5 +238,42 @@ export default function Wifi({ api, toast }) {
         <span class="page__subtitle">Device will reboot to apply.</span>
       </div>
     </form>
+
+    <div class="card" style="margin-top:var(--sp-4)">
+      <div class="card__title">Settings</div>
+
+      <div style="margin-top:var(--sp-3)">
+        <div class="page__subtitle" style="margin-bottom:6px">
+          Wi-Fi power-save
+        </div>
+        <div role="radiogroup"
+             aria-label="Wi-Fi power-save mode"
+             style="display:flex;gap:6px;flex-wrap:wrap">
+          ${WIFI_PS_OPTIONS.map((opt) => {
+            const active = ps === opt.value;
+            return html`<button
+              type="button"
+              role="radio"
+              aria-checked=${active}
+              class=${"btn " + (active ? "btn--primary" : "btn--ghost")}
+              disabled=${psBusy || ps == null}
+              title=${opt.hint}
+              onClick=${() => onChangePs(opt.value)}>
+              ${opt.label}
+            </button>`;
+          })}
+        </div>
+        <div class="page__subtitle" style="margin-top:8px">
+          ${ps == null
+            ? "Loading current setting…"
+            : (WIFI_PS_OPTIONS.find((o) => o.value === ps) || {}).hint || ""}
+        </div>
+        <div class="page__subtitle" style="margin-top:6px">
+          Persisted in NVS, applies on next boot. Default <strong>Off</strong>
+          is the right answer for any device that streams audio; the modem-sleep
+          options trade audio reliability for ≈30–80 mA of saved current.
+        </div>
+      </div>
+    </div>
   `;
 }

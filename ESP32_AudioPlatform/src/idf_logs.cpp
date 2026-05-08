@@ -222,15 +222,16 @@ esp_err_t handle_logs_stream(httpd_req_t* req) {
                                "sse args oom");
   }
 
-  // Spawn a pinned task for the SSE loop. Core 0 is chosen because that's
-  // where httpd / lwip already live — keeping the socket traffic on one
-  // core avoids an unnecessary core-to-core context for every SSE write.
-  // Priority 4 is below audio (20) and above cpu-sampler (1) but below
-  // httpd's default worker (5), so the SSE task doesn't outrun the worker
-  // on requests that do matter.
+  // Spawn a pinned task for the SSE loop. Core 1 mirrors the httpd worker
+  // (see idf_http_server.cpp — moved off Core 0 because BT/Wi-Fi/lwip
+  // saturate it during music playback). Lwip socket calls trampoline to
+  // the TCPIP thread anyway, so colocating SSE with httpd on Core 1 keeps
+  // both reachable while audio_task is blocked in i2s_channel_write.
+  // Priority 4 is below audio (20) and httpd (10) so neither is starved
+  // by a chatty log client; still above cpu-sampler (1) and idle (0).
   BaseType_t ok = xTaskCreatePinnedToCore(
       sse_stream_task, "sse-logs", 4096, args, /*prio*/ 4, nullptr,
-      /*core*/ 0);
+      /*core*/ 1);
   if (ok != pdPASS) {
     delete args;
     httpd_req_async_handler_complete(detached);

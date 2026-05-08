@@ -1,9 +1,15 @@
 // Thin JSON wrappers around the firmware REST API. Every call returns a
 // resolved JSON body or throws; component code handles the throw via the toast
-// system. Phase 1 fleshes these endpoints out — for now, the legacy Phase-0
-// endpoints (`/api/status`, `/api/volume?v=`, `/api/source?s=`, `/api/wifi`,
-// `/api/snapcast`) are what's wired, and the compatibility wrappers below map
-// the new SPA shape onto them until Phase 1 ships.
+// system.
+//
+// Phase 4 adds a push-based state channel (`/api/state/stream`, server-sent
+// events). `api.subscribeState(cb)` opens the stream lazily, fans out to
+// every subscriber, and replays the latest snapshot to late joiners so a
+// page mounting after the first event still gets state immediately. Pages
+// that previously called `api.getState()` once on mount can switch to a
+// subscription with no additional polling — mutations on any device or tab
+// land in the local view within ~250 ms (the firmware-side debounce).
+// Pages that need the one-shot semantics keep using `api.getState()`.
 
 async function j(method, url, body) {
   const init = { method, headers: {} };
@@ -153,4 +159,106 @@ export const api = {
   async getWifiState() {
     return await j("GET", "/api/wifi/state");
   },
+
+  // Wi-Fi power-save selector (Phase 5). Persisted in NVS, applied on
+  // next boot — the firmware deliberately does NOT hot-apply because
+  // flipping `esp_wifi_set_ps` mid-stream interacts poorly with active
+  // BT coex. Callers should surface "applies after reboot" in the UI.
+  async setWifiPowerSave(mode) {
+    return await j("POST", "/api/wifi/power-save", { mode });
+  },
+
+  // Subscribe to push-based device state updates. The SSE source is shared
+  // across every subscriber so opening five pages still uses one socket
+  // (also cheaper for the firmware: it tops out at six concurrent SSE
+  // sockets total — see kMaxSubscribers in idf_state_stream.cpp).
+  //
+  // Returns an `unsubscribe()` function. Closing the last subscription
+  // closes the EventSource so a long-idled tab does not hold the firmware
+  // socket forever; the next `subscribeState` reopens it on demand.
+  //
+  // The callback fires:
+  //   - immediately if a snapshot is already cached (late joiner)
+  //   - on every fresh `event: snapshot` from the server
+  //   - never on heartbeats (`event: ping` is silently consumed)
+  //
+  // If the stream fails for any reason the helper falls back to a single
+  // `GET /api/state` so the SPA at least gets one snapshot and can render.
+  subscribeState(cb) {
+    return _stateBus.subscribe(cb);
+  },
 };
+
+// Internal singleton: lazily-opened EventSource + Set of callbacks +
+// last-snapshot cache. Hidden from the api.* surface deliberately —
+// callers should reach for it via `subscribeState`.
+const _stateBus = (() => {
+  let es = null;
+  let lastSnapshot = null;
+  const subs = new Set();
+  let fallbackTried = false;
+
+  function open() {
+    if (es) return;
+    try {
+      es = new EventSource("/api/state/stream");
+    } catch (e) {
+      tryFallback();
+      return;
+    }
+    es.addEventListener("snapshot", (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        lastSnapshot = data;
+        for (const cb of subs) {
+          try { cb(data); } catch { /* swallow component errors */ }
+        }
+      } catch {
+        // Malformed JSON — ignore one frame; next one will likely be fine.
+      }
+    });
+    es.addEventListener("ping", () => { /* heartbeat */ });
+    es.addEventListener("error", () => {
+      // The browser auto-reconnects EventSource on transient network blips;
+      // we only fall back to REST if we've never seen a snapshot at all.
+      if (!lastSnapshot) tryFallback();
+    });
+  }
+
+  function close() {
+    if (es) {
+      es.close();
+      es = null;
+    }
+  }
+
+  function tryFallback() {
+    if (fallbackTried || lastSnapshot) return;
+    fallbackTried = true;
+    api.getState().then(
+      (s) => {
+        lastSnapshot = s;
+        for (const cb of subs) {
+          try { cb(s); } catch {}
+        }
+      },
+      () => { /* surfaced on the page that called subscribeState */ },
+    );
+  }
+
+  return {
+    subscribe(cb) {
+      subs.add(cb);
+      open();
+      // Replay the latest snapshot synchronously so a page mounting
+      // after the first frame doesn't have to wait for the next change.
+      if (lastSnapshot) {
+        try { cb(lastSnapshot); } catch {}
+      }
+      return () => {
+        subs.delete(cb);
+        if (subs.size === 0) close();
+      };
+    },
+  };
+})();

@@ -78,10 +78,12 @@ paths:
                 device_name: "Geelen Audio"
                 firmware: "0.3.0"
                 mode: "snapclient"
+                _v: 42
                 volume: { l: 70, r: 70, muted: false }
                 channels: { stereo_mono: "stereo", l_on: true, r_on: true }
                 snapcast: { host: "10.0.80.34", port: 1704 }
                 dlna: { enabled: false, name: "Geelen Audio" }
+                wifi: { power_save: "none" }
                 voice_feedback: true
                 eq:
                   calibration:
@@ -575,6 +577,52 @@ paths:
                 ap_ssid: ""
                 ap_ip: "0.0.0.0"
 
+  /api/wifi/power-save:
+    post:
+      tags: [WiFi]
+      summary: Set Wi-Fi power-save mode (Phase 5)
+      description: |
+        Selects `esp_wifi_set_ps` policy. Persisted in NVS, applied on next
+        boot — the firmware deliberately does NOT hot-apply because flipping
+        `esp_wifi_set_ps` mid-stream interacts poorly with active BT coex
+        (drops PCM frames).
+
+        The default `none` is the right answer for any device that streams
+        audio; `min_modem` saves ≈30–80 mA at the cost of a few ms of inbound
+        latency, and `max_modem` causes audible glitches on this hardware
+        and exists only for completeness.
+      operationId: setWifiPowerSave
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [none, min_modem, max_modem]
+            example: { mode: "min_modem" }
+      responses:
+        "200":
+          description: New mode persisted; reboot to apply.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode:                  { type: string, enum: [none, min_modem, max_modem] }
+                  applies_on_next_boot:  { type: boolean }
+              example:
+                mode: "min_modem"
+                applies_on_next_boot: true
+        "400":
+          description: `mode` missing or not in the enum.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/logs/stream:
     get:
       tags: [Logs]
@@ -760,7 +808,14 @@ components:
         channels:    { $ref: "#/components/schemas/ChannelSetting" }
         snapcast:    { $ref: "#/components/schemas/SnapcastSetting" }
         dlna:        { $ref: "#/components/schemas/DlnaSetting" }
-        voice_feedback: { type: boolean, description: "Spoken SPIFFS MP3 cues (boot + BT events)." }
+        wifi:        { $ref: "#/components/schemas/WifiSetting" }
+        voice_feedback: { type: boolean, description: "Cached PSRAM voice cues (boot + BT events)." }
+        _v:
+          type: integer
+          description: |
+            Monotonic state version. Bumped on every persisted mutation; used
+            by the `/api/state/stream` SSE consumer (and as an ETag analogue
+            on `/api/state`) so SPA clients can detect skipped frames.
         eq:
           type: object
           properties:
@@ -770,6 +825,21 @@ components:
             active_slot:
               type: integer
               description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
+
+    WifiSetting:
+      type: object
+      description: |
+        Persisted Wi-Fi configuration knobs surfaced in the device state
+        snapshot. Live STA status (RSSI, IP, AP fallback) lives on
+        `GET /api/wifi/state` instead — that endpoint is not part of the
+        push-based snapshot because the values change too often.
+      properties:
+        power_save:
+          type: string
+          enum: [none, min_modem, max_modem]
+          description: |
+            `esp_wifi_set_ps` policy applied at boot. See
+            `POST /api/wifi/power-save` for the trade-offs.
 
     SystemInfo:
       type: object

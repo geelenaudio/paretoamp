@@ -456,7 +456,22 @@ bool AudioEngine::process() {
     const size_t low_water_frames = (size_t)((uint64_t)SAMPLE_RATE * AUDIO_LOW_WATER_MS / 1000);
 
     if (!playing_) {
-      if (fill_frames < prefill_frames) return false;
+      if (fill_frames < prefill_frames) {
+#if VERBOSE_AUDIO_LOG
+        // Rate-limited so we get one line per second even when the audio task
+        // is polling at ~100 Hz. This is the smoking-gun log for "voice prompt
+        // never started" — if the ring sits below prefill while a prompt is
+        // playing, the producer side is the bug.
+        static unsigned long s_last_prefill_log_ms = 0;
+        const unsigned long now_ms = nowMs();
+        if (now_ms - s_last_prefill_log_ms > 1000) {
+          s_last_prefill_log_ms = now_ms;
+          logf("[Audio] waiting for prefill: fill=%u/%u frames",
+               (unsigned)fill_frames, (unsigned)prefill_frames);
+        }
+#endif
+        return false;
+      }
       playing_ = true;
       logf("[Audio] start (prefill=%lums fill=%u frames, buf=%u frames)",
            (unsigned long)AUDIO_PREFILL_MS, (unsigned)fill_frames, (unsigned)RING_BUF_SAMPLES);

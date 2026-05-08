@@ -4,6 +4,7 @@
 #include "idf_config_manager.h"
 #include "eq_types.h"
 #include "idf_cpu_sampler.h"
+#include "idf_mode_manager.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -236,28 +237,13 @@ static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool ena
 }
 
 // ---- /api/state (aggregated snapshot) ------------------------------------
+//
+// `buildStateJson` is the single source of truth for the wire shape. Both
+// the REST handler below and the SSE state stream (idf_state_stream.cpp)
+// call it so a subscriber's snapshot is byte-for-byte identical to a
+// `GET /api/state` response. The caller owns the returned cJSON object.
 
-static esp_err_t handle_get_state(httpd_req_t* req) {
-  auto* cfg = (ConfigManager*)req->user_ctx;
-  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
-
-  char etag[24];
-  snprintf(etag, sizeof(etag), "\"%08lx\"", (unsigned long)cfg->stateVersion());
-
-  char inm[80] = {0};
-  if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK) {
-    const char* cm = inm;
-    while (*cm == ' ' || *cm == '\t') ++cm;
-    if (cm[0] == 'W' && cm[1] == '/') cm += 2;
-    if (strcmp(cm, etag) == 0) {
-      // Status first — some httpd builds reject header/body ordering otherwise.
-      httpd_resp_set_status(req, "304 Not Modified");
-      httpd_resp_set_hdr(req, "ETag", etag);
-      httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-      return httpd_resp_send(req, nullptr, 0);
-    }
-  }
-
+cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON* root = cJSON_CreateObject();
 
   char dev_name[DEV_NAME_MAX];
@@ -269,6 +255,10 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
 
   cJSON_AddStringToObject(root, "mode", modeName(cfg->getAudioSource()));
   cJSON_AddBoolToObject(root, "voice_feedback", cfg->getVoiceFeedbackEnabled());
+
+  // Monotonic version, useful as an ETag analogue and so SPA clients can
+  // detect dropped frames in the SSE stream.
+  cJSON_AddNumberToObject(root, "_v", (double)cfg->stateVersion());
 
   cJSON* vol = cJSON_CreateObject();
   cJSON_AddNumberToObject(vol, "l", cfg->getVolumeL());
@@ -294,6 +284,19 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   cJSON_AddBoolToObject(dlna, "enabled", cfg->getDlnaEnabled());
   cJSON_AddStringToObject(dlna, "name", dev_name);
   cJSON_AddItemToObject(root, "dlna", dlna);
+
+  // Phase 5 — Wi-Fi power-save preference. Persisted in NVS, applied at
+  // boot inside `WifiManager::begin`. Exposed here so the SPA can show
+  // the current setting; mutated via POST `/api/wifi/power-save`.
+  cJSON* wifi_cfg = cJSON_CreateObject();
+  const char* ps_str = "none";
+  switch (cfg->getWifiPsMode()) {
+    case WifiPsMode::None:     ps_str = "none";       break;
+    case WifiPsMode::MinModem: ps_str = "min_modem";  break;
+    case WifiPsMode::MaxModem: ps_str = "max_modem";  break;
+  }
+  cJSON_AddStringToObject(wifi_cfg, "power_save", ps_str);
+  cJSON_AddItemToObject(root, "wifi", wifi_cfg);
 
   cJSON* eq = cJSON_CreateObject();
   ParametricBand cal[PARAMETRIC_BANDS], pref[PARAMETRIC_BANDS];
@@ -326,6 +329,31 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
   cJSON_AddNumberToObject(tt, "dual_f2_hz", cfg->getTestToneDualF2Hz());
   cJSON_AddItemToObject(root, "test_tone", tt);
 
+  return root;
+}
+
+static esp_err_t handle_get_state(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+
+  char etag[24];
+  snprintf(etag, sizeof(etag), "\"%08lx\"", (unsigned long)cfg->stateVersion());
+
+  char inm[80] = {0};
+  if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK) {
+    const char* cm = inm;
+    while (*cm == ' ' || *cm == '\t') ++cm;
+    if (cm[0] == 'W' && cm[1] == '/') cm += 2;
+    if (strcmp(cm, etag) == 0) {
+      // Status first — some httpd builds reject header/body ordering otherwise.
+      httpd_resp_set_status(req, "304 Not Modified");
+      httpd_resp_set_hdr(req, "ETag", etag);
+      httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+      return httpd_resp_send(req, nullptr, 0);
+    }
+  }
+
+  cJSON* root = buildStateJson(cfg);
   httpd_resp_set_hdr(req, "ETag", etag);
   return send_json(req, root);
 }
@@ -552,11 +580,6 @@ static esp_err_t handle_post_channels(httpd_req_t* req) {
 
 // ---- /api/mode ------------------------------------------------------------
 
-// Externally-supplied hook: lets idf_main toggle subsystems (BT/Snap/DLNA)
-// when the source changes. Weak so the API layer stays decoupled from the
-// actual source modules.
-extern "C" void on_audio_source_changed(unsigned prev, unsigned next) __attribute__((weak));
-
 static esp_err_t handle_post_mode(httpd_req_t* req) {
   auto* cfg = (ConfigManager*)req->user_ctx;
   if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
@@ -577,16 +600,36 @@ static esp_err_t handle_post_mode(httpd_req_t* req) {
 
   unsigned pu = (unsigned)prev;
   unsigned nu = (unsigned)next;
-  // Any actual change reboots until the Phase-9 runtime source manager
-  // lands. The BT-only path used to special-case BT edges, but switching
-  // between Snapclient and DLNA also reconfigures the task graph, so the
-  // simplest correct answer is "changed == reboot".
-  const bool reboot = (pu != nu);
 
-  // Let main decide how to reconfigure runtime (start/stop Snap / DLNA). If
-  // the hook is absent we still reboot so NVS takes effect on next boot.
-  if (&on_audio_source_changed) on_audio_source_changed(pu, nu);
-  else if (reboot) scheduleRestart(500);
+  // Phase 3: dispatch to the Mode Manager FSM. It posts
+  // EV_MODE_CHANGE_REQUESTED and decides whether the transition can run
+  // hot or needs a reboot. Today the answer is always "reboot" for any
+  // change, but the seam is in place — concrete `IProducer` implementations
+  // for Snap / TestTone can flip the "non-BT pair" branch to a hot-swap
+  // without touching this handler again.
+  const ModeTransitionResult result =
+      modeManager().requestChange((uint8_t)pu, (uint8_t)nu);
+  bool reboot = false;
+  switch (result) {
+    case ModeTransitionResult::Noop:
+      break;
+    case ModeTransitionResult::HotSwap:
+      // No reboot — producer swap already happened inside requestChange.
+      break;
+    case ModeTransitionResult::RebootRequired:
+      reboot = true;
+      scheduleRestart(500);
+      break;
+    case ModeTransitionResult::Failed:
+      // Mode Manager rolled back to `prev`; surface the failure to the
+      // SPA so the toggle reverts visually. Persisted source is still
+      // `next` here because we wrote it above; revert.
+      cfg->setAudioSource(prev);
+      cfg->save();
+      cJSON_Delete(body);
+      return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                           "mode change failed; reverted");
+  }
 
   cJSON_Delete(body);
 
@@ -644,6 +687,56 @@ static esp_err_t handle_post_dlna(httpd_req_t* req) {
   cJSON_AddBoolToObject(rj, "enabled", enabled);
   char dn[DEV_NAME_MAX]; cfg->getDeviceName(dn, sizeof(dn));
   cJSON_AddStringToObject(rj, "name", dn);
+  return send_json(req, rj);
+}
+
+// ---- /api/wifi/power-save (Phase 5) ---------------------------------------
+//
+// POST {"mode": "none" | "min_modem" | "max_modem"}. Persisted in NVS;
+// the new mode applies on next boot. We deliberately do NOT hot-apply
+// because flipping `esp_wifi_set_ps` mid-stream interacts poorly with
+// active BT coex (sometimes drops PCM frames).
+
+static bool parsePsModeStr(const char* s, WifiPsMode* out) {
+  if (!s || !out) return false;
+  if (!strcmp(s, "none") || !strcmp(s, "off")) {
+    *out = WifiPsMode::None; return true;
+  }
+  if (!strcmp(s, "min_modem") || !strcmp(s, "min")) {
+    *out = WifiPsMode::MinModem; return true;
+  }
+  if (!strcmp(s, "max_modem") || !strcmp(s, "max")) {
+    *out = WifiPsMode::MaxModem; return true;
+  }
+  return false;
+}
+
+static esp_err_t handle_post_wifi_power_save(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  const char* mode_s = jstr(body, "mode", nullptr);
+  WifiPsMode mode = cfg->getWifiPsMode();
+  bool ok = parsePsModeStr(mode_s, &mode);
+  cJSON_Delete(body);
+  if (!ok) {
+    return send_err_json(req, HTTPD_400_BAD_REQUEST,
+                         "expected mode in {none, min_modem, max_modem}");
+  }
+  cfg->setWifiPsMode(mode);
+
+  cJSON* rj = cJSON_CreateObject();
+  const char* out = "none";
+  switch (mode) {
+    case WifiPsMode::None:     out = "none";       break;
+    case WifiPsMode::MinModem: out = "min_modem";  break;
+    case WifiPsMode::MaxModem: out = "max_modem";  break;
+  }
+  cJSON_AddStringToObject(rj, "mode", out);
+  cJSON_AddBoolToObject(rj, "applies_on_next_boot", true);
   return send_json(req, rj);
 }
 
@@ -1304,6 +1397,7 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/reset",              HTTP_POST,   handle_post_reset);
   reg("/api/wifi/scan",          HTTP_GET,    handle_get_wifi_scan);
   reg("/api/wifi/state",         HTTP_GET,    handle_get_wifi_state);
+  reg("/api/wifi/power-save",    HTTP_POST,   handle_post_wifi_power_save);
 }
 
 }  // namespace geelen_idf

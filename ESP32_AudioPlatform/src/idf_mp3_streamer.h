@@ -42,6 +42,15 @@ class Streamer {
  public:
   void setEngine(geelen::AudioEngine* engine);
 
+  /** Spawn the fetch/decode task immediately. Otherwise the task is
+   *  created lazily on the first `play()`/`playFile()`, which on Core 1
+   *  has to share CPU with `audio_task` (prio 20) and means the decoder
+   *  init + first SPIFFS read happen during 10 ms vTaskDelay yields.
+   *  Calling this at boot — *before* `audio_task` is created — gets the
+   *  decoder buffers and task primed during low-contention startup so the
+   *  first voice prompt is actually audible. Idempotent. */
+  void ensureTaskNow();
+
   // Kick off playback of `url`. Spawns the fetch/decode task on first
   // call; subsequent calls swap the URL atomically. `url` must be
   // `http://...` or an absolute VFS path (`/spiffs/...`).
@@ -61,8 +70,6 @@ class Streamer {
   void stop();
 
   bool isPlaying() const;
-  /** True while a queued or active SPIFFS MP3 (`/…`) owns the voice path — A2DP must not feed the ring. */
-  bool isPlayingLocalFile() const;
   uint32_t positionMs() const;
   uint32_t durationMs() const;
   void setDurationMs(uint32_t ms);

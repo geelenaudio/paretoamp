@@ -1,15 +1,30 @@
+// See idf_voice_feedback.h for the design.
+//
+// Phase 2: the prompt path is pure PCM. No Helix, no command mailbox, no
+// 12 s safety caps. The voice task pulls a `voice_clip_id_t` off the queue,
+// looks up the pre-decoded PCM in `idf_voice_cache`, and feeds it to the
+// engine ring in 1024-frame chunks paced just above realtime. After every
+// clip we post `EV_VOICE_PROMPT_FINISHED`; after the last queued boot clip
+// we post `EV_VOICE_BOOT_DONE` AND give the legacy boot-done semaphore so
+// existing waiters (DLNA SOAP `Play`, test-tone start) keep working without
+// a rewrite of those callsites.
+
 #include "idf_voice_feedback.h"
 
 #include "audio_engine.h"
 #include "idf_config_manager.h"
-#include "idf_mp3_streamer.h"
+#include "idf_events.h"
+#include "idf_voice_cache.h"
 #include "idf_wifi_manager.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include <atomic>
 
@@ -19,143 +34,185 @@ namespace {
 
 constexpr const char* TAG = "voice-fb";
 
-constexpr const char* kPathWifiConnected = "/spiffs/audio/WifiConnected.mp3";
-constexpr const char* kPathWifiDisconnected = "/spiffs/audio/WifiDisconnected.mp3";
-constexpr const char* kPathBluetoothMode = "/spiffs/audio/BluetoothMode.mp3";
-constexpr const char* kPathSnapcastMode = "/spiffs/audio/SnapcastMode.mp3";
-constexpr const char* kPathDlnaMode = "/spiffs/audio/DLNAMode.mp3";
-constexpr const char* kPathBluetoothConnected = "/spiffs/audio/BluetoothConnected.mp3";
-constexpr const char* kPathPairing = "/spiffs/audio/Pairing.mp3";
-
 ConfigManager* s_cfg = nullptr;
 WifiManager* s_wifi = nullptr;
 geelen::AudioEngine* s_eng = nullptr;
 
-/** Posted once when `voice_boot_task` is done (or skipped) so test-tone can start without interrupting prompts. */
-static SemaphoreHandle_t s_boot_done_sem = nullptr;
+// One queued clip. `is_boot` flags the boot-pair entries so the serializer
+// knows when to give `s_boot_done_sem` and post `EV_VOICE_BOOT_DONE`.
+struct PromptItem {
+  voice_clip_id_t id;
+  bool is_boot;
+};
 
-/** Keeps A2DP/Snapcast from feeding the ring between boot clips and during tail drain. */
-static std::atomic<bool> s_boot_voice_active{false};
-/** Set from A2DP connect/stream — `voice_boot_task` exits early and stops MP3. */
-static std::atomic<bool> s_boot_abort{false};
+constexpr size_t kPromptQueueDepth = 8;
 
-// Wait until the previous prompt has actually played out, not just decoded.
-// `isPlaying()` flips false the moment the streamer task finishes reading the
-// MP3, but the engine's ring still holds the streamer's high-water mark
-// (~1.1 s) of PCM at that moment. We need to drain that before queuing the
-// next clip; otherwise back-pressure stalls clip 2's first frames and we'd
-// hear "Wifi Connected → silence → Bluetooth Mode" with audible mid-clip gaps.
-//
-//   1. Decoder stops feeding (`isPlaying()` -> false).
-//   2. Engine ring drains to just above `AUDIO_LOW_WATER_MS` (300 ms) so the
-//      audio task stays in the playing state — this avoids triggering a 1 s
-//      prefill/rebuffer cycle between clips while still leaving ~800 ms of
-//      headroom for the next clip's PCM.
-static void waitMp3Finished() {
-  // (1) decoder finished
-  for (int i = 0; i < 600; ++i) {
-    if (s_boot_abort.load(std::memory_order_relaxed)) return;
-    if (!geelen_idf::mp3::streamer()->isPlaying()) break;
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-  // (2) engine ring drained to a small tail (just above the 300 ms low-water
-  //     so the engine doesn't slip into rebuffer between clips).
+// Producer-side gate. Bumped synchronously when a clip is enqueued so
+// A2DP / Snap producers see "voice owns the ring" the instant we decide
+// to play one. Dropped by the serializer after the engine ring has
+// drained back below the rebuffer threshold + a small margin.
+std::atomic<int> s_voice_owners{0};
+
+// Tracks how many boot-flagged clips are still in flight. When this hits
+// zero we post EV_VOICE_BOOT_DONE and give s_boot_done_sem.
+std::atomic<int> s_boot_prompts_remaining{0};
+
+SemaphoreHandle_t s_boot_done_sem = nullptr;
+QueueHandle_t s_prompt_queue = nullptr;
+TaskHandle_t s_voice_task_handle = nullptr;
+
+// Block until the engine ring has drained back close to its low-water mark
+// before dropping the producer gate. Without this, A2DP/Snap PCM would
+// splice in during the rebuffer-margin window and the clip's tail would
+// be replaced by music PCM.
+void drainEngineTail() {
   if (!s_eng) return;
   constexpr size_t kTailFrames =
-      (size_t)((uint64_t)geelen::SAMPLE_RATE * 400 / 1000);  // ~400 ms
-  for (int i = 0; i < 600; ++i) {  // up to ~12 s safety cap
-    if (s_boot_abort.load(std::memory_order_relaxed)) return;
+      (size_t)((uint64_t)geelen::SAMPLE_RATE * (geelen::AUDIO_LOW_WATER_MS + 40) / 1000);
+  // ~12 s safety cap (800 × 15 ms) — same as before, but we no longer expect
+  // to ever hit it because there is no decoder back-pressure path.
+  for (int i = 0; i < 800; ++i) {
     if (s_eng->bufferedFrames() <= kTailFrames) break;
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(15));
   }
 }
 
-static void finish_boot_voice_task() {
-  s_boot_abort.store(false, std::memory_order_relaxed);
-  s_boot_voice_active.store(false, std::memory_order_relaxed);
-  if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
-  vTaskDelete(nullptr);
+// Feed one fully-decoded clip to the engine ring, paced slightly above
+// realtime so the ring fills (and crosses prefill on cold boot) without
+// overflowing. 1024 frames ≈ 23 ms of audio at 44.1 kHz; sleeping 18 ms
+// between chunks gives ~1.27× realtime — fast enough that a 1.5 s clip
+// finishes feeding in ~1.2 s wallclock without the ring (~2 s capacity)
+// ever filling past ~80 %.
+void feedClipToEngine(const VoiceClip& c) {
+  if (!s_eng || !c.pcm || c.frame_count == 0) return;
+  constexpr size_t kChunkFrames = 1024;
+  constexpr int kChunkDelayMs = 18;
+  size_t pos = 0;
+  while (pos < c.frame_count) {
+    const size_t n = (kChunkFrames < c.frame_count - pos) ? kChunkFrames
+                                                          : (c.frame_count - pos);
+    s_eng->feedPCM(reinterpret_cast<const uint8_t*>(c.pcm + pos * 2),
+                   n * 2 * sizeof(int16_t));
+    pos += n;
+    if (pos < c.frame_count) {
+      vTaskDelay(pdMS_TO_TICKS(kChunkDelayMs));
+    }
+  }
 }
 
-static void voice_boot_task(void*) {
-  if (!s_cfg || !s_wifi || !s_eng) {
-    finish_boot_voice_task();
-    return;
+void notifyBootPromptDrained() {
+  // Fetch_sub returns the previous value, so 1 means we just hit zero
+  // (= last boot prompt fully drained).
+  int prev = s_boot_prompts_remaining.fetch_sub(1, std::memory_order_acq_rel);
+  if (prev <= 1) {
+    s_boot_prompts_remaining.store(0, std::memory_order_relaxed);
+    if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+    eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
   }
-  // If prompts are off, do not hold the audio path — release waiters immediately
-  // so test-tone / other sources can start without a 3.5 s dead wait.
-  if (!s_cfg->getVoiceFeedbackEnabled()) {
-    finish_boot_voice_task();
-    return;
-  }
+}
 
-  // Wait until BT/Wi-Fi bring-up + I2S prefill have settled. Empirically
-  // 1600ms races with the audio task's first `[Audio] start` log on Core 1
-  // and BT controller chatter on Core 0; a longer settle removes both.
-  vTaskDelay(pdMS_TO_TICKS(3500));
+void voice_task(void*) {
+  ESP_LOGI(TAG, "voice task started (PCM-cache mode)");
+  for (;;) {
+    PromptItem item{};
+    if (xQueueReceive(s_prompt_queue, &item, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
 
-  if (s_boot_abort.load(std::memory_order_relaxed)) {
-    finish_boot_voice_task();
-    return;
-  }
+    const VoiceClip* clip = voiceCacheGet(item.id);
+    if (clip) {
+      ESP_LOGI(TAG, "play %s (id=%u boot=%d owners=%d)", clip->name,
+               (unsigned)item.id, (int)item.is_boot,
+               s_voice_owners.load(std::memory_order_relaxed));
+      feedClipToEngine(*clip);
+      drainEngineTail();
+    } else {
+      ESP_LOGW(TAG, "skipping unloaded clip id=%u", (unsigned)item.id);
+    }
 
-  // Hold A2DP/Snap off for the whole boot sequence (including gaps between clips).
-  s_boot_voice_active.store(true, std::memory_order_relaxed);
+    // Drop the producer gate AFTER the tail drain so A2DP/Snap don't slip
+    // music PCM in during the rebuffer-margin window.
+    int prev = s_voice_owners.fetch_sub(1, std::memory_order_acq_rel);
+    if (prev <= 0) {
+      s_voice_owners.store(0, std::memory_order_relaxed);
+    }
 
-  const bool has_ip = s_wifi->status().sta_ip != 0;
-  const char* wifi_clip = has_ip ? kPathWifiConnected : kPathWifiDisconnected;
-  if (!geelen_idf::mp3::streamer()->playFile(wifi_clip)) {
-    ESP_LOGW(TAG, "playFile failed: %s", wifi_clip);
-  } else {
-    waitMp3Finished();
-  }
-  if (s_boot_abort.load(std::memory_order_relaxed)) {
-    finish_boot_voice_task();
-    return;
-  }
+    // Notify listeners. EV_VOICE_PROMPT_FINISHED carries the same payload
+    // the supervisor uses to enqueue runtime prompts, so handlers can
+    // chain follow-up clips deterministically.
+    ev_voice_prompt_t payload{};
+    payload.prompt_id = (uint8_t)item.id;
+    payload.is_boot = item.is_boot ? 1 : 0;
+    eventPost(EV_VOICE_PROMPT_FINISHED, &payload, sizeof(payload));
 
-  const char* mode_clip = nullptr;
-  switch (s_cfg->getAudioSource()) {
-    case AudioSource::Bluetooth:
-      mode_clip = kPathBluetoothMode;
-      break;
-    case AudioSource::Network:
-      mode_clip = kPathSnapcastMode;
-      break;
-    case AudioSource::Dlna:
-      mode_clip = kPathDlnaMode;
-      break;
-    case AudioSource::TestTone:
-      break;
+    if (item.is_boot) {
+      notifyBootPromptDrained();
+    }
   }
-  if (mode_clip && !geelen_idf::mp3::streamer()->playFile(mode_clip)) {
-    ESP_LOGW(TAG, "playFile failed: %s", mode_clip);
-  } else if (mode_clip) {
-    waitMp3Finished();
-  }
+}
 
-  if (s_boot_abort.load(std::memory_order_relaxed)) {
-    finish_boot_voice_task();
-    return;
+bool ensureVoiceTask() {
+  if (!s_boot_done_sem) {
+    s_boot_done_sem = xSemaphoreCreateBinary();
+    if (!s_boot_done_sem) {
+      ESP_LOGW(TAG, "boot-done sem create failed");
+      return false;
+    }
   }
+  if (!s_prompt_queue) {
+    s_prompt_queue = xQueueCreate(kPromptQueueDepth, sizeof(PromptItem));
+    if (!s_prompt_queue) {
+      ESP_LOGW(TAG, "prompt queue create failed");
+      return false;
+    }
+  }
+  if (!s_voice_task_handle) {
+    // 4 KiB stack is plenty: the task body is a memcpy loop + log
+    // formatting (no Helix decoder locals — those left with Phase 2).
+    //
+    // Stack lives in PSRAM (`MALLOC_CAP_SPIRAM`) deliberately: the
+    // internal-DRAM pool is contended with Bluedroid's L2CAP/SDP CCB
+    // allocations during phone connect (each CCB needs a ~210 B
+    // `xmit_hold_q` from the BT-OSI heap), and on this build that pool
+    // is tight enough that an extra 4 KiB stack chunk in DRAM was
+    // tipping `osi_malloc` into a silent NULL return → panic at the
+    // first L2CAP enqueue. PSRAM stacks are safe here: voice_task does
+    // no FPU work, no flash-write critical sections, and ISRs run on
+    // the per-CPU ISR stack on Xtensa.
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
+        voice_task, "voice", /*stack*/ 4096, nullptr, /*prio*/ 3,
+        &s_voice_task_handle, /*core*/ 1, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+      ESP_LOGW(TAG, "voice task create failed");
+      s_voice_task_handle = nullptr;
+      return false;
+    }
+  }
+  return true;
+}
 
-  finish_boot_voice_task();
+void enqueueImpl(voice_clip_id_t id, bool is_boot) {
+  if (!ensureVoiceTask()) return;
+  s_voice_owners.fetch_add(1, std::memory_order_acq_rel);
+  if (is_boot) s_boot_prompts_remaining.fetch_add(1, std::memory_order_acq_rel);
+  PromptItem item{id, is_boot};
+  if (xQueueSend(s_prompt_queue, &item, 0) != pdTRUE) {
+    ESP_LOGW(TAG, "prompt queue full, dropping id=%u", (unsigned)id);
+    s_voice_owners.fetch_sub(1, std::memory_order_acq_rel);
+    if (is_boot) {
+      // Clean up the boot remaining counter and notify if we just made it
+      // through "no boot prompts left" — otherwise waiters would hang.
+      int prev = s_boot_prompts_remaining.fetch_sub(1, std::memory_order_acq_rel);
+      if (prev <= 1) {
+        s_boot_prompts_remaining.store(0, std::memory_order_relaxed);
+        if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+        eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
+      }
+    }
+  }
 }
 
 }  // namespace
-
-bool voiceFeedbackBootPromptsActive() {
-  return s_boot_voice_active.load(std::memory_order_relaxed);
-}
-
-void voiceFeedbackAbortBootForUserInteraction() {
-  s_boot_abort.store(true, std::memory_order_relaxed);
-  s_boot_voice_active.store(false, std::memory_order_relaxed);
-  if (s_eng) {
-    geelen_idf::mp3::streamer()->setEngine(s_eng);
-    geelen_idf::mp3::streamer()->stop();
-  }
-}
 
 void voiceFeedbackSetContext(ConfigManager* cfg, WifiManager* wifi, geelen::AudioEngine* eng) {
   s_cfg = cfg;
@@ -163,58 +220,72 @@ void voiceFeedbackSetContext(ConfigManager* cfg, WifiManager* wifi, geelen::Audi
   s_eng = eng;
 }
 
+bool voiceFeedbackActive() {
+  return s_voice_owners.load(std::memory_order_acquire) > 0;
+}
+
 void voiceFeedbackScheduleBoot() {
-  if (!s_cfg || !s_wifi || !s_eng) return;
-  s_boot_abort.store(false, std::memory_order_relaxed);
-  if (!s_boot_done_sem) {
-    s_boot_done_sem = xSemaphoreCreateBinary();
-    if (!s_boot_done_sem) {
-      ESP_LOGW(TAG, "boot-done sem create failed");
-      return;
-    }
-  }
-  // Pinned to Core 1 (audio side) and given a generous stack so logging,
-  // SPIFFS path strings, and FreeRTOS book-keeping have margin even under
-  // the worst-case BT/Wi-Fi storm on Core 0 during the first seconds.
-  BaseType_t ok = xTaskCreatePinnedToCore(voice_boot_task, "voice-boot",
-                                          6144, nullptr, 3, nullptr, 1);
-  if (ok != pdPASS) {
-    ESP_LOGW(TAG, "voice boot task create failed");
+  if (!s_cfg || !s_wifi || !s_eng) {
+    ESP_LOGW(TAG, "scheduleBoot: missing context (cfg=%p wifi=%p eng=%p)", s_cfg, s_wifi, s_eng);
     if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+    eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
+    return;
+  }
+
+  if (!ensureVoiceTask()) {
+    if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+    eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
+    return;
+  }
+
+  if (!s_cfg->getVoiceFeedbackEnabled()) {
+    ESP_LOGI(TAG, "voice feedback disabled in NVS — skipping boot prompts");
+    if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+    eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
+    return;
+  }
+
+  const bool has_ip = s_wifi->status().sta_ip != 0;
+  enqueueImpl(has_ip ? VOICE_CLIP_WIFI_CONNECTED : VOICE_CLIP_WIFI_DISCONNECTED, true);
+
+  voice_clip_id_t mode_clip = VOICE_CLIP_COUNT_;  // sentinel = none
+  switch (s_cfg->getAudioSource()) {
+    case AudioSource::Bluetooth: mode_clip = VOICE_CLIP_BLUETOOTH_MODE; break;
+    case AudioSource::Network:   mode_clip = VOICE_CLIP_SNAPCAST_MODE; break;
+    case AudioSource::Dlna:      mode_clip = VOICE_CLIP_DLNA_MODE; break;
+    case AudioSource::TestTone:
+      // Test-tone has no spoken mode clip — the Wi-Fi clip alone marks
+      // "boot pair done".
+      break;
+  }
+  if (mode_clip != VOICE_CLIP_COUNT_) {
+    enqueueImpl(mode_clip, true);
+  }
+
+  ESP_LOGI(TAG, "scheduleBoot: queued %d boot prompt(s) (has_ip=%d, source=%u)",
+           s_boot_prompts_remaining.load(std::memory_order_relaxed), (int)has_ip,
+           (unsigned)s_cfg->getAudioSource());
+
+  if (s_boot_prompts_remaining.load(std::memory_order_acquire) == 0) {
+    if (s_boot_done_sem) xSemaphoreGive(s_boot_done_sem);
+    eventPost(EV_VOICE_BOOT_DONE, nullptr, 0);
   }
 }
 
 void voiceFeedbackWaitForBootDone(TickType_t timeout_ticks) {
   if (!s_boot_done_sem) return;
-  (void)xSemaphoreTake(s_boot_done_sem, timeout_ticks);
-}
-
-void voiceFeedbackPlayFileIfEnabled(const char* abs_path) {
-  if (!abs_path || !s_cfg || !s_eng) return;
-  if (!s_cfg->getVoiceFeedbackEnabled()) return;
-  geelen_idf::mp3::streamer()->setEngine(s_eng);
-  if (!geelen_idf::mp3::streamer()->playFile(abs_path)) {
-    ESP_LOGW(TAG, "playFile failed: %s", abs_path);
+  if (xSemaphoreTake(s_boot_done_sem, timeout_ticks) == pdTRUE) {
+    // Re-give so subsequent waiters succeed immediately. The semaphore
+    // becomes a sticky "boot done" latch once it has fired.
+    xSemaphoreGive(s_boot_done_sem);
   }
 }
 
-void voiceFeedbackOnA2dpConnected() {
-  // Stop any in-flight boot Wi‑Fi / mode clips so we never splice two voice
-  // prompts, then play "Bluetooth connected". A2DP music stays gated by
-  // `mp3::streamer()->isPlayingLocalFile()` until that clip decodes and the
-  // ring tail drains (see idf_mp3_streamer.cpp).
-  voiceFeedbackAbortBootForUserInteraction();
-  if (!s_cfg || !s_cfg->getVoiceFeedbackEnabled()) return;
-  voiceFeedbackPlayFileIfEnabled(kPathBluetoothConnected);
-}
-
-void voiceFeedbackOnBtPairing() {
-  if (!s_cfg || !s_cfg->getVoiceFeedbackEnabled()) return;
-  static uint64_t last_us = 0;
-  const uint64_t now = esp_timer_get_time();
-  if (now - last_us < 3000000ULL) return;
-  last_us = now;
-  voiceFeedbackPlayFileIfEnabled(kPathPairing);
+void voiceFeedbackEnqueueClip(voice_clip_id_t id) {
+  if (!s_cfg) return;
+  if (!s_cfg->getVoiceFeedbackEnabled()) return;
+  if ((int)id < 0 || (int)id >= (int)VOICE_CLIP_COUNT_) return;
+  enqueueImpl(id, /*is_boot=*/false);
 }
 
 }  // namespace geelen_idf
