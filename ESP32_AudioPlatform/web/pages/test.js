@@ -334,14 +334,14 @@ export default function TestTone({ api, toast }) {
               <div>
                 <div class="field__label">Left</div>
                 <div style="height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden">
-                  <div style="width: ${dbToPct(meters.pl)}%; height: 100%; background: var(--accent, #6ab0ff)"></div>
+                  <div style="width: ${dbToPct(meters.pl)}%; height: 100%; background: var(--accent)"></div>
                 </div>
                 <div class="field__hint">Peak ${meters.pl.toFixed(1)} dB · RMS ${meters.rl.toFixed(1)} dB</div>
               </div>
               <div>
                 <div class="field__label">Right</div>
                 <div style="height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden">
-                  <div style="width: ${dbToPct(meters.pr)}%; height: 100%; background: var(--accent, #6ab0ff)"></div>
+                  <div style="width: ${dbToPct(meters.pr)}%; height: 100%; background: var(--accent)"></div>
                 </div>
                 <div class="field__hint">Peak ${meters.pr.toFixed(1)} dB · RMS ${meters.rr.toFixed(1)} dB</div>
               </div>
@@ -540,7 +540,8 @@ export default function TestTone({ api, toast }) {
     </p>
 
     <div
-      style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--sp-4); margin-bottom: 5rem"
+      class="grid"
+      style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); margin-bottom: 5rem"
     >
       ${GUIDED_TESTS.map(
         (gt) => html`

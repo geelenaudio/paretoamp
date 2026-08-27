@@ -1,0 +1,7 @@
+SIL Open Font License 1.1
+
+Inter (latin 400/600 woff2) — `inter-400.woff2`, `inter-600.woff2`
+Space Grotesk (latin 500/600 woff2) — `sg-500.woff2`, `sg-600.woff2`
+
+Subsets downloaded from Fontsource (jsDelivr). Full licence text:
+https://scripts.sil.org/OFL
