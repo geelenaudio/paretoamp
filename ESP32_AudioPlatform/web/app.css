@@ -1,11 +1,40 @@
 /* Geelen Audio – design tokens + base styles.
    Themes are attribute-scoped on <html data-theme="dark|light">. The bootstrap
    inline in index.html applies the right one before first paint (localStorage
-   > system preference > dark). Flipping the attribute at runtime retints the
-   whole app in a single repaint — no reload, no FOUC.
+   > dark default). Flipping the attribute at runtime retints the whole app
+   in a single repaint — no reload, no FOUC.
 
-   Token contract: every surface/text/accent colour must resolve through one
-   of the tokens below. No component stylesheet may reference raw hex. */
+   Brand: Light 1 #FFFCF2, Light 2 #DEDCD4, Highlight #1D523A, Dark 1 #7A4223,
+   Dark 2 #16181A. Token contract: components use tokens, not raw hex. */
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/sg-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/sg-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
 
 /* Shape / spacing / typography — theme-invariant. */
 :root {
@@ -21,13 +50,17 @@
   --r-2: 10px;
   --r-3: 16px;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Space Grotesk", var(--font-sans);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --nav-w: 240px;
   --nav-w-mobile: 68px;
   --hdr-h: 56px;
+
+  /* Logo pad: the mark is near-black fill + forest stroke. Always cream. */
+  --brand-logo-bg: #FFFCF2;
 }
 
 /* Dark theme (default). */
@@ -35,18 +68,19 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-0: #0b0d10;          /* page background */
-  --bg-1: #12151a;          /* cards */
-  --bg-2: #1a1f26;          /* nested surfaces, inputs */
-  --bg-3: #242a33;          /* hover states, elevated */
-  --line: #2a313b;          /* hairline separator */
-  --line-strong: #3a424f;   /* emphasised border */
-  --fg-0: #eef1f5;          /* primary text */
-  --fg-1: #b6bdc8;          /* secondary text */
-  --fg-2: #7b8390;          /* tertiary / captions */
-  --accent: #6ab0ff;        /* primary actions, links */
-  --accent-soft: #1b2d45;   /* nav-active tint, focus ring background */
-  --accent-ink: #0b0d10;    /* text/icon drawn on top of --accent fills */
+  --bg-0: #16181A;          /* Dark 2 — page */
+  --bg-1: #1c1f22;          /* cards */
+  --bg-2: #24282c;          /* nested surfaces, inputs */
+  --bg-3: #2c3136;          /* hover states, elevated */
+  --line: #32383e;
+  --line-strong: #434a52;
+  --fg-0: #FFFCF2;          /* Light 1 */
+  --fg-1: #DEDCD4;          /* Light 2 */
+  --fg-2: color-mix(in srgb, #DEDCD4 55%, #16181A);
+  /* Raw Highlight on Dark 2 fails contrast; lift with cream. */
+  --accent: color-mix(in srgb, #1D523A 45%, #FFFCF2);
+  --accent-soft: color-mix(in srgb, #1D523A 28%, #16181A);
+  --accent-ink: #FFFCF2;
   --ok: #4cc38a;
   --warn: #e6b566;
   --err: #e86a5f;
@@ -54,45 +88,43 @@
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-2: 0 8px 24px rgba(0, 0, 0, .5);
-  --focus-ring: 0 0 0 3px rgba(106, 176, 255, .32);
-  --row-hover: rgba(255, 255, 255, .04);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+  --row-hover: rgba(255, 252, 242, .04);
 
-  /* DSP layer colours. Consumed by both the SVG plot and the band handles. */
-  --eq-cal: #e6b566;
-  --eq-pref: #9d7cff;
+  --eq-cal: #7A4223;
+  --eq-pref: var(--accent);
   --eq-plot-border: rgba(0, 0, 0, 0);
 }
 
-/* Light theme. Calm, paper-feel; accent darkened for contrast on white. */
+/* Light theme — cream paper. */
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg-0: #f5f7fa;
+  --bg-0: #FFFCF2;          /* Light 1 */
   --bg-1: #ffffff;
-  --bg-2: #eef1f5;
-  --bg-3: #e1e5ec;
-  --line: #d6dbe3;
-  --line-strong: #b6bdc8;
-  --fg-0: #1a1f26;
-  --fg-1: #4d5566;
-  --fg-2: #7b8390;
-  --accent: #1f6bd6;
-  --accent-soft: #dbe7fa;
-  --accent-ink: #ffffff;
+  --bg-2: #DEDCD4;          /* Light 2 */
+  --bg-3: color-mix(in srgb, #DEDCD4 70%, #7A4223);
+  --line: color-mix(in srgb, #DEDCD4 65%, #7A4223);
+  --line-strong: #7A4223;
+  --fg-0: #16181A;          /* Dark 2 */
+  --fg-1: #7A4223;          /* Dark 1 */
+  --fg-2: color-mix(in srgb, #7A4223 55%, #DEDCD4);
+  --accent: #1D523A;        /* Highlight */
+  --accent-soft: color-mix(in srgb, #1D523A 12%, #FFFCF2);
+  --accent-ink: #FFFCF2;
   --ok: #2f9d66;
   --warn: #b67919;
   --err: #d4483c;
   --err-soft: #fae1df;
 
-  --shadow-1: 0 1px 2px rgba(16, 24, 40, .06);
-  --shadow-2: 0 8px 24px rgba(16, 24, 40, .10);
-  --focus-ring: 0 0 0 3px rgba(31, 107, 214, .22);
-  --row-hover: rgba(16, 24, 40, .04);
+  --shadow-1: 0 1px 2px rgba(22, 24, 26, .06);
+  --shadow-2: 0 8px 24px rgba(22, 24, 26, .10);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, #1D523A 22%, transparent);
+  --row-hover: rgba(22, 24, 26, .04);
 
-  /* Darker layer tints for legibility on white card. */
-  --eq-cal: #b67919;
-  --eq-pref: #7a5be0;
-  --eq-plot-border: rgba(16, 24, 40, .08);
+  --eq-cal: #7A4223;
+  --eq-pref: var(--accent);
+  --eq-plot-border: rgba(22, 24, 26, .08);
 }
 
 * { box-sizing: border-box; }
@@ -108,6 +140,7 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 button, input, select, textarea { font: inherit; color: inherit; }
+h1, h2 { font-family: var(--font-display); font-weight: 600; }
 
 /* Layout shell */
 .shell {
@@ -128,17 +161,27 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
   border-right: 1px solid var(--line);
   background: var(--bg-1);
+  font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: .02em;
 }
 .shell__brand-mark {
-  width: 28px; height: 28px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 4px 6px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent) 0%, #9d7cff 100%);
-  display: grid; place-items: center;
-  color: #ffffff;
-  font-weight: 800;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, .25);
+  background: var(--brand-logo-bg);
+}
+.shell__brand-mark img {
+  display: block;
+  height: 28px;
+  width: auto;
+}
+.shell__brand-text {
+  font-family: var(--font-display);
+  font-weight: 600;
+  white-space: nowrap;
 }
 .shell__header {
   grid-area: header;
@@ -148,7 +191,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--bg-1);
   gap: var(--sp-4);
 }
-.shell__header-title { font-weight: 600; font-size: 15px; }
+.shell__header-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+}
 .shell__header-meta { color: var(--fg-2); font-size: 12px; font-family: var(--font-mono); }
 .shell__header-actions { display: flex; align-items: center; gap: var(--sp-3); }
 
@@ -167,6 +214,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-size: 16px;
   line-height: 1;
 }
+.ico {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.icon-btn .ico { width: 18px; height: 18px; }
 .icon-btn:hover { background: var(--bg-3); color: var(--fg-0); border-color: var(--line-strong); }
 .icon-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .shell__nav {
@@ -202,7 +256,36 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-0);
   box-shadow: inset 2px 0 0 var(--accent);
 }
-.nav-item__icon { width: 18px; text-align: center; opacity: .8; }
+.nav-item__icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  opacity: .8;
+  flex: 0 0 18px;
+}
+.nav-item__icon .ico {
+  width: 18px;
+  height: 18px;
+}
+
+.mode-card__icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  color: var(--fg-1);
+  flex: 0 0 40px;
+}
+.mode-card__icon .ico { width: 22px; height: 22px; }
+.mode-card__icon--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 /* Cards, sections */
 .card {
@@ -212,7 +295,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: var(--sp-5);
   box-shadow: var(--shadow-1);
 }
-.card + .card { margin-top: var(--sp-4); }
+/* Stack consecutive cards when they sit in normal flow (Wi-Fi, Audio, …).
+   Inside `.grid` the gap already spaces them; a sibling margin-top made
+   every card except the first shorter in the same row. */
+:not(.grid) > .card + .card { margin-top: var(--sp-4); }
 .card__title {
   margin: 0 0 var(--sp-2);
   font-size: 11px;
@@ -222,6 +308,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-2);
 }
 .card__value {
+  font-family: var(--font-display);
   font-size: 28px;
   font-weight: 600;
   letter-spacing: -.01em;
@@ -264,11 +351,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .grid {
   display: grid;
   gap: var(--sp-4);
+  align-items: stretch;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
+.grid > .card { height: 100%; }
 
 .page__title {
   margin: 0 0 var(--sp-2);
+  font-family: var(--font-display);
   font-size: 24px;
   font-weight: 600;
   letter-spacing: -.01em;
@@ -421,17 +511,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: 50%;
   background: var(--bg-2);
   color: var(--accent);
-  font-size: 18px;
 }
+.reset-row__icon .ico { width: 18px; height: 18px; }
 .reset-row[data-tone="warn"] .reset-row__icon   { color: var(--warn); }
 .reset-row[data-tone="danger"] .reset-row__icon { color: var(--err); }
 .reset-row[data-tone="ok"] .reset-row__icon     { color: var(--ok); }
 .reset-row__title { font-weight: 600; color: var(--fg-0); }
 .reset-row__blurb { color: var(--fg-1); margin: var(--sp-1) 0 0; font-size: 14px; }
 .reset-row__note {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 6px;
   color: var(--warn); font-size: 12px; margin-top: var(--sp-2);
 }
+.reset-row__note .ico { width: 13px; height: 13px; }
 .reset-row__actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; justify-content: flex-end; }
 .reset-row.is-confirming {
   background: var(--err-soft);
@@ -849,6 +940,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   }
   .shell__brand { padding: 0 var(--sp-2); justify-content: center; }
   .shell__brand-text { display: none; }
+  .shell__brand-mark { padding: 3px 4px; }
+  .shell__brand-mark img { height: 22px; }
   .nav-item { justify-content: center; padding: var(--sp-3); }
   .nav-item__label { display: none; }
   .shell__main { padding: var(--sp-4); }

@@ -14,6 +14,7 @@
 // flip to snapclient knowing the target is already set.
 
 import { html, useEffect, useState } from "/vendor/htm-preact.mjs";
+import { IcoHeadphones, IcoCast, IcoTv, IcoFlask } from "/icons.js";
 
 // Static descriptor. `configure()` returns the inline settings subtree for
 // each mode so the card renderer stays declarative.
@@ -21,7 +22,7 @@ const MODES = [
   {
     id: "bluetooth",
     label: "Bluetooth",
-    icon: "🎧",
+    icon: IcoHeadphones,
     blurb:
       "Pair your phone, laptop, or tablet directly. Best when you're the " +
       "only listener and don't need multi-room sync.",
@@ -29,7 +30,7 @@ const MODES = [
   {
     id: "snapclient",
     label: "Snapcast",
-    icon: "🏠",
+    icon: IcoCast,
     blurb:
       "Join a Snapcast server for sample-accurate multi-room audio. Works " +
       "great with Mopidy, Home Assistant, Spotifyd, and shairport-sync.",
@@ -37,7 +38,7 @@ const MODES = [
   {
     id: "dlna",
     label: "DLNA renderer",
-    icon: "📡",
+    icon: IcoTv,
     blurb:
       "Appear as a UPnP/AV MediaRenderer on the LAN. Control from BubbleUPnP, " +
       "VLC, Kodi, or the native app of most NAS/streaming services.",
@@ -45,7 +46,7 @@ const MODES = [
   {
     id: "test_tone",
     label: "Test bench",
-    icon: "〰",
+    icon: IcoFlask,
     blurb:
       "Built-in sine generator through the full DSP chain. Use for room checks " +
       "and wiring verification. Adjust frequency and level on the Test page after boot.",
@@ -241,7 +242,9 @@ export default function Mode({ api, toast }) {
             boxShadow: isActive ? "0 0 0 1px var(--accent)" : "var(--shadow-1)",
           }}>
             <div style="display:flex; align-items:flex-start; gap: var(--sp-4);">
-              <div style="font-size: 32px; line-height: 1;">${m.icon}</div>
+              <div class=${"mode-card__icon" + (isActive ? " mode-card__icon--active" : "")} aria-hidden="true">
+                <${m.icon} />
+              </div>
               <div style="flex:1">
                 <div class="card__title">${isActive ? "Active source" : "Available"}</div>
                 <div class="card__value" style="font-size: 20px;">${m.label}</div>

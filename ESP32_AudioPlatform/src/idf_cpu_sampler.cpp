@@ -1,8 +1,10 @@
 #include "idf_cpu_sampler.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "esp_freertos_hooks.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 
@@ -102,9 +104,9 @@ bool cpuSamplerStart() {
 
   // Sampler runs on core 0 at a low priority. It doesn't care where it
   // runs, but pinning keeps the scheduler predictable.
-  BaseType_t ok = xTaskCreatePinnedToCore(
+  BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
       sampler_task, "cpu-sample", 2048, nullptr, /*prio*/ 1, nullptr,
-      /*core*/ 0);
+      /*core*/ 0, MALLOC_CAP_SPIRAM);
   if (ok != pdPASS) {
     ESP_LOGW(TAG, "sampler task create failed");
     return false;

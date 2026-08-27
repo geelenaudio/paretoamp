@@ -53,6 +53,8 @@ GPL §6 ("Installation Information for User Products").
 | esp32-a2dp                               | LGPL-3.0          | `platformio.ini` `lib_deps` |
 | cJSON                                    | MIT               | ESP-IDF `components/json/cJSON` |
 | htm / preact (SPA vendor)                | MIT / Apache-2.0  | `web/vendor/`     |
+| Inter (latin 400/600)                    | SIL OFL 1.1       | `web/fonts/`      |
+| Space Grotesk (latin 500/600)            | SIL OFL 1.1       | `web/fonts/`      |
 
 Apache-2.0 and MIT are compatible with GPL-3.0-or-later downstream
 combination. LGPL-3.0 is likewise compatible: LGPL was designed to be

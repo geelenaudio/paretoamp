@@ -5,20 +5,24 @@
 import { html, render, useEffect, useState } from "/vendor/htm-preact.mjs";
 import { startRouter, onRouteChange, currentRoute, navigate } from "/router.js";
 import { api } from "/api.js";
+import {
+  IcoHome, IcoMode, IcoKnob, IcoNote, IcoFlask, IcoWifi,
+  IcoRefresh, IcoLogs, IcoInfo, IcoSun, IcoMoon,
+} from "/icons.js";
 
 // Static registry: (hash path) -> (label, icon, loader). Loader is a callable
 // returning Promise<{ default: Component }>. Each page lives in its own file so
 // the SPA ships a small shell and streams per-page chunks as the user clicks.
 const ROUTES = [
-  { path: "/",         label: "Overview",  icon: "⌂", loader: () => import("/pages/overview.js") },
-  { path: "/mode",     label: "Mode",      icon: "◉", loader: () => import("/pages/mode.js") },
-  { path: "/audio",    label: "Audio",     icon: "▥", loader: () => import("/pages/audio.js") },
-  { path: "/dsp",      label: "DSP / EQ",  icon: "≋", loader: () => import("/pages/dsp.js") },
-  { path: "/test",     label: "Testing", icon: "〰", loader: () => import("/pages/test.js") },
-  { path: "/wifi",     label: "Wi-Fi",     icon: "📶", loader: () => import("/pages/wifi.js") },
-  { path: "/reset",    label: "Reset",     icon: "⟲", loader: () => import("/pages/reset.js") },
-  { path: "/logs",     label: "Logs",      icon: "☰", loader: () => import("/pages/logs.js") },
-  { path: "/about",    label: "About",     icon: "ⓘ", loader: () => import("/pages/about.js") },
+  { path: "/",         label: "Overview",  icon: IcoHome,    loader: () => import("/pages/overview.js") },
+  { path: "/mode",     label: "Mode",      icon: IcoMode,    loader: () => import("/pages/mode.js") },
+  { path: "/audio",    label: "Audio",     icon: IcoKnob,    loader: () => import("/pages/audio.js") },
+  { path: "/dsp",      label: "DSP / EQ",  icon: IcoNote,    loader: () => import("/pages/dsp.js") },
+  { path: "/test",     label: "Testing",   icon: IcoFlask,   loader: () => import("/pages/test.js") },
+  { path: "/wifi",     label: "Wi-Fi",     icon: IcoWifi,    loader: () => import("/pages/wifi.js") },
+  { path: "/reset",    label: "Reset",     icon: IcoRefresh, loader: () => import("/pages/reset.js") },
+  { path: "/logs",     label: "Logs",      icon: IcoLogs,    loader: () => import("/pages/logs.js") },
+  { path: "/about",    label: "About",     icon: IcoInfo,    loader: () => import("/pages/about.js") },
 ];
 
 // Toast bus: page code imports `toast()` from here and gets a quick transient
@@ -64,7 +68,6 @@ function ThemeToggle() {
     try { localStorage.setItem("ga-theme", theme); } catch { /* ignore */ }
   }, [theme]);
   const next = theme === "dark" ? "light" : "dark";
-  const icon = theme === "dark" ? "☀" : "☾";
   const title = `Switch to ${next} theme`;
   return html`<button
     type="button"
@@ -72,7 +75,7 @@ function ThemeToggle() {
     title=${title}
     aria-label=${title}
     onClick=${() => setThemeState(next)}>
-    <span aria-hidden="true">${icon}</span>
+    ${theme === "dark" ? html`<${IcoSun} />` : html`<${IcoMoon} />`}
   </button>`;
 }
 
@@ -96,15 +99,11 @@ function Nav({ active }) {
         href=${r.path}
         class=${"nav-item" + (active === r.path ? " nav-item--active" : "")}
         onClick=${(e) => onNavClick(e, r.path)}>
-        <span class="nav-item__icon">${r.icon}</span>
+        <span class="nav-item__icon"><${r.icon} /></span>
         <span class="nav-item__label">${r.label}</span>
       </a>`,
     )}
   </nav>`;
-}
-
-function pageTitle(path) {
-  return (ROUTES.find((r) => r.path === path) || {}).label || "Not found";
 }
 
 function App() {
@@ -142,11 +141,13 @@ function App() {
   return html`
     <div class="shell">
       <div class="shell__brand">
-        <div class="shell__brand-mark">G</div>
+        <div class="shell__brand-mark">
+          <img src="/logo/geelen_audio.svg" alt="" width="72" height="42" />
+        </div>
         <span class="shell__brand-text">Geelen Audio</span>
       </div>
       <header class="shell__header">
-        <div class="shell__header-title">${pageTitle(route)}</div>
+        <div class="shell__header-title">Pareto Firmware</div>
         <div class="shell__header-actions">
           <div class="shell__header-meta" id="hdr-meta"></div>
           <${ThemeToggle} />

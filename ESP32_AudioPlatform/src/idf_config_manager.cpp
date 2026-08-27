@@ -1012,6 +1012,9 @@ void ConfigManager::resetAudio() {
 
 void configStartDebouncedSaveTask(ConfigManager* cfg) {
   if (!cfg) return;
+  // Stack MUST stay in internal DRAM. tick() → save() → nvs_set_* →
+  // spi_flash_read with the cache disabled. A PSRAM stack panics:
+  //   esp_task_stack_is_sane_cache_disabled() at cache_utils.c:127
   xTaskCreatePinnedToCore(
       [](void* arg) {
         auto* c = static_cast<ConfigManager*>(arg);

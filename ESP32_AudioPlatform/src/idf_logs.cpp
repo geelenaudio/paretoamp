@@ -2,8 +2,10 @@
 #include "idf_logs.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -17,8 +19,8 @@ namespace geelen_idf {
 namespace {
 
 // Size chosen so a burst of a few hundred lines survives the interval
-// between client poll and SSE reconnect. 16 KiB of PSRAM-or-DRAM keeps
-// roughly 120–200 typical log lines.
+// between client poll and SSE reconnect. 16 KiB in PSRAM keeps roughly
+// 120–200 typical log lines without eating the internal-DRAM pool.
 constexpr size_t kRingBytes = 16 * 1024;
 
 // Per-line cap. Matches ESP-IDF's internal logger line cap.
@@ -229,9 +231,9 @@ esp_err_t handle_logs_stream(httpd_req_t* req) {
   // both reachable while audio_task is blocked in i2s_channel_write.
   // Priority 4 is below audio (20) and httpd (10) so neither is starved
   // by a chatty log client; still above cpu-sampler (1) and idle (0).
-  BaseType_t ok = xTaskCreatePinnedToCore(
+  BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
       sse_stream_task, "sse-logs", 4096, args, /*prio*/ 4, nullptr,
-      /*core*/ 1);
+      /*core*/ 1, MALLOC_CAP_SPIRAM);
   if (ok != pdPASS) {
     delete args;
     httpd_req_async_handler_complete(detached);
@@ -248,7 +250,16 @@ esp_err_t handle_logs_stream(httpd_req_t* req) {
 
 void logsInit() {
   if (g_ring) return;
-  g_ring = xRingbufferCreate(kRingBytes, RINGBUF_TYPE_NOSPLIT);
+  // 16 KiB is below CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (32 KiB), so the
+  // default `xRingbufferCreate` lands in internal DRAM — the same pool
+  // httpd/lwip/Bluedroid need. At runtime that showed up as
+  // `int8≈1.8 KiB free (672 largest)` and HTTP accept/recv failing with
+  // errno 128. Keep the ring in PSRAM; log lines are task-context, not ISR.
+  g_ring = xRingbufferCreateWithCaps(kRingBytes, RINGBUF_TYPE_NOSPLIT,
+                                     MALLOC_CAP_SPIRAM);
+  if (!g_ring) {
+    g_ring = xRingbufferCreate(kRingBytes, RINGBUF_TYPE_NOSPLIT);
+  }
   if (!g_ring) return;
   g_prev_vprintf = esp_log_set_vprintf(&log_vprintf_hook);
 }

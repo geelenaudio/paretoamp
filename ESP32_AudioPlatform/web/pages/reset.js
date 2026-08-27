@@ -20,28 +20,31 @@
 //     page reads as a menu instead of a stack of identical cards.
 
 import { html, useEffect, useState } from "/vendor/htm-preact.mjs";
+import {
+  IcoWifi, IcoHeadphones, IcoCast, IcoTv, IcoSliders, IcoKnob, IcoWarn, IcoRefresh,
+} from "/icons.js";
 
 // Grouped definitions. `tone` drives the left stripe + icon colour, `icon` is
-// an emoji / glyph rendered in a circle, `reboot` controls the warning text.
+// a stroke SVG from icons.js, `reboot` controls the warning text.
 const SECTIONS = [
   {
     id: "connectivity",
     title: "Connectivity",
     scopes: [
       {
-        id: "wifi", label: "WiFi credentials", tone: "warn", icon: "📶", reboot: true,
+        id: "wifi", label: "WiFi credentials", tone: "warn", icon: IcoWifi, reboot: true,
         blurb: "Clear the saved SSID and password. The device will boot into Wi-Fi provisioning mode (AP + captive portal).",
       },
       {
-        id: "bluetooth", label: "Bluetooth pairings", tone: "warn", icon: "🎧", reboot: true,
+        id: "bluetooth", label: "Bluetooth pairings", tone: "warn", icon: IcoHeadphones, reboot: true,
         blurb: "Drop all paired A2DP devices. You'll need to re-pair from each source. Only relevant in Bluetooth mode.",
       },
       {
-        id: "snapcast", label: "Snapcast host", tone: "ok", icon: "📡", reboot: false,
+        id: "snapcast", label: "Snapcast host", tone: "ok", icon: IcoCast, reboot: false,
         blurb: "Forget the configured Snapcast server host and port. The Snapclient will go idle until a new host is set.",
       },
       {
-        id: "dlna", label: "DLNA settings", tone: "ok", icon: "📺", reboot: false,
+        id: "dlna", label: "DLNA settings", tone: "ok", icon: IcoTv, reboot: false,
         blurb: "Disable DLNA advertising and clear the friendly name override.",
       },
     ],
@@ -51,11 +54,11 @@ const SECTIONS = [
     title: "Audio state",
     scopes: [
       {
-        id: "eq", label: "EQ + presets", tone: "ok", icon: "🎚", reboot: false,
+        id: "eq", label: "EQ + presets", tone: "ok", icon: IcoSliders, reboot: false,
         blurb: "Flatten the parametric EQ curve and clear all 10 preset slots.",
       },
       {
-        id: "audio", label: "Audio settings", tone: "ok", icon: "🔊", reboot: false,
+        id: "audio", label: "Audio settings", tone: "ok", icon: IcoKnob, reboot: false,
         blurb: "Volume, balance, mute, channel enables, stereo/mono, and status LED colour/brightness back to factory defaults. EQ is preserved.",
       },
     ],
@@ -66,7 +69,7 @@ const FACTORY = {
   id: "factory",
   label: "Factory reset (everything)",
   tone: "danger",
-  icon: "⚠",
+  icon: IcoWarn,
   reboot: true,
   blurb: "Wipe all persistent state: WiFi, BT, Snapcast, DLNA, EQ, presets, volume, device name. The device will reboot and come up in Wi-Fi provisioning mode.",
 };
@@ -105,12 +108,12 @@ function ResetRow({ api, toast, scope }) {
 
   return html`
     <div class=${klass} data-tone=${scope.tone} data-reset-scope=${scope.id}>
-      <div class="reset-row__icon" aria-hidden="true">${scope.icon}</div>
+      <div class="reset-row__icon" aria-hidden="true"><${scope.icon} /></div>
       <div>
         <div class="reset-row__title">${scope.label}</div>
         <p class="reset-row__blurb">${scope.blurb}</p>
         ${scope.reboot
-          ? html`<div class="reset-row__note">⟳ Reboots the device (~15 s).</div>`
+          ? html`<div class="reset-row__note"><${IcoRefresh} /> Reboots the device (~15 s).</div>`
           : ""}
       </div>
       <div class="reset-row__actions">

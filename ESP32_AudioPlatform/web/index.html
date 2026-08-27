@@ -3,22 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0d10" />
+  <meta name="theme-color" content="#16181A" />
   <title>Geelen Audio</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♪</text></svg>" />
+  <link rel="icon" href="/logo/geelen_audio.svg" type="image/svg+xml" />
   <!--
     Theme bootstrap. Runs before app.css is parsed so the first paint is
     already the correct palette (no flash of dark-on-light or vice versa).
-    Order: explicit localStorage choice -> OS preference -> dark default.
+    Order: explicit localStorage choice -> dark default (brand).
   -->
   <script>
     (function () {
       try {
         var saved = localStorage.getItem("ga-theme");
-        var sys = window.matchMedia &&
-          window.matchMedia("(prefers-color-scheme: light)").matches
-          ? "light" : "dark";
-        var theme = (saved === "light" || saved === "dark") ? saved : sys;
+        var theme = (saved === "light" || saved === "dark") ? saved : "dark";
         document.documentElement.dataset.theme = theme;
       } catch (e) {
         document.documentElement.dataset.theme = "dark";
@@ -29,7 +26,7 @@
 </head>
 <body>
   <noscript>
-    <p style="color:#eee;background:#0b0d10;padding:2rem;font:16px system-ui;">
+    <p style="color:#FFFCF2;background:#16181A;padding:2rem;font:16px system-ui;">
       This control panel requires JavaScript.
     </p>
   </noscript>

@@ -8,8 +8,10 @@
 #include "idf_events.h"
 #include "idf_state_stream.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #include <atomic>
@@ -150,8 +152,9 @@ void ledBegin(ConfigManager* cfg) {
   eventRegister(EV_A2DP_CONNECTED, &on_a2dp_connected, nullptr);
   eventRegister(EV_A2DP_DISCONNECTED, &on_a2dp_disconnected, nullptr);
 
-  xTaskCreatePinnedToCore(&led_task, "led", 3072, nullptr, 3, nullptr, 0);
-  ESP_LOGI(TAG, "animator up (core 0, prio 3, count=%u)",
+  xTaskCreatePinnedToCoreWithCaps(&led_task, "led", 3072, nullptr, 3, nullptr,
+                                  0, MALLOC_CAP_SPIRAM);
+  ESP_LOGI(TAG, "animator up (core 0, prio 3, PSRAM stack, count=%u)",
            (unsigned)geelen_hal::ledPixelCount());
 }
 

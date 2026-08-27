@@ -53,8 +53,8 @@ void scheduleRestart(unsigned delay_ms);
 static const char FALLBACK_INDEX_HTML[] = R"raw(<!DOCTYPE html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Geelen Audio (bootstrap)</title>
-<style>body{font:14px/1.5 system-ui;background:#0b0d10;color:#eef1f5;margin:0;padding:2rem;}
-a{color:#6ab0ff}code{background:#1a1f26;padding:2px 6px;border-radius:4px;font-family:ui-monospace,monospace}</style>
+<style>body{font:14px/1.5 system-ui;background:#16181A;color:#FFFCF2;margin:0;padding:2rem;}
+a{color:#8aa890}code{background:#24282c;padding:2px 6px;border-radius:4px;font-family:ui-monospace,monospace}</style>
 </head><body>
 <h1>Geelen Audio — SPIFFS not loaded</h1>
 <p>The firmware is running but the SPA assets are missing from SPIFFS. Upload them with:</p>
@@ -72,28 +72,28 @@ static const char SETUP_HTML[] = R"raw(<!DOCTYPE html><html lang="en"><head>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;padding:0;background:#0b0d10;color:#eef1f5;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{margin:0;padding:0;background:#16181A;color:#FFFCF2;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 main{max-width:480px;margin:0 auto;padding:24px}
 h1{font-size:22px;margin:0 0 4px;letter-spacing:.2px}
-.sub{color:#9aa3b0;margin:0 0 20px;font-size:14px}
-.card{background:#11161c;border:1px solid #1f2630;border-radius:10px;padding:18px;margin-bottom:14px}
-label{display:block;font-size:13px;color:#9aa3b0;margin:14px 0 6px}
+.sub{color:#DEDCD4;margin:0 0 20px;font-size:14px}
+.card{background:#1c1f22;border:1px solid #32383e;border-radius:10px;padding:18px;margin-bottom:14px}
+label{display:block;font-size:13px;color:#DEDCD4;margin:14px 0 6px}
 label:first-child{margin-top:0}
-input,select{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #2a323d;background:#0e1318;color:#eef1f5;font:inherit}
-input:focus,select:focus{outline:none;border-color:#6ab0ff}
-button{width:100%;padding:12px 14px;border-radius:8px;border:none;background:#6ab0ff;color:#0b0d10;font:inherit;font-weight:600;cursor:pointer;margin-top:18px}
+input,select{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #434a52;background:#24282c;color:#FFFCF2;font:inherit}
+input:focus,select:focus{outline:none;border-color:#8aa890}
+button{width:100%;padding:12px 14px;border-radius:8px;border:none;background:#8aa890;color:#FFFCF2;font:inherit;font-weight:600;cursor:pointer;margin-top:18px}
 button[disabled]{opacity:.55;cursor:default}
 .row{display:flex;gap:8px;align-items:center}
-.row button{margin:0;flex:0 0 auto;background:#1f2630;color:#eef1f5;width:auto;padding:11px 14px}
-.bar{display:inline-block;width:36px;height:6px;background:#1f2630;border-radius:3px;vertical-align:middle;margin-left:6px;overflow:hidden}
-.bar i{display:block;height:100%;background:#6ab0ff}
-.muted{color:#9aa3b0;font-size:13px}
+.row button{margin:0;flex:0 0 auto;background:#24282c;color:#FFFCF2;width:auto;padding:11px 14px}
+.bar{display:inline-block;width:36px;height:6px;background:#24282c;border-radius:3px;vertical-align:middle;margin-left:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:#8aa890}
+.muted{color:#DEDCD4;font-size:13px}
 .err{color:#ef9a9a;font-size:13px;margin-top:6px;min-height:1.2em}
 .busy{display:none;text-align:center;padding:20px}
 .busy.show{display:block}
-.spinner{width:28px;height:28px;border:3px solid #2a323d;border-top-color:#6ab0ff;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px}
+.spinner{width:28px;height:28px;border:3px solid #32383e;border-top-color:#8aa890;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.lock{color:#9aa3b0;margin-left:6px}
+.lock{color:#DEDCD4;margin-left:6px}
 </style></head><body>
 <main>
   <h1>Wi-Fi setup</h1>
