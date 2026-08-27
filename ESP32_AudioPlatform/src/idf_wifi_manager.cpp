@@ -17,6 +17,7 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include <cstring>
+#include <cstdio>
 
 namespace geelen_idf {
 
@@ -27,6 +28,35 @@ static const char* AP_PASS = "geelen123";
 
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr int WIFI_GOT_IP_BIT = BIT1;
+static constexpr int WIFI_FAIL_BIT = BIT2;
+
+static const char* reasonToCode_(uint8_t reason) {
+  // ESP-IDF wifi_err_reason_t. Grouped into the SPA-facing codes in the plan.
+  switch (reason) {
+    case 201:  // WIFI_REASON_NO_AP_FOUND
+      return "NO_AP_FOUND";
+    case 2:    // WIFI_REASON_AUTH_EXPIRE
+    case 14:   // WIFI_REASON_MIC_FAILURE
+    case 15:   // WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT
+    case 23:   // WIFI_REASON_802_1X_AUTH_FAILED
+    case 36:   // IEEE "element / 4-way mismatch" seen on bad PSK
+    case 202:  // WIFI_REASON_AUTH_FAIL
+    case 204:  // WIFI_REASON_HANDSHAKE_TIMEOUT
+    case 205:  // WIFI_REASON_CONNECTION_FAIL
+      return "AUTH_FAIL";
+    case 4:    // WIFI_REASON_ASSOC_EXPIRE
+    case 5:    // WIFI_REASON_ASSOC_TOOMANY
+    case 203:  // WIFI_REASON_ASSOC_FAIL
+      return "ASSOC_FAIL";
+    default:
+      return "FAIL";
+  }
+}
+
+static void fillDetail_(WifiProbeResult* out, uint8_t reason) {
+  if (!out) return;
+  std::snprintf(out->detail, sizeof(out->detail), "wifi disconnect reason %u", (unsigned)reason);
+}
 
 // Phase 1 reconnect ladder. Each entry is the delay (µs) BEFORE the
 // next `esp_wifi_connect()` attempt after a STA_DISCONNECTED. Indexed
@@ -121,10 +151,21 @@ bool WifiManager::begin(ConfigManager* cfg) {
   cfg_->getWifiPass(pass, sizeof(pass));
 
   if (ssid[0] != '\0') {
+    // Unverified creds (explicit NVS flag = 0) skip STA entirely so a
+    // device that was flashed with garbage credentials never oscillates
+    // AP → STA-fail → AP. A missing key (upgrade from pre-refactor
+    // firmware) still tries STA once; GOT_IP then sets the flag.
+    if (cfg_->wifiEverConnectedFlagPresent() && !cfg_->getWifiEverConnectedOk()) {
+      ESP_LOGW(TAG, "SSID '%s' saved but never verified — starting AP, skipping STA", ssid);
+      startApFallback_();
+      return true;
+    }
     startSta_(ssid, pass);
     if (waitForStaIp_(10000)) {
       status_.sta_connected = true;
       status_.ap_running = false;
+      cfg_->setWifiEverConnectedOk(true);
+      cfg_->save();
       ESP_LOGI(TAG, "STA up, AP not started");
       return true;
     }
@@ -209,6 +250,7 @@ void WifiManager::reconnectTimerCb_(void* arg) {
   if (!self || !self->cfg_) return;
   if (self->status_.sta_connected) return;
   if (self->status_.ap_running) return;
+  if (self->probing_) return;
 
   char ssid[WIFI_SSID_MAX]{};
   self->cfg_->getWifiSsid(ssid, sizeof(ssid));
@@ -284,10 +326,23 @@ void WifiManager::wifiEventHandler_(void* arg, esp_event_base_t event_base, int3
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
       auto* disc = (wifi_event_sta_disconnected_t*)event_data;
       uint8_t reason = disc ? (uint8_t)disc->reason : 0;
-      ESP_LOGW(TAG, "STA disconnected (reason=%u)", (unsigned)reason);
+      ESP_LOGW(TAG, "STA disconnected (reason=%u)%s", (unsigned)reason,
+               self->probing_ ? " [probe]" : "");
       self->status_.sta_connected = false;
       self->status_.sta_ip = 0;
       xEventGroupClearBits((EventGroupHandle_t)self->event_group_, WIFI_CONNECTED_BIT | WIFI_GOT_IP_BIT);
+
+      if (self->probing_) {
+        // Ignore the disconnect we just issued ourselves to leave the
+        // previous AP (`ASSOC_LEAVE` / `AUTH_LEAVE`). Those are not a
+        // probe result — the real AUTH_FAIL / NO_AP_FOUND arrives next.
+        if (reason == 3 || reason == 8) {
+          return;
+        }
+        self->probe_disc_reason_ = reason;
+        xEventGroupSetBits((EventGroupHandle_t)self->event_group_, WIFI_FAIL_BIT);
+        return;
+      }
 
       ev_wifi_down_t payload{reason};
       eventPost(EV_WIFI_DOWN, &payload, sizeof(payload));
@@ -305,15 +360,25 @@ void WifiManager::wifiEventHandler_(void* arg, esp_event_base_t event_base, int3
       }
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-    self->cancelStaReconnectTimer_();
-    self->reconnect_attempts_ = 0;  // success resets the ladder
     auto* event = (ip_event_got_ip_t*)event_data;
     if (event) {
       self->status_.sta_ip = ipToU32_(event->ip_info.ip);
-      ESP_LOGI(TAG, "STA got IP: %s", ip4addr_ntoa((const ip4_addr_t*)&event->ip_info.ip));
+      ESP_LOGI(TAG, "STA got IP: %s%s",
+               ip4addr_ntoa((const ip4_addr_t*)&event->ip_info.ip),
+               self->probing_ ? " [probe]" : "");
     }
-    self->status_.sta_connected = true;
     xEventGroupSetBits((EventGroupHandle_t)self->event_group_, WIFI_GOT_IP_BIT);
+
+    if (self->probing_) {
+      // Keep the AP alive for the duration of onboarding. The HTTP
+      // handler decides whether to persist + reboot.
+      return;
+    }
+
+    self->cancelStaReconnectTimer_();
+    self->reconnect_attempts_ = 0;
+    self->status_.sta_connected = true;
+    if (self->cfg_) self->cfg_->setWifiEverConnectedOk(true);
 
     ev_wifi_up_t payload{self->status_.sta_ip};
     eventPost(EV_WIFI_UP, &payload, sizeof(payload));
@@ -386,6 +451,133 @@ void WifiManager::dnsTask_(void* arg) {
   close(sock);
   self->dns_sock_ = -1;
   vTaskDelete(nullptr);
+}
+
+const char* WifiManager::probeStateName() const {
+  switch (probe_state_) {
+    case WifiProbeState::Probing: return "probing";
+    case WifiProbeState::Ok:      return "ok";
+    case WifiProbeState::Failed:  return "failed";
+    case WifiProbeState::Idle:
+    default:                      return "idle";
+  }
+}
+
+bool WifiManager::probeCredentials(const char* ssid, const char* pass, uint32_t timeout_ms,
+                                   WifiProbeResult* out) {
+  WifiProbeResult local{};
+  if (!out) out = &local;
+  *out = WifiProbeResult{};
+  if (!ssid || ssid[0] == '\0') {
+    std::strncpy(out->reason, "FAIL", sizeof(out->reason) - 1);
+    std::strncpy(out->detail, "missing ssid", sizeof(out->detail) - 1);
+    probe_state_ = WifiProbeState::Failed;
+    probe_ok_ = false;
+    return false;
+  }
+  if (probing_) {
+    std::strncpy(out->reason, "FAIL", sizeof(out->reason) - 1);
+    std::strncpy(out->detail, "probe already in progress", sizeof(out->detail) - 1);
+    return false;
+  }
+
+  cancelStaReconnectTimer_();
+
+  wifi_config_t saved{};
+  (void)esp_wifi_get_config(WIFI_IF_STA, &saved);
+
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  esp_wifi_get_mode(&mode);
+  if (mode == WIFI_MODE_AP || mode == WIFI_MODE_NULL) {
+    enableSoftApPhy_();  // APSTA so STA probe works while the portal stays up
+  } else if (mode == WIFI_MODE_STA) {
+    // Keep STA mode: probing from the SPA while already joined.
+  }
+
+  wifi_config_t trial{};
+  std::strncpy((char*)trial.sta.ssid, ssid, sizeof(trial.sta.ssid) - 1);
+  std::strncpy((char*)trial.sta.password, pass ? pass : "", sizeof(trial.sta.password) - 1);
+  trial.sta.threshold.authmode = WIFI_AUTH_OPEN;
+  trial.sta.pmf_cfg.capable = true;
+  trial.sta.pmf_cfg.required = false;
+
+  probing_ = true;
+  probe_state_ = WifiProbeState::Probing;
+  probe_ok_ = false;
+  probe_disc_reason_ = 0;
+  xEventGroupClearBits((EventGroupHandle_t)event_group_,
+                       WIFI_CONNECTED_BIT | WIFI_GOT_IP_BIT | WIFI_FAIL_BIT);
+
+  eventPost(EV_WIFI_PROBE_START, nullptr, 0);
+  ESP_LOGI(TAG, "probe start ssid='%s'", ssid);
+
+  (void)esp_wifi_set_config(WIFI_IF_STA, &trial);
+  (void)esp_wifi_disconnect();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  esp_err_t cr = esp_wifi_connect();
+  if (cr != ESP_OK) {
+    ESP_LOGW(TAG, "probe esp_wifi_connect: %s", esp_err_to_name(cr));
+  }
+
+  EventBits_t bits = xEventGroupWaitBits(
+      (EventGroupHandle_t)event_group_,
+      WIFI_GOT_IP_BIT | WIFI_FAIL_BIT,
+      pdTRUE,   // clear on exit
+      pdFALSE,  // either bit
+      pdMS_TO_TICKS(timeout_ms));
+
+  bool ok = (bits & WIFI_GOT_IP_BIT) != 0;
+  if (ok) {
+    std::strncpy(out->reason, "OK", sizeof(out->reason) - 1);
+    std::strncpy(out->detail, "got IP", sizeof(out->detail) - 1);
+    uint32_t ip = status_.sta_ip;
+    std::snprintf(out->ip, sizeof(out->ip), "%u.%u.%u.%u",
+                  (unsigned)(ip & 0xff), (unsigned)((ip >> 8) & 0xff),
+                  (unsigned)((ip >> 16) & 0xff), (unsigned)((ip >> 24) & 0xff));
+    std::strncpy(probe_ssid_, ssid, sizeof(probe_ssid_) - 1);
+    std::strncpy(probe_pass_, pass ? pass : "", sizeof(probe_pass_) - 1);
+    probe_ok_ = true;
+    probe_state_ = WifiProbeState::Ok;
+  } else if ((bits & WIFI_FAIL_BIT) != 0) {
+    std::strncpy(out->reason, reasonToCode_(probe_disc_reason_), sizeof(out->reason) - 1);
+    fillDetail_(out, probe_disc_reason_);
+    probe_ok_ = false;
+    probe_state_ = WifiProbeState::Failed;
+  } else {
+    std::strncpy(out->reason, "TIMEOUT", sizeof(out->reason) - 1);
+    std::strncpy(out->detail, "no IP within probe window", sizeof(out->detail) - 1);
+    probe_ok_ = false;
+    probe_state_ = WifiProbeState::Failed;
+  }
+
+  ev_wifi_probe_result_t payload{(uint8_t)(ok ? 1 : 0), probe_disc_reason_};
+  eventPost(EV_WIFI_PROBE_RESULT, &payload, sizeof(payload));
+
+  // Tear the trial STA down and restore the previous config so the
+  // captive AP (or the previously-joined STA) stays reachable.
+  (void)esp_wifi_disconnect();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  (void)esp_wifi_set_config(WIFI_IF_STA, &saved);
+  probing_ = false;
+  xEventGroupClearBits((EventGroupHandle_t)event_group_,
+                       WIFI_CONNECTED_BIT | WIFI_GOT_IP_BIT | WIFI_FAIL_BIT);
+
+  if (!ok && saved.sta.ssid[0] != '\0' && !status_.ap_running) {
+    (void)esp_wifi_connect();
+  }
+
+  ESP_LOGI(TAG, "probe %s ssid='%s' reason=%s", ok ? "ok" : "fail", ssid, out->reason);
+  return ok;
+}
+
+bool WifiManager::commitValidated() {
+  if (!probe_ok_ || probe_ssid_[0] == '\0' || !cfg_) return false;
+  cfg_->setWifiSsid(probe_ssid_);
+  cfg_->setWifiPass(probe_pass_);
+  cfg_->setWifiEverConnectedOk(true);
+  cfg_->save();
+  ESP_LOGI(TAG, "commit validated ssid='%s'", probe_ssid_);
+  return true;
 }
 
 }  // namespace geelen_idf

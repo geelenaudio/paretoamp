@@ -264,5 +264,9 @@ httpd was the dominant cause of "the web UI is sluggish". The stream:
   byte-for-byte identical to a `GET /api/state` response.
 
 `web/api.js` exposes `subscribeState(cb)`; the affected pages
-(overview, mode, audio, dsp, test) flipped from `getState()` polls to
-`subscribeState()` subscriptions.
+(overview, mode, audio, dsp, test, wifi) flipped from `getState()` polls
+to `subscribeState()` subscriptions. The EventSource is process-wide and
+survives route changes: `close()` is deferred ~2 s after the last
+callback is removed so App's `setPage(null)` gap does not FIN the
+firmware socket on every nav click. `/api/logs/stream` stays
+page-scoped on purpose.

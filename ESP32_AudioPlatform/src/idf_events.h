@@ -63,6 +63,10 @@ typedef enum {
   // Web push (Phase 4 producer: idf_supervisor; consumer: SSE state stream).
   EV_STATE_DIFF,
 
+  // Wi-Fi credential probe (validate-before-commit onboarding).
+  EV_WIFI_PROBE_START,
+  EV_WIFI_PROBE_RESULT,
+
   // Sentinel — keep last so handlers can range-check for forward compat.
   EV_COUNT_,
 } geelen_event_id_t;
@@ -81,6 +85,11 @@ typedef struct {
 typedef struct {
   uint8_t reason;         // WIFI_EVENT_STA_DISCONNECTED reason field.
 } ev_wifi_down_t;
+
+typedef struct {
+  uint8_t ok;             // 1 if probe got an IP.
+  uint8_t reason;         // WIFI_EVENT_STA_DISCONNECTED reason (0 on success).
+} ev_wifi_probe_result_t;
 
 typedef struct {
   uint8_t prev_source;    // AudioSource enum value before transition.

@@ -1,22 +1,12 @@
 // Phase 4 — push-based device state for the SPA.
 //
-// `/api/state/stream` is a single SSE endpoint that delivers the full state
-// snapshot on connect and a fresh snapshot whenever ConfigManager's monotonic
-// `stateVersion()` advances. The SPA subscribes once per page mount; it no
-// longer needs to re-poll `/api/state` after every mutation.
+// `/api/state/stream` is a single SSE endpoint that delivers a full state
+// snapshot on connect (`event: snapshot`) and, on later version bumps, a
+// compact top-level key diff (`event: diff`) so each SSE frame stays under
+// one lwip pbuf. A full snapshot is resent if too many keys changed or the
+// subscriber has never received a frame (last_sent_v == 0).
 //
-// Why "snapshot on change" rather than RFC-6902 JSON-Patch:
-//   - The full snapshot is ~1–2 KB of JSON, gzipped by httpd to <1 KB.
-//   - Mutations are debounced server-side (250 ms) so a slider drag emits
-//     at most ~4 frames/s to all subscribers combined.
-//   - A real diff engine would force an in-memory canonicalisation step on
-//     every change, plus two cJSON trees, which costs more CPU than just
-//     re-serializing on a low-rate change channel.
-//
-// We keep the door open for true JSON-Patch by reserving the SSE `event:`
-// field — today only `event: snapshot` and `event: ping` are emitted, and a
-// future delta-mode would add `event: patch` carrying a JSON-Patch array
-// once the canonical snapshot diverges by less than N keys.
+// Cadence: 250 ms idle, 500 ms while A2DP or a voice prompt is active.
 //
 // Lifecycle: `stateStreamInit(cfg)` is called from `app_main` after the
 // config manager is up, before httpd starts. It spawns the broadcaster

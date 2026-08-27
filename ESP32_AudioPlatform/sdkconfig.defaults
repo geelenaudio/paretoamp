@@ -134,17 +134,32 @@ CONFIG_TASK_WDT_TIMEOUT_S=15
 CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 # CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
 
-# LwIP TCP receive window — raise from default 5760 to 32 KiB.
+# LwIP TCP receive window — 8 KiB is a deliberate trade.
 #
-# The default is pitifully small for Snapcast: at 44.1 kHz S16 stereo we
-# consume ~176 kB/s, so a 5760-byte window is only ~33 ms of audio. Any
-# WiFi retransmit or task-scheduling hiccup longer than that closes the
-# window, the server backs off, and the ring buffer on our side runs dry.
-# 32 KiB (~186 ms) gives comfortable headroom and matches the I2S DMA
-# queue depth (16 × 512 frames = 185 ms).
-CONFIG_LWIP_TCP_WND_DEFAULT=32768
-# RX mailbox has to hold at least WND/MSS segments; 64 is safe for 32 KiB.
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+# History: this was 32 KiB, originally sized for Snapcast (~176 kB/s
+# stereo S16 @ 44.1 kHz → 32 KiB = ~186 ms) so a long Wi-Fi hiccup
+# couldn't close the window on the audio stream.
+#
+# But in **Bluetooth mode** the only sockets in play are the SPA's HTTP
+# requests, and the browser opens up to 6 parallel connections per host.
+# A 32 KiB advertised window encourages each socket to flood up to 32 KiB
+# in flight → 6 × 32 = 192 KiB of pbuf-eligible traffic queued on the
+# lwip TCPIP task (Core 0), the same core that runs the BT controller.
+# Measured symptom: opening the EQ page consistently triggered
+# `BT_APPL: Pkt dropped` storms + audio underruns, every time, regardless
+# of subscriber count or JSON heap location. Confirmed by the A2DP_CONNECTED
+# heap log showing only ~20 KiB internal DRAM free at runtime — the
+# browser burst tipped lwip+BT into starvation.
+#
+# 8 KiB still gives Snapcast ~46 ms of buffered audio; the AudioEngine's
+# 88 200-frame (1 s) ring buffer absorbs hiccups longer than that, so a
+# Wi-Fi retransmit no longer drains the I2S DMA. ESP32-only LAN
+# transfers stay >5 Mbit/s observed at 8 KiB window.
+CONFIG_LWIP_TCP_WND_DEFAULT=8192
+# RX mailbox needs to hold WND/MSS pbufs (≈ 6 here); 8 is a safe minimum.
+# Was 64 to match the old 32 KiB window — unnecessary now and each
+# entry sits in internal DRAM.
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=8
 # Keep TCP_MSS at the wire default (1440 at 1500-byte MTU) so we don't
 # re-fragment; no override here.
 
@@ -155,4 +170,18 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 # to 16 (the LwIP max) gives httpd a cap of 13 — plenty of headroom for
 # concurrent page loads without starving HTTP when the SSE is attached.
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# Task stats for GET /api/system/tasks (Phase 7). Trace facility is required
+# by uxTaskGetSystemState; run-time stats use the ESP timer so we can report
+# per-task CPU tenancy without a busy-loop sampling hook.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# Pin lwip TCPIP on Core 0 next to Wi-Fi/BT so Core 1 stays available for
+# audio + httpd. Documented in docs/architecture.md.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+
 

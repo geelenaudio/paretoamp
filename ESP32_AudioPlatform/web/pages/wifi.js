@@ -46,6 +46,7 @@ export default function Wifi({ api, toast }) {
   const [manual, setManual] = useState(false);
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [countdown, setCountdown] = useState(null);
   // Settings card — Wi-Fi power-save selector. Mirrors `state.wifi.power_save`
   // from /api/state. `psBusy` gates the buttons during the POST round-trip
@@ -109,20 +110,30 @@ export default function Wifi({ api, toast }) {
 
   async function onSubmit(ev) {
     ev.preventDefault();
-    if (busy) return;
+    if (busy || validating) return;
     const target = manual ? ssid.trim() : ssid;
     if (!target) {
       toast && toast("Pick or type a network name first.", "err");
       return;
     }
-    setBusy(true);
+    setValidating(true);
     try {
-      await api.setWifi(target, pass);
-      toast && toast("Saving and rebooting…", "ok", 4000);
+      const r = await api.validateWifi(target, pass);
+      if (!r || !r.ok) {
+        const reason = (r && r.reason) || "FAIL";
+        const detail = (r && r.detail) ? ` — ${r.detail}` : "";
+        toast && toast(`${reason}${detail}`, "err", 6000);
+        return;
+      }
+      toast && toast("Credentials validated. Saving and rebooting…", "ok", 4000);
+      setBusy(true);
+      await api.commitWifi();
       setCountdown(15);
     } catch (e) {
-      toast && toast(`Save failed: ${e.message || e}`, "err", 5000);
-      setBusy(false);
+      toast && toast(`Validate failed: ${e.message || e}`, "err", 5000);
+    } finally {
+      setValidating(false);
+      if (countdown == null) setBusy(false);
     }
   }
 
@@ -232,10 +243,10 @@ export default function Wifi({ api, toast }) {
       </label>
 
       <div style="margin-top:var(--sp-4);display:flex;gap:8px;align-items:center">
-        <button type="submit" class="btn btn--primary" disabled=${busy}>
-          ${busy ? "Saving…" : "Save & connect"}
+        <button type="submit" class="btn btn--primary" disabled=${busy || validating}>
+          ${validating ? "Checking…" : busy ? "Saving…" : "Validate & save"}
         </button>
-        <span class="page__subtitle">Device will reboot to apply.</span>
+        <span class="page__subtitle">Credentials are checked before the device reboots.</span>
       </div>
     </form>
 

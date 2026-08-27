@@ -5,12 +5,11 @@
 //                   mode, volume, Snapcast host, …). The SPA subscribes once;
 //                   the firmware emits a fresh snapshot whenever ConfigManager's
 //                   stateVersion advances (debounced ~250 ms). No polling.
-//   - /api/system/metrics : runtime metrics (uptime, heap, PSRAM, WiFi RSSI,
-//                   CPU load per core). Polled every POLL_MS while the page is
+//   - /api/system/summary : compact runtime metrics (uptime, heap, PSRAM,
+//                   WiFi RSSI, CPU). Polled every POLL_MS while the page is
 //                   visible. Automatic throttling-to-zero on tab hide keeps
-//                   the device's HTTP load minimal. (Metrics stay on poll
-//                   because they're high-frequency live data; pushing them
-//                   would churn the SSE stream every tick.)
+//                   the device's HTTP load minimal. Full `/api/system/metrics`
+//                   (includes audio meters) is reserved for the test page.
 //
 // The metrics poll uses `setTimeout` in a chain (not `setInterval`) so a
 // stalled fetch can't pile up requests; if the previous request is still in
@@ -69,19 +68,37 @@ function modeLabel(mode) {
   return mode || "—";
 }
 
-export default function Overview({ api, navigate }) {
+function ledPhaseLabel(phase) {
+  if (phase === "boot") return "Waiting for Wi-Fi";
+  if (phase === "wifi") return "Wi-Fi connected";
+  if (phase === "pairing") return "Bluetooth pairing";
+  if (phase === "user") return "User colour";
+  return phase || "—";
+}
+
+export default function Overview({ api, navigate, toast }) {
   const [state, setState] = useState(null);
   const [sys, setSys] = useState(null);
   const [err, setErr] = useState(null);
   const [wifiState, setWifiState] = useState(null);
   const inflight = useRef(false);
+  const [ledColor, setLedColor] = useState("#ffffff");
+  const [ledBri, setLedBri] = useState(0);
+  const ledSeeded = useRef(false);
 
   // Push-based config subscription. The first frame arrives within one
   // RTT of mount (the broadcaster sends an initial snapshot before
   // detaching the socket); subsequent frames arrive only when a mutation
   // bumps stateVersion.
   useEffect(() => {
-    const stop = api.subscribeState((s) => setState(s));
+    const stop = api.subscribeState((s) => {
+      setState(s);
+      if (!ledSeeded.current && s.led) {
+        ledSeeded.current = true;
+        if (s.led.color) setLedColor(s.led.color);
+        if (typeof s.led.brightness === "number") setLedBri(s.led.brightness);
+      }
+    });
     return stop;
   }, []);
 
@@ -114,7 +131,7 @@ export default function Overview({ api, navigate }) {
       }
       inflight.current = true;
       try {
-        const data = await api.getSystemMetrics();
+        const data = await api.getSystemSummary();
         if (!cancelled && !data._unimplemented) setSys(data);
       } catch {
         // Swallow transient errors; next tick will retry.
@@ -231,6 +248,43 @@ export default function Overview({ api, navigate }) {
         </div>
       </div>
     </div>
+
+    ${state.led?.present ? html`
+      <div class="card" style="margin-top:var(--sp-4)">
+        <div class="card__title">Status LED</div>
+        <p style="color: var(--fg-1); margin-top: var(--sp-2)">
+          ${ledPhaseLabel(state.led.phase)}
+          ${state.led.count > 1 ? html` · ${state.led.count} pixels` : ""}
+        </p>
+        <div class="field" style="margin-top: var(--sp-4)">
+          <label class="field__label" for="led-color">Colour</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="led-color" type="color" value=${ledColor}
+                   onInput=${(e) => setLedColor(e.target.value)}
+                   onChange=${(e) => {
+                     const c = e.target.value;
+                     setLedColor(c);
+                     api.setLed({ color: c, brightness: ledBri }).catch((err) => toast && toast(String(err), "err"));
+                   }} />
+            <span class="chip">${ledColor}</span>
+          </div>
+        </div>
+        <div class="field" style="margin-top: var(--sp-4)">
+          <label class="field__label" for="led-bri">Brightness</label>
+          <div class="row" style="gap: var(--sp-3)">
+            <input id="led-bri" class="slider" type="range" min="0" max="100"
+                   value=${ledBri}
+                   style=${`--fill:${ledBri}`}
+                   onInput=${(e) => setLedBri(parseInt(e.target.value, 10))}
+                   onChange=${(e) => {
+                     const v = parseInt(e.target.value, 10);
+                     setLedBri(v);
+                     api.setLed({ color: ledColor, brightness: v }).catch((err) => toast && toast(String(err), "err"));
+                   }} />
+            <span class="chip">${ledBri}%</span>
+          </div>
+        </div>
+      </div>` : ""}
 
     ${state.mode === "snapclient" || state.source === 1
       ? html`

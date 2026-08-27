@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // Reset page: granular scope-targeted wipes of persistent memory.
 //
 // The firmware's `/api/reset` endpoint accepts a single `{scope}` payload
@@ -49,11 +52,11 @@ const SECTIONS = [
     scopes: [
       {
         id: "eq", label: "EQ + presets", tone: "ok", icon: "🎚", reboot: false,
-        blurb: "Flatten both the calibration and preference curves and clear all 10 preset slots.",
+        blurb: "Flatten the parametric EQ curve and clear all 10 preset slots.",
       },
       {
         id: "audio", label: "Audio settings", tone: "ok", icon: "🔊", reboot: false,
-        blurb: "Volume, balance, mute, channel enables, and stereo/mono back to factory defaults. EQ is preserved.",
+        blurb: "Volume, balance, mute, channel enables, stereo/mono, and status LED colour/brightness back to factory defaults. EQ is preserved.",
       },
     ],
   },

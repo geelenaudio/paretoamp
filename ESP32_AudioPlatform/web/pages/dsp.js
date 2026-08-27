@@ -1,4 +1,13 @@
-// DSP page: dual parametric EQ, headroom, presets. Preview mirrors `eq_coeffs.cpp`.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// DSP page — single-layer parametric EQ, headroom, presets.
+//
+// Preview math mirrors `eq_coeffs.cpp` so what you see on the plot is what
+// the device applies. The `state.eq.max_bands` value (from the server) sets
+// the runtime cap (10 on Amped, 15 on Louder); `state.eq.backend` reports
+// which backend actually applies the biquads ("software", "hardware", or
+// "software (fallback)").
 
 import { html, useEffect, useState, useRef, useMemo, useCallback } from "/vendor/htm-preact.mjs";
 
@@ -8,11 +17,12 @@ const MIN_GAIN = -18, MAX_GAIN = 18;
 const MIN_Q = 0.1, MAX_Q = 10, MAX_Q_NOTCH = 100;
 const BYPASS_DB = 0.01;
 const LP_HP_Q = 0.70710678118;
-const LAYERS = [
-  { id: "calibration", label: "Calibration", blurb: "Corrects the room + speaker response. Normally set once and left alone." },
-  { id: "preference", label: "Preference", blurb: "Your taste: bass boost, presence, whatever. Swap with presets." },
-];
-const LAYER_COLOR = { calibration: "var(--eq-cal)", preference: "var(--eq-pref)" };
+// Storage capacity. The runtime cap comes from `state.eq.max_bands` and
+// gates the +/− band controls at render time. 15 matches
+// `geelen::EQ_MAX_BANDS` on the firmware side.
+const MAX_STORAGE_BANDS = 15;
+const DEFAULT_MAX_BANDS = 10;
+
 const PLOT_W = 860;
 const PLOT_H = 280;
 const DB_RANGE = 20;
@@ -128,7 +138,6 @@ function coeffsOnePoleHp(freq) {
   return norm1p(k, -k, -k);
 }
 
-/** @returns {Array<{k:string,b0?:number,b1?:number,b2?:number,a1?:number,a2?:number}>} */
 function bandToStages(b0) {
   const b = normalizeBand(b0);
   const out = [];
@@ -202,47 +211,28 @@ function stageMag(st, f) {
   return st.k === "1p" ? mag1p(st, w) : magBq(st, w);
 }
 
-function magLinearLayer(layer, f) {
-  if (!layer.enabled) return 1;
-  const n = clamp(layer.band_count || 10, 1, 10);
+function magLinearCurve(curve, f) {
+  if (!curve.enabled) return 1;
+  const n = clamp(curve.band_count || DEFAULT_MAX_BANDS, 1, MAX_STORAGE_BANDS);
   let mag = 1;
   for (let i = 0; i < n; i++) {
-    const stages = bandToStagesMemo(layer.bands[i] || { freq: 1000, gain_db: 0, q: 1.2, type: "bell", slope_db_oct: 12 });
+    const stages = bandToStagesMemo(curve.bands[i] || { freq: 1000, gain_db: 0, q: 1.2, type: "bell", slope_db_oct: 12 });
     for (const st of stages) mag *= stageMag(st, f);
   }
   return mag;
 }
 
-function magDbCombined(layers, f) {
-  let m = 1;
-  for (const id of ["calibration", "preference"]) m *= magLinearLayer(layers[id], f);
-  return 20 * Math.log10(Math.max(m, 1e-12));
+function magDb(curve, f) {
+  return 20 * Math.log10(Math.max(magLinearCurve(curve, f), 1e-12));
 }
 
-function curvePathLayer(layer, w, h) {
+function curvePath(curve, w, h) {
   const N = CURVE_POINTS;
   let d = "";
   for (let i = 0; i < N; i++) {
     const t = i / (N - 1);
     const f = Math.exp(logn(MIN_FREQ) + t * (logn(MAX_FREQ) - logn(MIN_FREQ)));
-    const g = layer.enabled ? magDbSingleLayer(layer, f) : 0;
-    const x = t * w;
-    const y = gainToY(clamp(g, -DB_RANGE, DB_RANGE), h);
-    d += (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1) + " ";
-  }
-  return d;
-}
-function magDbSingleLayer(layer, f) {
-  return 20 * Math.log10(Math.max(magLinearLayer(layer, f), 1e-12));
-}
-
-function curvePathCombined(layers, w, h) {
-  const N = CURVE_POINTS;
-  let d = "";
-  for (let i = 0; i < N; i++) {
-    const t = i / (N - 1);
-    const f = Math.exp(logn(MIN_FREQ) + t * (logn(MAX_FREQ) - logn(MIN_FREQ)));
-    const g = magDbCombined(layers, f);
+    const g = curve.enabled ? magDb(curve, f) : 0;
     const x = t * w;
     const y = gainToY(clamp(g, -DB_RANGE, DB_RANGE), h);
     d += (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1) + " ";
@@ -253,29 +243,28 @@ function curvePathCombined(layers, w, h) {
 const TICK_FREQS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const TICK_LABELS = { 20: "20", 50: "50", 100: "100", 200: "200", 500: "500", 1000: "1k", 2000: "2k", 5000: "5k", 10000: "10k", 20000: "20k" };
 
-function normalizeLayerCurve(layer) {
-  const bands = (layer.bands || []).map((b) => normalizeBand(b));
-  return { ...layer, band_count: clamp(layer.band_count || 10, 1, 10), bands };
+function normalizeCurve(curve, maxBands) {
+  const bands = [];
+  const defBand = { freq: 1000, gain_db: 0, q: 1.2, type: "bell", slope_db_oct: 12 };
+  for (let i = 0; i < MAX_STORAGE_BANDS; i++) {
+    bands.push(normalizeBand({ ...defBand, ...(curve.bands && curve.bands[i]) }));
+  }
+  const cap = clamp(maxBands || DEFAULT_MAX_BANDS, 1, MAX_STORAGE_BANDS);
+  return {
+    enabled: !!curve.enabled,
+    band_count: clamp(curve.band_count ?? cap, 1, cap),
+    bands,
+  };
 }
 
-function EqPlot({ layers, activeLayer, onDrag, onDragEnd }) {
+function EqPlot({ curve, maxBands, onDrag, onDragEnd }) {
   const svgRef = useRef(null);
   const dragBand = useRef(null);
   const pendingDrag = useRef(null);
   const rafId = useRef(0);
-  const L = useMemo(() => ({
-    calibration: normalizeLayerCurve(layers.calibration),
-    preference: normalizeLayerCurve(layers.preference),
-  }), [layers]);
 
-  const active = L[activeLayer];
-  const activeN = clamp(active.band_count || 10, 1, 10);
-
-  const combined = useMemo(() => curvePathCombined(L, PLOT_W, PLOT_H), [L]);
-  const paths = useMemo(() => ({
-    calibration: curvePathLayer(L.calibration, PLOT_W, PLOT_H),
-    preference: curvePathLayer(L.preference, PLOT_W, PLOT_H),
-  }), [L]);
+  const activeN = clamp(curve.band_count || DEFAULT_MAX_BANDS, 1, maxBands);
+  const path = useMemo(() => curvePath(curve, PLOT_W, PLOT_H), [curve]);
 
   const eventToSvg = useCallback((e) => {
     const r = svgRef.current.getBoundingClientRect();
@@ -331,15 +320,13 @@ function EqPlot({ layers, activeLayer, onDrag, onDragEnd }) {
         <line x1=${freqToX(f, PLOT_W)} x2=${freqToX(f, PLOT_W)} y1="0" y2=${PLOT_H} stroke="var(--line)" stroke-dasharray="2 4" />
         <text x=${freqToX(f, PLOT_W) + 3} y=${PLOT_H - 6} fill="var(--fg-2)" font-size="10" font-family="var(--font-mono)">${TICK_LABELS[f]}</text>
       `)}
-      <path d=${paths.calibration} fill="none" stroke="var(--eq-cal)" stroke-width="1.3" opacity="0.55" />
-      <path d=${paths.preference} fill="none" stroke="var(--eq-pref)" stroke-width="1.3" opacity="0.55" />
-      <path d=${combined} fill="none" stroke="var(--accent)" stroke-width="2.2" />
-      ${active.bands.slice(0, activeN).map((b, i) => {
+      <path d=${path} fill="none" stroke="var(--accent)" stroke-width="2.2" />
+      ${curve.bands.slice(0, activeN).map((b, i) => {
         const nb = normalizeBand(b);
         const cx = freqToX(nb.freq, PLOT_W);
         const cy = gainToY(clamp(nb.gain_db, -DB_RANGE, DB_RANGE), PLOT_H);
         return html`
-          <circle key=${i} cx=${cx} cy=${cy} r="9" fill=${LAYER_COLOR[activeLayer]} stroke="var(--bg-1)" stroke-width="2"
+          <circle key=${i} cx=${cx} cy=${cy} r="9" fill="var(--eq-pref)" stroke="var(--bg-1)" stroke-width="2"
                   style="cursor: grab; touch-action: none;" onPointerDown=${(e) => onPointerDown(i, e)}>
             <title>Band ${i + 1}: ${nb.type} ${formatHz(nb.freq)}, ${nb.gain_db.toFixed(1)} dB</title>
           </circle>`;
@@ -356,7 +343,7 @@ const FILTER_OPTIONS = [
   ["high_pass", "High-pass"],
 ];
 
-function BandRow({ band, idx, onChange, layerColor }) {
+function BandRow({ band, idx, onChange }) {
   const b = normalizeBand(band);
   const freqPos = freqToPos(b.freq);
   const freqPct = (freqPos / FREQ_POS_MAX) * 100;
@@ -370,7 +357,7 @@ function BandRow({ band, idx, onChange, layerColor }) {
   return html`
     <div class="eq-band">
       <div class="eq-band__head">
-        <span class="eq-band__idx"><span style=${`color:${layerColor}`}>●</span> Band ${idx + 1}</span>
+        <span class="eq-band__idx"><span style="color:var(--eq-pref)">●</span> Band ${idx + 1}</span>
         <span>${b.type} · ${formatHz(b.freq)}${showGain ? ` · ${b.gain_db >= 0 ? "+" : ""}${b.gain_db.toFixed(1)} dB` : ""}${showQ ? ` · Q ${b.q.toFixed(2)}` : ""}</span>
       </div>
       <div class="eq-band__row">
@@ -466,31 +453,30 @@ function Presets({ api, toast, activeSlot, onLoaded }) {
 }
 
 function normalizeEqState(eq) {
-  const defBand = () => ({ freq: 1000, gain_db: 0, q: 1.2, type: "bell", slope_db_oct: 12 });
-  const normCurve = (c) => {
-    const bands = [];
-    for (let i = 0; i < 10; i++) bands.push(normalizeBand({ ...defBand(), ...(c.bands && c.bands[i]) }));
-    return { enabled: !!c.enabled, band_count: clamp(c.band_count ?? 10, 1, 10), bands };
-  };
+  const maxBands = clamp(eq.max_bands ?? DEFAULT_MAX_BANDS, 1, MAX_STORAGE_BANDS);
   return {
-    calibration: normCurve(eq.calibration || {}),
-    preference: normCurve(eq.preference || {}),
+    ...normalizeCurve(eq, maxBands),
+    max_bands: maxBands,
+    backend: eq.backend || "software",
     headroom: eq.headroom || { mode: "auto", manual_db: 0, auto_db: 0 },
     active_slot: eq.active_slot,
   };
 }
 
+function backendBadge(backend) {
+  if (backend === "hardware") return html`<span class="pill pill--ok">HW PEQ</span>`;
+  if (backend === "software (fallback)") return html`<span class="pill pill--warn">SW fallback</span>`;
+  return html`<span class="pill">software</span>`;
+}
+
 export default function Dsp({ api, toast }) {
   const [state, setState] = useState(null);
-  const [active, setActive] = useState("preference");
   const commitT = useRef(null);
 
   // Subscribe but ONLY seed from the first frame: the page's optimistic
   // in-progress edits live in `state.eq` and we don't want a delayed SSE
   // snapshot (worst case 250 ms server debounce + 250 ms client debounce)
-  // to clobber a band the user is currently dragging. Multi-tab EQ sync
-  // would be a Phase 4b once we either move to JSON-Patch with per-key
-  // resolution or expose a "user is editing" flag.
+  // to clobber a band the user is currently dragging.
   useEffect(() => {
     let seeded = false;
     const stop = api.subscribeState((s) => {
@@ -501,43 +487,47 @@ export default function Dsp({ api, toast }) {
     return stop;
   }, []);
 
+  // Force a snapshot re-seed after a deliberate user action (preset load) —
+  // fetches once via REST and overwrites the local `eq` slice.
+  async function reloadFromServer() {
+    try {
+      const s = await api.getState();
+      setState((prev) => ({ ...prev, eq: normalizeEqState(s.eq || {}) }));
+    } catch (e) { toast(String(e), "err"); }
+  }
+
   if (!state || !state.eq) return html`<div class="stub">Loading EQ…</div>`;
 
   const eq = state.eq;
-  const layers = { calibration: eq.calibration, preference: eq.preference };
   const headroom = eq.headroom || { mode: "auto", manual_db: 0, auto_db: 0 };
+  const maxBands = eq.max_bands;
 
-  function patchLayer(id, next) {
-    setState((prev) => ({ ...prev, eq: { ...prev.eq, [id]: { ...prev.eq[id], ...next } } }));
+  function patchCurve(next) {
+    setState((prev) => ({ ...prev, eq: { ...prev.eq, ...next } }));
   }
 
   function patchBand(idx, partial) {
-    const layer = active;
-    const cur = layers[layer];
-    const bands = cur.bands.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
-    patchLayer(layer, { bands });
-    scheduleCommit({ layer, enabled: cur.enabled, band_count: cur.band_count, bands });
+    const bands = eq.bands.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
+    patchCurve({ bands });
+    scheduleCommit({ enabled: eq.enabled, band_count: eq.band_count, bands });
   }
 
   function setBandCount(n) {
-    const layer = active;
-    const cur = layers[layer];
-    const v = clamp(n, 1, 10);
-    patchLayer(layer, { band_count: v });
-    scheduleCommit({ layer, enabled: cur.enabled, band_count: v, bands: cur.bands });
+    const v = clamp(n, 1, maxBands);
+    patchCurve({ band_count: v });
+    scheduleCommit({ enabled: eq.enabled, band_count: v, bands: eq.bands });
   }
 
   function scheduleCommit(payload) {
     clearTimeout(commitT.current);
     commitT.current = setTimeout(async () => {
       try {
-        const r = await api.setEqLayer(payload);
-        const key = payload.layer;
+        const r = await api.setEqCurve(payload);
         setState((prev) => ({
           ...prev,
           eq: {
             ...prev.eq,
-            [key]: normalizeEqState({ [key]: r })[key],
+            ...normalizeEqState({ ...r, max_bands: prev.eq.max_bands, backend: r.backend || prev.eq.backend }),
             headroom: r.headroom || prev.eq.headroom,
           },
         }));
@@ -545,15 +535,10 @@ export default function Dsp({ api, toast }) {
     }, 180);
   }
 
-  function toggleLayer(id) {
-    const en = !layers[id].enabled;
-    patchLayer(id, { enabled: en });
-    scheduleCommit({
-      layer: id,
-      enabled: en,
-      band_count: layers[id].band_count,
-      bands: layers[id].bands,
-    });
+  function toggleEq() {
+    const en = !eq.enabled;
+    patchCurve({ enabled: en });
+    scheduleCommit({ enabled: en, band_count: eq.band_count, bands: eq.bands });
   }
 
   async function setHeadroomMode(mode) {
@@ -569,70 +554,56 @@ export default function Dsp({ api, toast }) {
     } catch (e) { toast(String(e), "err"); }
   }
 
-  const curLayer = layers[active];
-  const bc = clamp(curLayer.band_count || 10, 1, 10);
+  const bc = clamp(eq.band_count || DEFAULT_MAX_BANDS, 1, maxBands);
 
   return html`
     <h1 class="page__title">DSP / EQ</h1>
     <p class="page__subtitle">
-      Dual parametric cascades (calibration + preference). Choose filter types,
-      active band count, and slopes for HP/LP. Preview follows the same math as firmware.
+      Single parametric cascade, up to ${maxBands} bands on this device.
+      Filter types, per-band frequency / gain / Q, and slope on HP/LP filters.
+      ${backendBadge(eq.backend)}
     </p>
 
-    <div class="eq-layer-tabs">
-      ${LAYERS.map((l) => html`
-        <button key=${l.id} class=${"eq-tab" + (active === l.id ? " eq-tab--active" : "")} onClick=${() => setActive(l.id)}>
-          ${l.label}
-          <span class=${"pill " + (layers[l.id].enabled ? "pill--ok" : "")} style="margin-left: var(--sp-2)">
-            ${layers[l.id].enabled ? "on" : "off"}
-          </span>
-        </button>
-      `)}
-    </div>
-
     <div class="card" style="padding: var(--sp-4)">
-      <${EqPlot} layers=${layers} activeLayer=${active}
+      <${EqPlot} curve=${eq} maxBands=${maxBands}
         onDrag=${(idx, partial) => patchBand(idx, partial)}
         onDragEnd=${() => {}} />
-      <div class="eq-legend">
-        <span><i style="background:#e6b566"></i> Calibration</span>
-        <span><i style="background:#9d7cff"></i> Preference</span>
-        <span><i style="background:var(--accent)"></i> Combined</span>
-      </div>
     </div>
 
-    <div class=${"card" + (curLayer.enabled ? "" : " card--muted")}>
+    <div class=${"card" + (eq.enabled ? "" : " card--muted")}>
       <div style="display:flex; justify-content:space-between; align-items:center; gap: var(--sp-4)">
         <div>
-          <div class="card__title">${LAYERS.find((l) => l.id === active).label} layer</div>
-          <p style="color: var(--fg-1); margin: var(--sp-2) 0 0;">${LAYERS.find((l) => l.id === active).blurb}</p>
+          <div class="card__title">Parametric EQ</div>
+          <p style="color: var(--fg-1); margin: var(--sp-2) 0 0;">
+            Room correction and personal preference in one curve. Backend: ${eq.backend}.
+          </p>
         </div>
         <label style="display:flex; align-items:center; gap: var(--sp-3)">
           <span style="color:var(--fg-1)">Enabled</span>
           <span class="switch">
-            <input type="checkbox" checked=${curLayer.enabled} onChange=${() => toggleLayer(active)} />
+            <input type="checkbox" checked=${eq.enabled} onChange=${toggleEq} />
             <span class="switch__slider"></span>
           </span>
         </label>
       </div>
 
-      ${!curLayer.enabled ? html`
+      ${!eq.enabled ? html`
         <div class="banner banner--warn" style="margin-top: var(--sp-3)">
-          <strong>Layer is off.</strong> Edits are saved but not applied until you enable the layer.
-          <button class="btn btn--primary" style="margin-left: var(--sp-3)" onClick=${() => toggleLayer(active)}>Enable now</button>
+          <strong>EQ is off.</strong> Edits are saved but not applied until you enable the EQ.
+          <button class="btn btn--primary" style="margin-left: var(--sp-3)" onClick=${toggleEq}>Enable now</button>
         </div>` : ""}
 
       <div class="eq-band__row" style="margin-top: var(--sp-3)">
         <label>Active bands</label>
-        <input class="slider" type="range" min="1" max="10" step="1" value=${bc}
-               style=${`--fill:${pct(bc, 1, 10)}`}
+        <input class="slider" type="range" min="1" max=${maxBands} step="1" value=${bc}
+               style=${`--fill:${pct(bc, 1, maxBands)}`}
                onInput=${(e) => setBandCount(parseInt(e.target.value, 10))} />
-        <span class="chip">${bc} / 10</span>
+        <span class="chip">${bc} / ${maxBands}</span>
       </div>
 
       <div class="eq-bands">
-        ${curLayer.bands.slice(0, bc).map((b, i) =>
-          html`<${BandRow} key=${i} band=${b} idx=${i} layerColor=${LAYER_COLOR[active]}
+        ${eq.bands.slice(0, bc).map((b, i) =>
+          html`<${BandRow} key=${i} band=${b} idx=${i}
                            onChange=${(p) => patchBand(i, p)} />`)}
       </div>
     </div>
@@ -664,15 +635,16 @@ export default function Dsp({ api, toast }) {
         </div>` : ""}
     </div>
 
-    ${active === "preference" ? html`
-      <div class="card">
-        <div class="card__title">Preference presets</div>
-        <p style="color: var(--fg-1); margin: var(--sp-2) 0 var(--sp-3);">
-          10 slots. Save/load the preference curve (including band count and types).
-        </p>
-        <${Presets} api=${api} toast=${toast}
-                    activeSlot=${eq.active_slot < 10 ? eq.active_slot : null}
-                    onLoaded=${refresh} />
-      </div>` : ""}
+    <div class="card">
+      <div class="card__title">Presets</div>
+      <p style="color: var(--fg-1); margin: var(--sp-2) 0 var(--sp-3);">
+        10 slots. Save/load the full EQ curve including band count and filter types.
+        Presets round-trip across boards; loading a 15-band Louder preset on Amped
+        activates the first ${maxBands} bands.
+      </p>
+      <${Presets} api=${api} toast=${toast}
+                  activeSlot=${eq.active_slot < 10 ? eq.active_slot : null}
+                  onLoaded=${reloadFromServer} />
+    </div>
   `;
 }

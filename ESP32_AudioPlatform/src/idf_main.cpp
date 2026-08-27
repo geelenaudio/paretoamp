@@ -1,4 +1,9 @@
-// ESP-IDF entrypoint for the Amped-ESP32 firmware.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// ESP-IDF entrypoint. Pinouts and DAC control are indirected through the
+// compile-time HAL under `src/hal/`, so this file compiles unchanged for
+// every board variant; only the `BOARD_*` macro selects the actual pins.
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -7,6 +12,7 @@
 #include "esp_log.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
+#include "cJSON.h"
 #include <cmath>
 
 #include "audio_engine.h"
@@ -15,7 +21,9 @@
 #include "idf_http_server.h"
 #include "idf_snapclient.h"
 #include "esp_timer.h"
+#if CONFIG_BT_ENABLED
 #include "idf_a2dp_sink.h"
+#endif
 #include "idf_cpu_sampler.h"
 #include "idf_logs.h"
 #include "idf_dlna.h"
@@ -26,12 +34,17 @@
 #include "idf_supervisor.h"
 #include "idf_state_stream.h"
 #include "idf_mode_manager.h"
+#include "idf_led.h"
+#include "hal/hal_board.h"
+#include "hal/dac.h"
 
-static constexpr gpio_num_t PIN_I2S_WS = GPIO_NUM_25;
-static constexpr gpio_num_t PIN_I2S_BCK = GPIO_NUM_26;
-static constexpr gpio_num_t PIN_I2S_DATA = GPIO_NUM_22;
-static constexpr gpio_num_t PIN_AMP_ENABLE = GPIO_NUM_13;
-static constexpr uint32_t I2S_STABLE_MS = 50;
+// Board-specific pinouts come from the HAL. On the Amped-WROVER these are
+// identical to the pre-refactor hard-coded values (BCK=26, WS=25, DATA=22,
+// AMP_EN=13, I2S_STABLE_MS=50).
+static constexpr gpio_num_t PIN_I2S_WS = HAL_PIN_I2S_WS;
+static constexpr gpio_num_t PIN_I2S_BCK = HAL_PIN_I2S_BCK;
+static constexpr gpio_num_t PIN_I2S_DATA = HAL_PIN_I2S_DATA;
+static constexpr uint32_t I2S_STABLE_MS = HAL_I2S_STABLE_MS;
 
 static geelen::AudioEngine g_engine;
 static i2s_chan_handle_t g_i2s_tx = nullptr;
@@ -39,7 +52,9 @@ static geelen_idf::ConfigManager g_cfg;
 static geelen_idf::WifiManager g_wifi;
 static geelen_idf::HttpServer g_http;
 static geelen_idf::Snapclient g_snap;
+#if CONFIG_BT_ENABLED
 static geelen_idf::A2dpSink g_a2dp;
+#endif
 
 // Hook invoked by the HTTP server after POST /api/snapcast persists new
 // host/port values. Drops the current socket so the snap task's retry loop
@@ -79,6 +94,7 @@ static void apply_channels_from_cfg() {
 
 extern "C" void on_volume_changed()   { apply_volume_from_cfg(); }
 extern "C" void on_channels_changed() { apply_channels_from_cfg(); }
+extern "C" void on_led_changed()      { geelen_idf::ledTakeoverUser(); }
 
 /** Called from `idf_api.cpp` appendSystemMetrics — forwards to `g_engine`. */
 extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl, float* rr) {
@@ -91,23 +107,46 @@ extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl
 }
 
 // Push both EQ cascades from NVS into the engine, then apply headroom.
-// In Auto mode the headroom dB equals -peak gain of the enabled cascade(s)
-// so the post-EQ signal tops out at ≤ 0 dBFS regardless of input. In
-// Manual mode the user's chosen cap applies verbatim. Either way we call
-// setHeadroomDb *after* the curves are in place so the peak computation
-// inside computeEqPeakGainDb() reflects the new bands.
-static void apply_eq_from_cfg() {
-  geelen_idf::ParametricBand cal_nvs[geelen_idf::PARAMETRIC_BANDS];
-  geelen_idf::ParametricBand pref_nvs[geelen_idf::PARAMETRIC_BANDS];
-  g_cfg.getEqCalibration(cal_nvs);
-  g_cfg.getEqPreference(pref_nvs);
+// EQ backend selection: on Louder, try to push the biquads into the TAS5825M
+// via `geelen_hal::dacApplyPeqBands`. If that succeeds, the software cascade
+// is disabled so the AudioEngine only handles headroom / limiter. If it
+// fails (I2C NAK, DAC not ready, etc.), we fall back to software cascades
+// and label the backend "software (fallback)" so the SPA can surface it.
+extern "C" void geelen_eq_set_backend(const char* label);
 
-  g_engine.setEqCurve(geelen::EQ_LAYER_CALIBRATION,
-                      reinterpret_cast<const geelen::EqBand*>(cal_nvs),
-                      g_cfg.getEqCalibrationActiveBands(), g_cfg.getEqCalibrationEnabled());
-  g_engine.setEqCurve(geelen::EQ_LAYER_PREFERENCE,
-                      reinterpret_cast<const geelen::EqBand*>(pref_nvs),
-                      g_cfg.getEqPreferenceActiveBands(), g_cfg.getEqPreferenceEnabled());
+// In Auto mode the headroom dB equals -peak gain of the enabled cascade so
+// the post-EQ signal tops out at ≤ 0 dBFS regardless of input. Manual mode
+// applies the user's cap verbatim. Either way we call setHeadroomDb *after*
+// the curve is in place so the peak computation reflects the new bands.
+static void apply_eq_from_cfg() {
+  geelen_idf::ParametricBand bands[geelen_idf::PARAMETRIC_BANDS];
+  g_cfg.getEqBands(bands);
+  const uint8_t band_count = g_cfg.getEqActiveBands();
+  const bool enabled = g_cfg.getEqEnabled();
+  const auto* eq_bands = reinterpret_cast<const geelen::EqBand*>(bands);
+
+  bool hw_ok = false;
+  if (enabled && geelen_hal::dacSupportsHwPeq()) {
+    hw_ok = geelen_hal::dacApplyPeqBands(eq_bands, band_count);
+    if (!hw_ok) {
+      ESP_LOGW("geelen",
+               "HW PEQ upload failed; falling back to software cascade");
+    }
+  }
+  if (hw_ok) {
+    // Hardware did the biquads; software cascade stays out of the way.
+    g_engine.setEqCurve(eq_bands, band_count, /*enabled*/ false);
+    g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Hardware);
+    geelen_eq_set_backend("hardware");
+  } else if (geelen_hal::dacSupportsHwPeq() && enabled) {
+    g_engine.setEqCurve(eq_bands, band_count, /*enabled*/ true);
+    g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
+    geelen_eq_set_backend("software (fallback)");
+  } else {
+    g_engine.setEqCurve(eq_bands, band_count, enabled);
+    g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
+    geelen_eq_set_backend("software");
+  }
 
   float db = g_cfg.getHeadroomManualDb();
   if (g_cfg.getHeadroomMode() == geelen_idf::HeadroomMode::Auto) {
@@ -142,9 +181,14 @@ static bool init_i2s() {
   if (i2s_new_channel(&chan_cfg, &g_i2s_tx, nullptr) != ESP_OK) return false;
 
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(geelen::SAMPLE_RATE);
-  // Force APLL for accurate audio clocks. If the I2S clock runs slow, audio pitch drops
-  // and the ring buffer will overflow (producer faster than consumer).
+  // Force APLL for accurate audio clocks on ESP32. If the I2S clock runs slow, audio
+  // pitch drops and the ring buffer will overflow (producer faster than consumer).
+  // The S3 does not expose an APLL for I2S (only PLL_F160M/XTAL); use the default
+  // clock source there — the S3 PLL is already tight enough for the ring drift math
+  // the AudioEngine does.
+#if SOC_I2S_SUPPORTS_APLL
   clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+#endif
   clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
   i2s_std_config_t std_cfg = {
@@ -170,19 +214,10 @@ static bool init_i2s() {
 }
 
 static void amp_enable_after_i2s_stable() {
-  // Avoid power-on pops: enable amp only after I2S clock is stable.
-  gpio_config_t io_conf = {};
-  io_conf.intr_type = GPIO_INTR_DISABLE;
-  io_conf.mode = GPIO_MODE_OUTPUT;
-  io_conf.pin_bit_mask = 1ULL << PIN_AMP_ENABLE;
-  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-  gpio_config(&io_conf);
-
-  gpio_set_level(PIN_AMP_ENABLE, 0);
+  // Avoid power-on pops: bring the amp up only after the I2S clock is stable.
+  // The DAC HAL owns the actual GPIO / TAS5825M state machine.
   vTaskDelay(pdMS_TO_TICKS(I2S_STABLE_MS));
-  gpio_set_level(PIN_AMP_ENABLE, 1);
-  ESP_LOGI("geelen", "Amp enable (GPIO %d) HIGH", (int)PIN_AMP_ENABLE);
+  geelen_hal::dacAmpEnable(true);
 }
 
 /** Test tone shares the engine ring with voice prompts; start it only after boot clips finish. */
@@ -196,6 +231,7 @@ static void test_tone_after_voice_task(void*) {
 // immediately can exhaust the BT OSI timer pool (osi_alarm_new err 0x101).
 // We wait out the worst of boot/Wi-Fi churn, then start A2DP so users who
 // never fix Wi-Fi can still pair for audio.
+#if CONFIG_BT_ENABLED
 static constexpr int kBtDeferPollMs = 500;
 // 120 * 500 ms = 60 s max wait while still in captive AP-only mode.
 static constexpr int kBtDeferMaxPolls = 120;
@@ -216,6 +252,7 @@ static void deferred_a2dp_start_task(void*) {
   g_a2dp.begin("Geelen Audio");
   vTaskDelete(nullptr);
 }
+#endif  // CONFIG_BT_ENABLED
 
 static void audio_task(void*) {
   // Steady playback: process() blocks in i2s_channel_write (portMAX_DELAY) —
@@ -254,11 +291,41 @@ static void configure_uart_log_levels() {
   esp_log_level_set("event", ESP_LOG_WARN);
 }
 
+// PSRAM-backed cJSON allocators. Every /api/* JSON handler builds a cJSON
+// tree (~1-3 KiB of small alloc bursts) and immediately serializes it to a
+// string (another 0.5-2 KiB). Doing this from internal DRAM directly
+// competes with WiFi RX malloc and BT controller pbufs — measured: a single
+// EQ-page asset burst (parallel /api/state + /api/eq/presets +
+// /api/state/stream initial frame) tipped DRAM into the `wifi:m f null` /
+// `BT_APPL: Pkt dropped` cascade with audio underruns. PSRAM has 2 MiB
+// free at all times so steering cJSON there is essentially free.
+//
+// Safety: heap_caps_malloc(MALLOC_CAP_SPIRAM) is thread-safe and reentrant
+// (internal mutex), and httpd_resp_send_chunk copies caller data into
+// DMA-capable pbufs — it never DMAs from PSRAM directly. cJSON is never
+// invoked from ISR context in this codebase.
+static void* cjson_malloc_psram(size_t sz) {
+  return heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+}
+static void cjson_free_psram(void* p) {
+  heap_caps_free(p);
+}
+
 extern "C" void app_main(void) {
   configure_uart_log_levels();
   // Hook the logger *before* the first INFO so the live-stream ring captures
   // the full boot log, including NVS / Wi-Fi banner lines.
   geelen_idf::logsInit();
+  // Steer cJSON allocations onto PSRAM before any handler runs (also before
+  // ConfigManager's NVS hydration, which builds intermediate JSON for some
+  // legacy fields). Hooks are global state in cJSON's translation unit;
+  // setting them once here applies to every cJSON_* call thereafter.
+  {
+    cJSON_Hooks hooks{};
+    hooks.malloc_fn = &cjson_malloc_psram;
+    hooks.free_fn = &cjson_free_psram;
+    cJSON_InitHooks(&hooks);
+  }
   ESP_LOGI("geelen", "Geelen Audio Amp – ESP-IDF env boot");
   // Bring up the control-plane event loop early so any subsystem that
   // wants to post an event during init has somewhere to post it. Phase 0
@@ -272,6 +339,7 @@ extern "C" void app_main(void) {
   // (Phase 3 ships the FSM scaffold; later phases plug in concrete
   // `IProducer` implementations for snap / test-tone / DLNA-stream).
   geelen_idf::modeManager().begin(&g_cfg);
+  geelen_idf::ledBegin(&g_cfg);
   // SPIFFS is mounted by `g_cfg.begin()` — decode every voice prompt into
   // PSRAM right after, before any subsystem can ask for one. This replaces
   // the per-prompt Helix decode + streamer-singleton borrow with a small
@@ -288,7 +356,21 @@ extern "C" void app_main(void) {
   geelen_idf::stateStreamInit(&g_cfg);
   g_http.begin(&g_cfg, &g_wifi);
 
+#if CONFIG_BT_ENABLED
   g_a2dp.setEngine(&g_engine);
+#endif
+
+  // Bring the DAC HAL up before the AudioEngine so any hardware PEQ backend
+  // is available when `apply_eq_from_cfg` runs. On Amped this is a no-op that
+  // just configures the amp-enable GPIO; on Louder it initialises I2C and the
+  // TAS5825M and leaves the DAC in HI-Z until `amp_enable_after_i2s_stable`.
+  if (!geelen_hal::dacInit()) {
+    ESP_LOGW("geelen", "DAC HAL init failed — continuing with software audio path");
+  }
+  ESP_LOGI("geelen", "Board: %s (EQ max %u bands, HW PEQ %s)",
+           HAL_BOARD_NAME,
+           (unsigned)HAL_EQ_MAX_BANDS_ACTIVE,
+           geelen_hal::dacSupportsHwPeq() ? "yes" : "no");
 
   if (!g_engine.begin()) {
     ESP_LOGE("geelen", "AudioEngine begin failed");
@@ -342,6 +424,7 @@ extern "C" void app_main(void) {
 
   // Start BT Classic A2DP sink only when BT is selected. Defer if we are
   // still in captive APSTA onboarding — see deferred_a2dp_start_task.
+#if CONFIG_BT_ENABLED
   if (src == geelen_idf::AudioSource::Bluetooth) {
     if (!g_wifi.isApOnly()) {
       g_a2dp.begin("Geelen Audio");
@@ -353,6 +436,11 @@ extern "C" void app_main(void) {
       xTaskCreate(deferred_a2dp_start_task, "bt_defer", 4096, nullptr, 5, nullptr);
     }
   }
+#else
+  if (src == geelen_idf::AudioSource::Bluetooth) {
+    ESP_LOGW("geelen", "Bluetooth source selected but BT is disabled in sdkconfig — ignoring");
+  }
+#endif
 
   // (Historical) Phase 2 made the eager `mp3::streamer()->ensureTaskNow()`
   // here obsolete: voice prompts no longer go through the MP3 streamer

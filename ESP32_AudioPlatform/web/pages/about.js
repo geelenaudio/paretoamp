@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // About page. Cards show firmware build metadata, chip/hardware identity,
 // network MACs, filesystem info and links to the embedded API docs and
 // project source.
@@ -88,11 +91,15 @@ export default function About({ api }) {
       </${Card}>
 
       <${Card} title="Licensing">
-        <${Row} k="Firmware">MIT © Geelen</${Row}>
+        <${Row} k="Firmware">
+          GPL-3.0-or-later ·
+          <a href="/COPYING" target="_blank" rel="noopener">COPYING ↗</a>
+        </${Row}>
+        <${Row} k="sonocotta tas5805m (Louder)">GPL-3.0-or-later</${Row}>
         <${Row} k="ESP-IDF">Apache-2.0 © Espressif</${Row}>
+        <${Row} k="esp32-audioI2S / esp32-a2dp">LGPL-3.0</${Row}>
         <${Row} k="Preact / HTM">MIT</${Row}>
         <${Row} k="Swagger UI">Apache-2.0</${Row}>
-        <${Row} k="libhelix-mp3">RealNetworks RPSL</${Row}>
       </${Card}>
     </div>
   `;

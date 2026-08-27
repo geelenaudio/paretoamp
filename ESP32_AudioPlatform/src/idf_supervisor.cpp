@@ -62,6 +62,8 @@ constexpr const char* kEventNames[] = {
     "EV_SNAP_DISCONNECTED",
     "EV_DLNA_PLAY_REQUESTED",
     "EV_STATE_DIFF",
+    "EV_WIFI_PROBE_START",
+    "EV_WIFI_PROBE_RESULT",
 };
 
 static_assert(sizeof(kEventNames) / sizeof(kEventNames[0]) == (size_t)EV_COUNT_,

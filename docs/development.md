@@ -152,7 +152,8 @@ host build will fail before flash.
 - IDF components: `nvs_flash`, `spiffs`, `esp_wifi`, `esp_netif`,
   `esp_event`, `esp_http_server`, `esp_timer`, `lwip`, `mdns`, `bt`.
 - External libraries: `chmorgan/esp-libhelix-mp3` (MP3 decoding), pulled
-  via the IDF component manager.
+  via the IDF component manager; vendored `espressif/led_strip` 3.0.3
+  (`components/led_strip/`) for WS2812 RMT.
 
 ## Hardware
 

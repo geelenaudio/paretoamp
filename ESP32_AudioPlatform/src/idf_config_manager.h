@@ -1,17 +1,24 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // ESP-IDF ConfigManager (NVS + esp_littlefs).
 //
-// Phase 1 expanded this significantly:
-//   - AudioSource gained `Dlna` (widened for Phase 3).
-//   - Per-channel volume (vol_l / vol_r) + muted replace the scalar `vol`.
-//   - ChannelConfig + stereo/mono mode.
-//   - Dual 10-band parametric EQ (calibration + preference) with enables,
-//     preset-slot indicator, auto-headroom + manual headroom cap.
-//   - Device name (user-friendly, shown in snapweb / DLNA / BT).
-//   - DLNA renderer enabled flag.
+// Post-refactor state:
+//   - AudioSource: Bluetooth / Network / Dlna / TestTone
+//   - Per-channel volume (vol_l / vol_r) + muted.
+//   - StereoMode + channel enables.
+//   - **Single-layer** parametric EQ, up to `geelen::EQ_MAX_BANDS` (=15)
+//     stored bands. The runtime cap is board-specific
+//     (`HAL_EQ_MAX_BANDS_ACTIVE` — 10 on Amped, 15 on Louder).
+//   - Device name, DLNA enable, voice feedback, WiFi power-save.
 //
-// Storage discipline: every mutator marks dirty; `tick()` debounces the actual
-// NVS write by SAVE_DEBOUNCE_MS. API handlers that need a guaranteed persist
-// can call `save()` directly (e.g. reset scopes, factory reset).
+// The old two-layer (calibration + preference) split was collapsed as part
+// of the Phase-2 refactor; on-disk NVS blobs from pre-refactor firmware are
+// migrated on first boot (see `load()` in the .cpp).
+//
+// Storage discipline: every mutator marks dirty; `tick()` debounces the
+// actual NVS write by SAVE_DEBOUNCE_MS. API handlers that need a guaranteed
+// persist can call `save()` directly (e.g. reset scopes, factory reset).
 
 #pragma once
 
@@ -32,8 +39,10 @@ constexpr uint8_t VOLUME_MIN = 0;
 constexpr uint8_t VOLUME_MAX = 100;
 constexpr uint8_t VOLUME_DEFAULT = 80;
 
-// Phase 5 preset model.
-constexpr size_t PARAMETRIC_BANDS = 10;
+// Parametric-EQ storage capacity. Matches `geelen::EQ_MAX_BANDS`; this
+// symbol is kept as a namespaced alias so callers in this translation unit
+// don't need to reach into `geelen::` for every array-size expression.
+constexpr size_t PARAMETRIC_BANDS = geelen::EQ_MAX_BANDS;
 constexpr size_t PRESET_SLOT_COUNT = 10;
 constexpr size_t PRESET_NAME_MAX = 32;
 
@@ -93,13 +102,23 @@ struct Config {
   bool ch_l_on;
   bool ch_r_on;
 
-  ParametricBand eq_cal[PARAMETRIC_BANDS];
-  uint8_t eq_cal_active_bands;
-  bool eq_cal_on;
-  ParametricBand eq_pref[PARAMETRIC_BANDS];
-  uint8_t eq_pref_active_bands;
-  bool eq_pref_on;
-  uint8_t eq_pref_slot;               // 0..9 or 0xFF ("unsaved / modified")
+  // WS2812 user colour. Brightness 0 = off. `led_user` is false until the
+  // first POST /api/led so boot status animations can finish, then the LED
+  // stays dark unless the user picked a colour.
+  uint8_t led_r;
+  uint8_t led_g;
+  uint8_t led_b;
+  uint8_t led_bri;
+  bool led_user;
+
+  // Single-layer PEQ. Storage is `PARAMETRIC_BANDS` (=15); the runtime cap
+  // (`HAL_EQ_MAX_BANDS_ACTIVE`) is 10 on Amped and 15 on Louder. `eq_active_bands`
+  // is the user-visible count in 1..HAL_EQ_MAX_BANDS_ACTIVE and is clamped on
+  // set. Preset slot 0..9 or 0xFF ("modified / unsaved").
+  ParametricBand eq_bands[PARAMETRIC_BANDS];
+  uint8_t eq_active_bands;
+  bool eq_on;
+  uint8_t eq_active_slot;
 
   HeadroomMode eq_hr_mode;
   float eq_hr_manual_db;              // always <= 0.0f
@@ -134,29 +153,31 @@ class ConfigManager {
   void setStereoMode(StereoMode m);
   void setChannels(bool l_on, bool r_on);
 
+  uint8_t getLedR() const { return config_.led_r; }
+  uint8_t getLedG() const { return config_.led_g; }
+  uint8_t getLedB() const { return config_.led_b; }
+  uint8_t getLedBrightness() const { return config_.led_bri; }
+  bool getLedUser() const { return config_.led_user; }
+  void setLed(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
+
   // ---- Preset (legacy) --------------------------------------------------
   uint8_t getPresetId() const { return config_.preset_id; }
   void setPresetId(uint8_t id);
   void getEQGains(int8_t out[EQ_BANDS]) const;
   void setEQGains(const int8_t gains[EQ_BANDS]);
 
-  // ---- Parametric EQ ----------------------------------------------------
-  // `curve[out]` receives a copy of the 10-band curve.
-  void getEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) const;
-  void setEqCalibration(const ParametricBand bands[PARAMETRIC_BANDS]);
-  uint8_t getEqCalibrationActiveBands() const { return config_.eq_cal_active_bands; }
-  void setEqCalibrationActiveBands(uint8_t n);
-  bool getEqCalibrationEnabled() const { return config_.eq_cal_on; }
-  void setEqCalibrationEnabled(bool on);
-
-  void getEqPreference(ParametricBand out[PARAMETRIC_BANDS]) const;
-  void setEqPreference(const ParametricBand bands[PARAMETRIC_BANDS]);
-  uint8_t getEqPreferenceActiveBands() const { return config_.eq_pref_active_bands; }
-  void setEqPreferenceActiveBands(uint8_t n);
-  bool getEqPreferenceEnabled() const { return config_.eq_pref_on; }
-  void setEqPreferenceEnabled(bool on);
-  uint8_t getEqPreferenceSlot() const { return config_.eq_pref_slot; }
-  void setEqPreferenceSlot(uint8_t slot);
+  // ---- Parametric EQ (single layer) -------------------------------------
+  // `bands` receives up to `PARAMETRIC_BANDS` (=15) band descriptors.
+  // Only the first `getEqActiveBands()` are meaningful; the rest hold the
+  // last-known/default values and are ignored by the DSP.
+  void getEqBands(ParametricBand out[PARAMETRIC_BANDS]) const;
+  void setEqBands(const ParametricBand bands[PARAMETRIC_BANDS]);
+  uint8_t getEqActiveBands() const { return config_.eq_active_bands; }
+  void setEqActiveBands(uint8_t n);
+  bool getEqEnabled() const { return config_.eq_on; }
+  void setEqEnabled(bool on);
+  uint8_t getEqActiveSlot() const { return config_.eq_active_slot; }
+  void setEqActiveSlot(uint8_t slot);
 
   HeadroomMode getHeadroomMode() const { return config_.eq_hr_mode; }
   float getHeadroomManualDb() const { return config_.eq_hr_manual_db; }
@@ -175,6 +196,13 @@ class ConfigManager {
   void setWifiSsid(const char* ssid);
   bool getWifiPass(char* out, size_t max_len) const;
   void setWifiPass(const char* pass);
+
+  // Set after the first successful STA IP (or a successful validate/commit).
+  // When the flag is present and false, `WifiManager::begin` skips STA and
+  // goes straight to AP so unverified credentials cannot cycle the radio.
+  bool getWifiEverConnectedOk() const { return wifi_ever_ok_; }
+  bool wifiEverConnectedFlagPresent() const { return wifi_ever_flag_present_; }
+  void setWifiEverConnectedOk(bool ok);
 
   // ---- Device name / DLNA -----------------------------------------------
   bool getDeviceName(char* out, size_t max_len) const;
@@ -228,14 +256,13 @@ class ConfigManager {
   void resetSnapcast();
   void resetDlna();
   void resetEq();                    // both curves + all preset slots
-  void resetAudio();                 // volume/channels only, leaves EQ
+  void resetAudio();                 // volume/channels/LED, leaves EQ
 
  private:
   void loadDefaults();
   bool load();
   void ensurePresetsDir();
-  static void loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS]);
-  static void loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]);
+  static void loadDefaultEqBands(ParametricBand out[PARAMETRIC_BANDS]);
 
   Config config_{};
   bool initialized_{false};
@@ -256,6 +283,8 @@ class ConfigManager {
   uint16_t snapcast_port_{SNAPCAST_PORT_DEFAULT};
   char wifi_ssid_[WIFI_SSID_MAX]{};
   char wifi_pass_[WIFI_PASS_MAX]{};
+  bool wifi_ever_ok_{false};
+  bool wifi_ever_flag_present_{false};
 };
 
 /** Background NVS writer; call once after ConfigManager::begin(). */

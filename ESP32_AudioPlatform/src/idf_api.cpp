@@ -1,8 +1,16 @@
-// Phase 1 JSON API handlers. See idf_api.h for scope.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// JSON API handlers. See idf_api.h for scope. Includes /api/led (WS2812).
 
 #include "idf_api.h"
 #include "idf_config_manager.h"
+#include "idf_wifi_manager.h"
 #include "eq_types.h"
+#include "hal/hal_board.h"
+#include "hal/dac.h"
+#include "hal/led.h"
+#include "idf_led.h"
 #include "idf_cpu_sampler.h"
 #include "idf_mode_manager.h"
 
@@ -23,9 +31,12 @@
 
 #include "cJSON.h"
 
+#include "cJSON.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <strings.h>
 #include <cmath>
 #include <sys/stat.h>
@@ -36,6 +47,9 @@
 namespace geelen_idf {
 
 static const char* TAG = "API";
+static WifiManager* s_wifi_mgr = nullptr;
+
+void apiSetWifiManager(WifiManager* wifi) { s_wifi_mgr = wifi; }
 
 static const char* PRESETS_DIR = "/spiffs/presets";
 
@@ -50,6 +64,7 @@ extern void scheduleRestart(unsigned delay_ms);
 // and called from the relevant handlers.
 extern "C" void on_volume_changed()   __attribute__((weak));
 extern "C" void on_channels_changed() __attribute__((weak));
+extern "C" void on_led_changed()      __attribute__((weak));
 // Reports the peak gain (dB) of the currently-enabled EQ cascade(s),
 // computed by sweeping the engine's biquad responses. Returns 0 if the
 // hook is absent so the UI still has a usable number.
@@ -123,6 +138,41 @@ static cJSON* parse_body(httpd_req_t* req) {
     return nullptr;
   }
   return root;
+}
+
+static bool parse_hex_color(const char* s, uint8_t* r, uint8_t* g, uint8_t* b) {
+  if (!s || s[0] != '#' || strlen(s) != 7) return false;
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  int v[6];
+  for (int i = 0; i < 6; ++i) {
+    v[i] = nibble(s[i + 1]);
+    if (v[i] < 0) return false;
+  }
+  *r = (uint8_t)((v[0] << 4) | v[1]);
+  *g = (uint8_t)((v[2] << 4) | v[3]);
+  *b = (uint8_t)((v[4] << 4) | v[5]);
+  return true;
+}
+
+static void format_hex_color(char out[8], uint8_t r, uint8_t g, uint8_t b) {
+  snprintf(out, 8, "#%02x%02x%02x", r, g, b);
+}
+
+static void add_led_json(cJSON* parent, ConfigManager* cfg) {
+  cJSON* led = cJSON_CreateObject();
+  cJSON_AddBoolToObject(led, "present", geelen_hal::ledPresent());
+  cJSON_AddNumberToObject(led, "count", (double)geelen_hal::ledPixelCount());
+  cJSON_AddStringToObject(led, "phase", ledPhaseName());
+  char col[8];
+  format_hex_color(col, cfg->getLedR(), cfg->getLedG(), cfg->getLedB());
+  cJSON_AddStringToObject(led, "color", col);
+  cJSON_AddNumberToObject(led, "brightness", cfg->getLedBrightness());
+  cJSON_AddItemToObject(parent, "led", led);
 }
 
 static int jint(const cJSON* o, const char* k, int fallback) {
@@ -224,6 +274,16 @@ static bool jsonToBand(const cJSON* o, ParametricBand* out) {
   return true;
 }
 
+// EQ backend for `/api/state.eq.backend` — mirrors what
+// `AudioEngine`/`geelen_hal::dacApplyPeqBands` are actually doing. Values:
+//   "software"             — cascade lives in the AudioEngine (Amped).
+//   "hardware"             — DAC applied the biquads in HW (Louder OK).
+//   "software (fallback)"  — Louder HW upload failed, dropped back to SW.
+static const char* g_eq_backend = "software";
+extern "C" void geelen_eq_set_backend(const char* label) {
+  if (label && *label) g_eq_backend = label;
+}
+
 static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool enabled, uint8_t band_count) {
   cJSON* o = cJSON_CreateObject();
   cJSON_AddBoolToObject(o, "enabled", enabled);
@@ -273,6 +333,8 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON_AddBoolToObject(ch, "r_on", cfg->getChannelROn());
   cJSON_AddItemToObject(root, "channels", ch);
 
+  add_led_json(root, cfg);
+
   cJSON* snap = cJSON_CreateObject();
   char host[SNAPCAST_HOST_MAX];
   cfg->getSnapcastHost(host, sizeof(host));
@@ -296,26 +358,33 @@ cJSON* buildStateJson(ConfigManager* cfg) {
     case WifiPsMode::MaxModem: ps_str = "max_modem";  break;
   }
   cJSON_AddStringToObject(wifi_cfg, "power_save", ps_str);
+  cJSON_AddStringToObject(wifi_cfg, "state",
+                          s_wifi_mgr ? s_wifi_mgr->probeStateName() : "idle");
   cJSON_AddItemToObject(root, "wifi", wifi_cfg);
 
+  // Single-layer PEQ.
   cJSON* eq = cJSON_CreateObject();
-  ParametricBand cal[PARAMETRIC_BANDS], pref[PARAMETRIC_BANDS];
-  cfg->getEqCalibration(cal);
-  cfg->getEqPreference(pref);
-  cJSON_AddItemToObject(eq, "calibration",
-                        curveToJson(cal, cfg->getEqCalibrationEnabled(), cfg->getEqCalibrationActiveBands()));
-  cJSON_AddItemToObject(eq, "preference",
-                        curveToJson(pref, cfg->getEqPreferenceEnabled(), cfg->getEqPreferenceActiveBands()));
+  ParametricBand curve[PARAMETRIC_BANDS];
+  cfg->getEqBands(curve);
+  cJSON_AddBoolToObject(eq, "enabled", cfg->getEqEnabled());
+  const uint8_t band_count = cfg->getEqActiveBands();
+  cJSON_AddNumberToObject(eq, "band_count", band_count);
+  // Per-board runtime cap. SPA uses this to gate the +/- band controls.
+  cJSON_AddNumberToObject(eq, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
+  cJSON_AddStringToObject(eq, "backend", g_eq_backend);
+  cJSON* bands_arr = cJSON_CreateArray();
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) cJSON_AddItemToArray(bands_arr, bandToJson(curve[i]));
+  cJSON_AddItemToObject(eq, "bands", bands_arr);
   cJSON* hr = cJSON_CreateObject();
   cJSON_AddStringToObject(hr, "mode",
                           cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
   cJSON_AddNumberToObject(hr, "manual_db", cfg->getHeadroomManualDb());
-  // auto_db is negative the peak gain of the enabled cascades. A peak of
+  // auto_db is negative the peak gain of the enabled cascade. A peak of
   // +6 dB -> auto_db of -6 dB (so total gain stays at or below unity).
   const float peak_db = &compute_eq_peak_db ? compute_eq_peak_db() : 0.f;
   cJSON_AddNumberToObject(hr, "auto_db", (double)(peak_db > 0.f ? -peak_db : 0.f));
   cJSON_AddItemToObject(eq, "headroom", hr);
-  cJSON_AddNumberToObject(eq, "active_slot", cfg->getEqPreferenceSlot());
+  cJSON_AddNumberToObject(eq, "active_slot", cfg->getEqActiveSlot());
   cJSON_AddItemToObject(root, "eq", eq);
 
   cJSON* tt = cJSON_CreateObject();
@@ -360,7 +429,7 @@ static esp_err_t handle_get_state(httpd_req_t* req) {
 
 // ---- /api/system (runtime metrics + identity) ----------------------------
 
-static void appendSystemMetrics(cJSON* root) {
+static void appendSystemMetrics(cJSON* root, bool include_audio = true) {
   uint64_t us = esp_timer_get_time();
   cJSON_AddNumberToObject(root, "uptime_s", (double)(us / 1000000ULL));
   cJSON_AddNumberToObject(root, "free_heap", (double)esp_get_free_heap_size());
@@ -399,6 +468,7 @@ static void appendSystemMetrics(cJSON* root) {
   cJSON_AddNumberToObject(cpu, "core1_pct", c1);
   cJSON_AddItemToObject(root, "cpu", cpu);
 
+  if (!include_audio) return;
   float pl = -90.f, pr = -90.f, rl = -90.f, rr = -90.f;
   geelen_engine_read_output_meters(&pl, &pr, &rl, &rr);
   cJSON* audio = cJSON_CreateObject();
@@ -485,6 +555,47 @@ static esp_err_t handle_get_system_metrics(httpd_req_t* req) {
 static esp_err_t handle_get_system_identity(httpd_req_t* req) {
   cJSON* root = cJSON_CreateObject();
   appendSystemIdentity(root);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_get_system_summary(httpd_req_t* req) {
+  cJSON* root = cJSON_CreateObject();
+  appendSystemMetrics(root, /*include_audio=*/false);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_get_system_tasks(httpd_req_t* req) {
+  cJSON* root = cJSON_CreateObject();
+#if (configUSE_TRACE_FACILITY == 1)
+  UBaseType_t n = uxTaskGetNumberOfTasks();
+  TaskStatus_t* arr = (TaskStatus_t*)calloc(n, sizeof(TaskStatus_t));
+  if (!arr) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+  uint32_t total = 0;
+  UBaseType_t got = uxTaskGetSystemState(arr, n, &total);
+  cJSON* tasks = cJSON_CreateArray();
+  for (UBaseType_t i = 0; i < got; ++i) {
+    cJSON* t = cJSON_CreateObject();
+    cJSON_AddStringToObject(t, "name", arr[i].pcTaskName ? arr[i].pcTaskName : "?");
+    cJSON_AddNumberToObject(t, "prio", arr[i].uxCurrentPriority);
+    cJSON_AddNumberToObject(t, "stack_hwm", arr[i].usStackHighWaterMark);
+#if (configGENERATE_RUN_TIME_STATS == 1)
+    cJSON_AddNumberToObject(t, "runtime", (double)arr[i].ulRunTimeCounter);
+    if (total > 0) {
+      cJSON_AddNumberToObject(t, "runtime_pct",
+                              (double)arr[i].ulRunTimeCounter * 100.0 / (double)total);
+    }
+#endif
+#ifdef configTASKLIST_COREID
+    cJSON_AddNumberToObject(t, "core", (double)arr[i].xCoreID);
+#endif
+    cJSON_AddItemToArray(tasks, t);
+  }
+  free(arr);
+  cJSON_AddItemToObject(root, "tasks", tasks);
+  cJSON_AddNumberToObject(root, "count", (double)got);
+#else
+  cJSON_AddStringToObject(root, "error", "CONFIG_FREERTOS_USE_TRACE_FACILITY is off");
+#endif
   return send_json(req, root);
 }
 
@@ -576,6 +687,42 @@ static esp_err_t handle_post_channels(httpd_req_t* req) {
   cJSON_AddBoolToObject(rj, "l_on", l_on);
   cJSON_AddBoolToObject(rj, "r_on", r_on);
   return send_json(req, rj);
+}
+
+// ---- /api/led -------------------------------------------------------------
+
+static esp_err_t handle_post_led(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+  if (!geelen_hal::ledPresent()) {
+    return send_err_json(req, HTTPD_404_NOT_FOUND, "no ws2812");
+  }
+
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  uint8_t r = cfg->getLedR();
+  uint8_t g = cfg->getLedG();
+  uint8_t b = cfg->getLedB();
+  const char* col = jstr(body, "color", nullptr);
+  if (col && !parse_hex_color(col, &r, &g, &b)) {
+    cJSON_Delete(body);
+    return send_err_json(req, HTTPD_400_BAD_REQUEST, "color must be #rrggbb");
+  }
+  int bri = jint(body, "brightness", cfg->getLedBrightness());
+  if (bri < 0) bri = 0;
+  if (bri > 100) bri = 100;
+  cJSON_Delete(body);
+
+  cfg->setLed(r, g, b, (uint8_t)bri);
+  if (&on_led_changed) on_led_changed();
+
+  cJSON* rj = cJSON_CreateObject();
+  add_led_json(rj, cfg);
+  // add_led_json nests under "led"; flatten for the POST echo.
+  cJSON* led = cJSON_DetachItemFromObject(rj, "led");
+  cJSON_Delete(rj);
+  return send_json(req, led);
 }
 
 // ---- /api/mode ------------------------------------------------------------
@@ -790,25 +937,19 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
   cJSON* body = parse_body(req);
   if (!body) return ESP_FAIL;
 
-  const char* layer = jstr(body, "layer", nullptr);
-  if (!layer || (strcmp(layer, "calibration") && strcmp(layer, "preference"))) {
-    cJSON_Delete(body);
-    return send_err_json(req, HTTPD_400_BAD_REQUEST, "layer must be calibration|preference");
-  }
-
-  const bool is_cal = !strcmp(layer, "calibration");
-
   ParametricBand bands[PARAMETRIC_BANDS];
-  if (is_cal) cfg->getEqCalibration(bands);
-  else cfg->getEqPreference(bands);
+  cfg->getEqBands(bands);
 
+  // `band_count` is clamped to the board's runtime cap
+  // (`HAL_EQ_MAX_BANDS_ACTIVE`). Storage still holds up to 15 bands so a
+  // preset created on Louder round-trips through Amped without losing
+  // metadata — Amped just refuses to *activate* more than 10 bands.
   const cJSON* bcj = cJSON_GetObjectItemCaseSensitive(body, "band_count");
   if (cJSON_IsNumber(bcj)) {
     int v = (int)cJSON_GetNumberValue(bcj);
-    if (v >= 1 && v <= (int)PARAMETRIC_BANDS) {
-      if (is_cal) cfg->setEqCalibrationActiveBands((uint8_t)v);
-      else cfg->setEqPreferenceActiveBands((uint8_t)v);
-    }
+    if (v < 1) v = 1;
+    if (v > HAL_EQ_MAX_BANDS_ACTIVE) v = HAL_EQ_MAX_BANDS_ACTIVE;
+    cfg->setEqActiveBands((uint8_t)v);
   }
 
   const cJSON* arr = cJSON_GetObjectItemCaseSensitive(body, "bands");
@@ -822,26 +963,21 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
     }
   }
 
-  bool enabled_before = is_cal ? cfg->getEqCalibrationEnabled() : cfg->getEqPreferenceEnabled();
-  bool enabled = jbool(body, "enabled", enabled_before);
-
-  if (is_cal) {
-    cfg->setEqCalibration(bands);
-    cfg->setEqCalibrationEnabled(enabled);
-  } else {
-    cfg->setEqPreference(bands);
-    cfg->setEqPreferenceEnabled(enabled);
-  }
+  const bool enabled = jbool(body, "enabled", cfg->getEqEnabled());
+  cfg->setEqBands(bands);
+  cfg->setEqEnabled(enabled);
   cJSON_Delete(body);
 
   if (&on_eq_changed) on_eq_changed();
 
   // Reply with the full curve as stored (post-clamp) so the UI can
-  // reconcile. We also include the updated headroom block — any EQ edit
-  // can change the peak gain and thus the auto headroom.
-  const uint8_t out_bc = is_cal ? cfg->getEqCalibrationActiveBands() : cfg->getEqPreferenceActiveBands();
-  cJSON* rj = curveToJson(bands, enabled, out_bc);
-  cJSON_AddStringToObject(rj, "layer", layer);
+  // reconcile. Include the updated headroom block — any EQ edit can
+  // change the peak gain and thus the auto headroom — plus the backend
+  // label and per-board cap so the SPA can render its "hardware / software
+  // (fallback)" status hint.
+  cJSON* rj = curveToJson(bands, enabled, cfg->getEqActiveBands());
+  cJSON_AddNumberToObject(rj, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
+  cJSON_AddStringToObject(rj, "backend", g_eq_backend);
   cJSON* hr = cJSON_CreateObject();
   cJSON_AddStringToObject(hr, "mode",
                           cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
@@ -878,32 +1014,46 @@ static esp_err_t handle_post_eq_headroom(httpd_req_t* req) {
 
 // ---- /api/eq/presets -----------------------------------------------------
 
-static constexpr uint32_t kPresetMagic = 0x32504745u;  // 'EGP2' LE
-static constexpr uint16_t kPresetVersion = 2;
+// Preset file format history:
+//   V1 (pre-Phase-1): 32-byte name + 10 bands × 12 bytes (freq/gain/Q).
+//   V2 (Phase-1..2)  : magic + version + band_count + reserved + 32-byte name +
+//                      10 bands × 16 bytes.
+//   V3 (this refactor): same header + 15 bands × 16 bytes. `band_count` is
+//                       the user-active count (1..15).
+static constexpr uint32_t kPresetMagic = 0x33504745u;   // 'EGP3' LE
+static constexpr uint32_t kPresetMagicV2 = 0x32504745u; // 'EGP2' LE — read-only
+static constexpr uint16_t kPresetVersion = 3;
+static constexpr size_t kPresetV2BandCount = 10;
 
 #pragma pack(push, 1)
-struct PresetFileV2 {
+struct PresetFileV3 {
   uint32_t magic;
   uint16_t version;
   uint8_t band_count;
   uint8_t reserved;
   char name[PRESET_NAME_MAX];
-  ParametricBand bands[PARAMETRIC_BANDS];
+  ParametricBand bands[PARAMETRIC_BANDS];  // 15 slots
 };
 #pragma pack(pop)
 
-static void presetMigrate12(const uint8_t* src120, ParametricBand out[PARAMETRIC_BANDS]) {
+static void presetMigrate12(const uint8_t* src, size_t src_bands, ParametricBand out[PARAMETRIC_BANDS]) {
+  // Match ConfigManager::loadDefaultEqBands defaults for the tail.
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
-    float f, g, q;
-    memcpy(&f, src120 + i * 12, sizeof(float));
-    memcpy(&g, src120 + i * 12 + 4, sizeof(float));
-    memcpy(&q, src120 + i * 12 + 8, sizeof(float));
-    out[i].freq_hz = f;
-    out[i].gain_db = g;
-    out[i].q = q;
+    out[i].freq_hz = 1000.f;
+    out[i].gain_db = 0.f;
+    out[i].q = 1.2f;
     out[i].type = geelen::EqFilterType::Bell;
     out[i].slope_db_oct = 12;
     out[i]._pad[0] = out[i]._pad[1] = 0;
+  }
+  for (size_t i = 0; i < src_bands && i < PARAMETRIC_BANDS; ++i) {
+    float f, g, q;
+    memcpy(&f, src + i * 12, sizeof(float));
+    memcpy(&g, src + i * 12 + 4, sizeof(float));
+    memcpy(&q, src + i * 12 + 8, sizeof(float));
+    out[i].freq_hz = f;
+    out[i].gain_db = g;
+    out[i].q = q;
   }
 }
 
@@ -911,38 +1061,71 @@ static void presetPath(char out[64], size_t idx) {
   snprintf(out, 64, "%s/pref_%u.bin", PRESETS_DIR, (unsigned)idx);
 }
 
-static bool presetReadV2(size_t idx, PresetFileV2* out) {
+static bool presetReadV3(size_t idx, PresetFileV3* out) {
   char path[64];
   presetPath(path, idx);
   int fd = open(path, O_RDONLY);
   if (fd < 0) return false;
-  uint8_t buf[256];
+  uint8_t buf[512];
   ssize_t r = read(fd, buf, sizeof(buf));
   close(fd);
-  constexpr ssize_t kOld = (ssize_t)(PRESET_NAME_MAX + PARAMETRIC_BANDS * 12u + 8u);
-  constexpr ssize_t kNew = (ssize_t)sizeof(PresetFileV2);
-  if (r >= kNew) {
+
+  constexpr ssize_t kV3 = (ssize_t)sizeof(PresetFileV3);
+  constexpr ssize_t kV2 = (ssize_t)(8u + PRESET_NAME_MAX + kPresetV2BandCount * sizeof(ParametricBand));
+  constexpr ssize_t kV1 = (ssize_t)(PRESET_NAME_MAX + kPresetV2BandCount * 12u + 8u);
+
+  // V3 (current).
+  if (r >= kV3) {
     memcpy(out, buf, sizeof(*out));
     if (out->magic == kPresetMagic && out->version == kPresetVersion) {
       if (out->band_count < 1 || out->band_count > (uint8_t)PARAMETRIC_BANDS)
         out->band_count = (uint8_t)PARAMETRIC_BANDS;
+      out->name[PRESET_NAME_MAX - 1] = '\0';
       return true;
     }
   }
-  if (r >= kOld) {
+  // V2 header shape — same field layout, 10 bands.
+  if (r >= kV2) {
+    uint32_t magic;
+    memcpy(&magic, buf, sizeof(magic));
+    if (magic == kPresetMagicV2) {
+      out->magic = kPresetMagic;
+      out->version = kPresetVersion;
+      uint8_t band_count = buf[6];
+      out->band_count = (band_count >= 1 && band_count <= kPresetV2BandCount) ? band_count
+                                                                              : (uint8_t)kPresetV2BandCount;
+      out->reserved = 0;
+      memcpy(out->name, buf + 8, PRESET_NAME_MAX);
+      out->name[PRESET_NAME_MAX - 1] = '\0';
+      // Reset slots to defaults, then copy the 10 V2 bands.
+      for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
+        out->bands[i].freq_hz = 1000.f;
+        out->bands[i].gain_db = 0.f;
+        out->bands[i].q = 1.2f;
+        out->bands[i].type = geelen::EqFilterType::Bell;
+        out->bands[i].slope_db_oct = 12;
+        out->bands[i]._pad[0] = out->bands[i]._pad[1] = 0;
+      }
+      memcpy(out->bands, buf + 8 + PRESET_NAME_MAX,
+             kPresetV2BandCount * sizeof(ParametricBand));
+      return true;
+    }
+  }
+  // V1 (12-byte-per-band, no magic header).
+  if (r >= kV1) {
     memcpy(out->name, buf, PRESET_NAME_MAX);
     out->name[PRESET_NAME_MAX - 1] = '\0';
-    presetMigrate12(buf + PRESET_NAME_MAX, out->bands);
+    presetMigrate12(buf + PRESET_NAME_MAX, kPresetV2BandCount, out->bands);
     out->magic = kPresetMagic;
     out->version = kPresetVersion;
-    out->band_count = (uint8_t)PARAMETRIC_BANDS;
+    out->band_count = (uint8_t)kPresetV2BandCount;
     out->reserved = 0;
     return true;
   }
   return false;
 }
 
-static bool presetWriteV2(size_t idx, const PresetFileV2* in) {
+static bool presetWriteV3(size_t idx, const PresetFileV3* in) {
   (void)mkdir(PRESETS_DIR, 0777);
   char path[64];
   presetPath(path, idx);
@@ -963,7 +1146,7 @@ static esp_err_t handle_get_presets(httpd_req_t* req) {
   if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
 
   cJSON* root = cJSON_CreateObject();
-  uint8_t active = cfg->getEqPreferenceSlot();
+  uint8_t active = cfg->getEqActiveSlot();
   if (active == 0xFF) cJSON_AddNullToObject(root, "active");
   else                cJSON_AddNumberToObject(root, "active", active);
 
@@ -971,8 +1154,8 @@ static esp_err_t handle_get_presets(httpd_req_t* req) {
   for (size_t i = 0; i < PRESET_SLOT_COUNT; ++i) {
     cJSON* s = cJSON_CreateObject();
     cJSON_AddNumberToObject(s, "index", i);
-    PresetFileV2 pf{};
-    const bool saved = presetReadV2(i, &pf);
+    PresetFileV3 pf{};
+    const bool saved = presetReadV3(i, &pf);
     if (saved) {
       pf.name[PRESET_NAME_MAX - 1] = '\0';
       cJSON_AddStringToObject(s, "name", pf.name);
@@ -1040,7 +1223,7 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
 
   if (req->method == HTTP_DELETE) {
     bool deleted = presetDelete(idx);
-    if ((uint8_t)idx == cfg->getEqPreferenceSlot()) cfg->setEqPreferenceSlot(0xFF);
+    if ((uint8_t)idx == cfg->getEqActiveSlot()) cfg->setEqActiveSlot(0xFF);
     cJSON* r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "index", (double)idx);
     cJSON_AddBoolToObject(r, "deleted", deleted);
@@ -1054,19 +1237,19 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     cJSON* body = parse_body(req);
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
-    PresetFileV2 pf{};
+    PresetFileV3 pf{};
     pf.magic = kPresetMagic;
     pf.version = kPresetVersion;
-    pf.band_count = cfg->getEqPreferenceActiveBands();
+    pf.band_count = cfg->getEqActiveBands();
     pf.reserved = 0;
     if (name && *name) strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     else snprintf(pf.name, PRESET_NAME_MAX, "Preset %u", (unsigned)(idx + 1));
     pf.name[PRESET_NAME_MAX - 1] = '\0';
-    cfg->getEqPreference(pf.bands);
-    const bool ok = presetWriteV2(idx, &pf);
+    cfg->getEqBands(pf.bands);
+    const bool ok = presetWriteV3(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
-    cfg->setEqPreferenceSlot((uint8_t)idx);
+    cfg->setEqActiveSlot((uint8_t)idx);
     cJSON* rj = cJSON_CreateObject();
     cJSON_AddNumberToObject(rj, "index", (double)idx);
     cJSON_AddStringToObject(rj, "name", pf.name);
@@ -1075,18 +1258,20 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
   }
 
   if (!strcmp(action, "load")) {
-    PresetFileV2 pf{};
-    if (!presetReadV2(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
-    cfg->setEqPreference(pf.bands);
-    cfg->setEqPreferenceActiveBands(pf.band_count);
-    cfg->setEqPreferenceSlot((uint8_t)idx);
+    PresetFileV3 pf{};
+    if (!presetReadV3(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
+    cfg->setEqBands(pf.bands);
+    uint8_t bc = pf.band_count;
+    if (bc > HAL_EQ_MAX_BANDS_ACTIVE) bc = HAL_EQ_MAX_BANDS_ACTIVE;
+    cfg->setEqActiveBands(bc);
+    cfg->setEqActiveSlot((uint8_t)idx);
     if (&on_eq_changed) on_eq_changed();
     cJSON* rj = cJSON_CreateObject();
     cJSON_AddNumberToObject(rj, "index", (double)idx);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
     cJSON_AddStringToObject(rj, "name", pf.name);
-    cJSON_AddItemToObject(rj, "preference",
-                          curveToJson(pf.bands, cfg->getEqPreferenceEnabled(), cfg->getEqPreferenceActiveBands()));
+    cJSON_AddItemToObject(rj, "eq",
+                          curveToJson(pf.bands, cfg->getEqEnabled(), cfg->getEqActiveBands()));
     return send_json(req, rj);
   }
 
@@ -1095,11 +1280,11 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
     if (!name || !*name) { cJSON_Delete(body); return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required"); }
-    PresetFileV2 pf{};
-    if (!presetReadV2(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
+    PresetFileV3 pf{};
+    if (!presetReadV3(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
     strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
-    const bool ok = presetWriteV2(idx, &pf);
+    const bool ok = presetWriteV3(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
     cJSON* rj = cJSON_CreateObject();
@@ -1314,7 +1499,40 @@ static esp_err_t handle_get_wifi_state(httpd_req_t* req) {
   cJSON_AddStringToObject(root, "ip", ip_buf);
   cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
   cJSON_AddStringToObject(root, "ap_ip", ap_ip_buf);
+  cJSON_AddStringToObject(root, "state",
+                          s_wifi_mgr ? s_wifi_mgr->probeStateName() : "idle");
   return send_json(req, root);
+}
+
+static esp_err_t handle_post_wifi_validate(httpd_req_t* req) {
+  if (!s_wifi_mgr) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no wifi mgr");
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+  const char* ssid = jstr(body, "ssid", "");
+  const char* pass = jstr(body, "pass", "");
+  WifiProbeResult r{};
+  bool ok = s_wifi_mgr->probeCredentials(ssid, pass, 12000, &r);
+  cJSON_Delete(body);
+  cJSON* out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "ok", ok);
+  cJSON_AddStringToObject(out, "reason", r.reason);
+  cJSON_AddStringToObject(out, "detail", r.detail);
+  if (r.ip[0]) cJSON_AddStringToObject(out, "ip", r.ip);
+  return send_json(req, out);
+}
+
+static esp_err_t handle_post_wifi_commit(httpd_req_t* req) {
+  if (!s_wifi_mgr) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no wifi mgr");
+  (void)req;
+  if (!s_wifi_mgr->commitValidated()) {
+    return send_err_json(req, HTTPD_400_BAD_REQUEST, "no successful validate in this session");
+  }
+  cJSON* out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "ok", true);
+  cJSON_AddBoolToObject(out, "reboot", true);
+  esp_err_t e = send_json(req, out);
+  scheduleRestart(800);
+  return e;
 }
 
 // ---- /api/reset -----------------------------------------------------------
@@ -1337,7 +1555,10 @@ static esp_err_t handle_post_reset(httpd_req_t* req) {
   else if (!strcmp(scope, "dlna"))         { cfg->resetDlna(); }
   else if (!strcmp(scope, "eq"))           { cfg->resetEq();
                                              if (&on_eq_changed) on_eq_changed(); }
-  else if (!strcmp(scope, "audio"))        { cfg->resetAudio(); }
+  else if (!strcmp(scope, "audio"))        { cfg->resetAudio();
+                                             if (&on_volume_changed) on_volume_changed();
+                                             if (&on_channels_changed) on_channels_changed();
+                                             if (&on_led_changed) on_led_changed(); }
   else if (!strcmp(scope, "all") || !strcmp(scope, "factory")) {
     cfg->factoryReset(); reboot = true;
   } else {
@@ -1378,10 +1599,13 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/system",             HTTP_GET,    handle_get_system);
   reg("/api/system/metrics",     HTTP_GET,    handle_get_system_metrics);
   reg("/api/system/identity",    HTTP_GET,    handle_get_system_identity);
+  reg("/api/system/summary",     HTTP_GET,    handle_get_system_summary);
+  reg("/api/system/tasks",       HTTP_GET,    handle_get_system_tasks);
   reg("/api/test-tone",          HTTP_GET,    handle_get_test_tone);
   reg("/api/test-tone",          HTTP_POST,   handle_post_test_tone);
   reg("/api/volume",             HTTP_POST,   handle_post_volume);
   reg("/api/channels",           HTTP_POST,   handle_post_channels);
+  reg("/api/led",                HTTP_POST,   handle_post_led);
   reg("/api/mode",               HTTP_POST,   handle_post_mode);
   reg("/api/snapcast",           HTTP_POST,   handle_post_snapcast);  // Overrides legacy form handler; JSON-only.
   reg("/api/dlna",               HTTP_POST,   handle_post_dlna);
@@ -1397,6 +1621,8 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/reset",              HTTP_POST,   handle_post_reset);
   reg("/api/wifi/scan",          HTTP_GET,    handle_get_wifi_scan);
   reg("/api/wifi/state",         HTTP_GET,    handle_get_wifi_state);
+  reg("/api/wifi/validate",      HTTP_POST,   handle_post_wifi_validate);
+  reg("/api/wifi/commit",        HTTP_POST,   handle_post_wifi_commit);
   reg("/api/wifi/power-save",    HTTP_POST,   handle_post_wifi_power_save);
 }
 

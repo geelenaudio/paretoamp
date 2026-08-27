@@ -1,4 +1,12 @@
-// ESP-IDF Bluetooth A2DP sink implementation.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// ESP-IDF Bluetooth A2DP sink implementation. Whole file collapses to empty
+// when BT Classic is disabled (S3 targets); see idf_a2dp_sink.h.
+
+#include "sdkconfig.h"
+
+#if CONFIG_BT_ENABLED
 
 #include "idf_a2dp_sink.h"
 
@@ -15,6 +23,12 @@
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/stream_buffer.h"
+#include "freertos/idf_additions.h"
+
+#include <atomic>
 #include <vector>
 #include <cstring>
 
@@ -28,6 +42,12 @@ static bool s_have_carry_frame = false;
 static int16_t s_carry_frame[2] = {0, 0};  // stereo
 static uint32_t s_pos_q16 = 0;
 static uint32_t s_step_adj_q16 = 0;  // multiplicative adjustment (Q16.16), around 1.0
+static StreamBufferHandle_t s_pcm_sb = nullptr;
+static std::atomic<bool> s_a2dp_playing{false};
+
+bool a2dpPlaybackActive() {
+  return s_a2dp_playing.load(std::memory_order_relaxed);
+}
 
 static uint32_t sbcSampleRateFromMask(uint8_t mask) {
   // Prefer higher rates if multiple bits are set.
@@ -113,7 +133,31 @@ bool A2dpSink::begin(const char* device_name) {
   ESP_ERROR_CHECK(esp_a2d_sink_register_data_callback(&A2dpSink::a2dpDataCb_));
   ESP_ERROR_CHECK(esp_a2d_sink_init());
 
-  ESP_LOGI(TAG, "A2DP sink started as '%s'", device_name);
+  // Both the PCM bounce buffer and the pump task stack live in PSRAM.
+  // Putting them in internal DRAM (the IDF default) left ~3.7 KiB free
+  // with a 736-byte largest block after Bluedroid init — too small for
+  // lwip pbufs, so the SPA at :80 hung after boot. The data callback is
+  // not an ISR, so PSRAM copies are safe.
+  if (!s_pcm_sb) {
+    s_pcm_sb = xStreamBufferCreateWithCaps(8192, 4, MALLOC_CAP_SPIRAM);
+    if (!s_pcm_sb) {
+      ESP_LOGE(TAG, "a2dp pcm StreamBuffer create failed");
+      return false;
+    }
+  }
+  if (xTaskCreatePinnedToCoreWithCaps(&A2dpSink::pumpTask_, "a2dp_pump", 4096,
+                                      nullptr, 12, nullptr, 1,
+                                      MALLOC_CAP_SPIRAM) != pdPASS) {
+    ESP_LOGE(TAG, "a2dp_pump task create failed");
+    return false;
+  }
+
+  const size_t free_after =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t lblk_after =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  ESP_LOGI(TAG, "A2DP sink started as '%s' (post-init int8=%u B free, %u B largest)",
+           device_name, (unsigned)free_after, (unsigned)lblk_after);
   return true;
 }
 
@@ -132,6 +176,8 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
     case ESP_A2D_AUDIO_STATE_EVT:
       if (param) {
         ESP_LOGI(TAG, "Audio state: %d", (int)param->audio_stat.state);
+        s_a2dp_playing.store(param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED,
+                             std::memory_order_relaxed);
       }
       break;
     case ESP_A2D_AUDIO_CFG_EVT:
@@ -158,31 +204,44 @@ void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
 }
 
 void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
-  if (!engine_ || !data || len == 0) return;
-  // Voice prompts share the engine ring via `feedPCM`. While any prompt is in
-  // flight (including its tail-drain margin) the voice owner refcount is up;
-  // SBC PCM mixed in here would splice over the clip and we'd lose tails like
-  // "… Mode" or skip "Bluetooth connected" entirely. Single source of truth.
-  if (geelen_idf::voiceFeedbackActive()) {
-    return;
+  if (!data || len == 0) return;
+  if (geelen_idf::voiceFeedbackActive()) return;
+  if (!s_pcm_sb) return;
+  size_t sent = xStreamBufferSend(s_pcm_sb, data, len, 0);
+  if (sent < len) {
+    static uint64_t s_last_drop_log = 0;
+    uint64_t now = (uint64_t)xTaskGetTickCount();
+    if (now - s_last_drop_log > pdMS_TO_TICKS(1000)) {
+      s_last_drop_log = now;
+      ESP_LOGW(TAG, "a2dp_pump StreamBuffer full, dropped %u bytes", (unsigned)(len - sent));
+    }
   }
+}
 
-  // Data is stereo 16-bit PCM decoded from SBC by Bluedroid.
+void A2dpSink::pumpTask_(void* /*arg*/) {
+  uint8_t buf[1024];
+  ESP_LOGI(TAG, "a2dp_pump up (core 1, prio 12)");
+  for (;;) {
+    size_t n = xStreamBufferReceive(s_pcm_sb, buf, sizeof(buf), portMAX_DELAY);
+    if (n > 0) resampleAndFeed_(buf, (uint32_t)n);
+  }
+}
+
+void A2dpSink::resampleAndFeed_(const uint8_t* data, uint32_t len) {
+  if (!engine_ || !data || len == 0) return;
+  if (geelen_idf::voiceFeedbackActive()) return;
+
   const int16_t* in = reinterpret_cast<const int16_t*>(data);
   const size_t in_samples = len / sizeof(int16_t);
   if (in_samples < 2) return;
   const size_t in_frames = in_samples / 2;
 
-  // Drift control: keep the engine ring around ~1.0s filled to absorb BT jitter without
-  // accumulating latency. If the I2S clock is slightly off, this also prevents long-term
-  // buffer growth/shrink which causes artifacts.
   const size_t fill = engine_->bufferedFrames();
   const size_t cap = geelen::RING_BUF_SAMPLES;
-  const size_t target = geelen::SAMPLE_RATE;  // ~1s
+  const size_t target = geelen::SAMPLE_RATE;
   if (cap > 0) {
     int32_t err = (int32_t)fill - (int32_t)target;
-    // Map error to a small rate tweak (±2%). Positive err => buffer too full => speed up.
-    int32_t ppm = (err * 20000) / (int32_t)cap;  // about ±20k ppm = ±2%
+    int32_t ppm = (err * 20000) / (int32_t)cap;
     if (ppm > 20000) ppm = 20000;
     if (ppm < -20000) ppm = -20000;
     s_step_adj_q16 = (uint32_t)((1 << 16) + (int32_t)((int64_t)ppm * (1 << 16) / 1000000LL));
@@ -190,8 +249,6 @@ void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
     s_step_adj_q16 = (1 << 16);
   }
 
-  // Resample to 44.1kHz (engine/I2S) using linear interpolation.
-  // Build a contiguous input window: optional carry frame + current buffer.
   static std::vector<int16_t> window;
   window.resize((in_frames + (s_have_carry_frame ? 1 : 0)) * 2);
   size_t w_frames = 0;
@@ -205,11 +262,9 @@ void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
 
   if (w_frames < 2) return;
 
-  // Always run through the resampler so we can apply the drift adjustment even when
-  // input is nominally 44.1kHz.
   const uint32_t base_step = (uint32_t)(((uint64_t)s_bt_pcm_hz << 16) / (uint64_t)geelen::SAMPLE_RATE);
   const uint32_t step = (uint32_t)(((uint64_t)base_step * (uint64_t)s_step_adj_q16) >> 16);
-  const uint32_t end_q16 = (uint32_t)((w_frames - 1) << 16);  // need i1 within range
+  const uint32_t end_q16 = (uint32_t)((w_frames - 1) << 16);
 
   static std::vector<int16_t> out;
   out.clear();
@@ -233,12 +288,9 @@ void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
     s_pos_q16 += step;
   }
 
-  // Keep last frame for interpolation continuity across callbacks.
   s_carry_frame[0] = window[(w_frames - 1) * 2];
   s_carry_frame[1] = window[(w_frames - 1) * 2 + 1];
   s_have_carry_frame = true;
-
-  // Wrap phase to keep it small.
   s_pos_q16 -= end_q16;
 
   if (!out.empty()) {
@@ -248,3 +300,4 @@ void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
 
 }  // namespace geelen_idf
 
+#endif  // CONFIG_BT_ENABLED

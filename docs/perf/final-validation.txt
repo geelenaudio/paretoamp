@@ -1,0 +1,80 @@
+Phase 9 final on-device validation — Amped-WROVER /dev/ttyUSB0
+==============================================================
+
+Date: 2026-08-27
+Branch: refactor/single-eq-multi-board
+Firmware: e75ddb1-dirty  (ESP-IDF 5.5.2, compile 12:59)
+Flash: pio run -e amped-esp32-idf -t upload  AND  -t uploadfs
+       NVS was NOT erased (migration path).
+
+Host compile matrix
+-------------------
+    pio test -e native              30/30 passed (includes Q1.31 BQ tests)
+    pio run -e amped-esp32-idf      SUCCESS, flashed
+    pio run -e amped-esp32s3-idf    SUCCESS, build-only
+    pio run -e louder-esp32-idf     SUCCESS, build-only
+    pio run -e louder-esp32s3-idf   SUCCESS, build-only
+
+Boot
+----
+    Board: Amped-ESP32 (WROVER-N8R8) (EQ max 10 bands, HW PEQ no)
+    Amp enable (GPIO 13) HIGH
+    STA geelenioIoT → 10.0.80.20  (wifi_ever_connected_ok path; no AP)
+    a2dp_pump up (core 1, prio 6)
+    HTTP server started; SPA / → 200; /COPYING → 200 (12136 bytes)
+
+NVS migration
+-------------
+    Volume / Snapcast host / channel routing preserved.
+    EQ blob (15-band storage) preserved.
+    eq_nb had been persisted as 1 by an earlier WIP flash; load() raised it
+    to 8 from non-flat bands (first 8 slots of the user curve).
+    /api/state.eq = {enabled:true, band_count:8, max_bands:10, backend:"software"}
+
+API smoke
+---------
+    GET /api/state            200, P95 idle 64–75 ms (n=25)
+    GET /api/system/summary   200, no audio meters
+    GET /api/system/metrics   200, includes audio.out
+    GET /api/system/tasks     200, includes a2dp_pump
+    GET /COPYING              200
+    GET /                    200
+
+Wi-Fi validate/commit
+---------------------
+    Captive-AP (phone on Geelen-Audio) path is the designed flow; the AP
+    stays up during probe.
+
+    STA-mode probe from this laptop (POST /api/wifi/validate with the
+    current SSID + a wrong password):
+        I (36744) WiFi: probe start ssid='geelenioIoT'
+        W (36784) WiFi: STA disconnected (reason=8) [probe]   // ignored (local leave)
+        W (39594) WiFi: STA disconnected (reason=2) [probe]
+        I (39714) WiFi: probe fail ssid='geelenioIoT' reason=AUTH_FAIL
+        I (45014) WiFi: STA connected
+        I (46044) WiFi: STA got IP: 10.0.80.20
+
+    No reboot. Previous STA restored via the reconnect ladder.
+    HTTP client on STA timed out (expected: the STA iface left the AP so
+    the in-flight TCP could not carry the JSON reply). After the probe,
+    large /api/state responses stalled until a reset; small endpoints
+    (/api/status, /api/system/summary) kept working. Captured as a
+    follow-up in docs/roadmap.md (STA-mode validate should be 202+poll).
+
+    Factory-reset-Wi-Fi + captive wrong-password loop was NOT run from
+    this host (no second radio to join Geelen-Audio).
+
+Manual test matrix (docs/manual-test-matrix.md)
+-----------------------------------------------
+    [x] Boot, no reboot-loop
+    [x] HTTP / and /api/status
+    [x] NVS kept (not erased); preference EQ still present
+    [x] Volume / source reflected in /api/status
+    [ ] Bluetooth play/reconnect — no phone in this session
+    [ ] Snapclient 2–5 min — not run
+    [x] Heap after boot: free_heap ~2.0 MiB (PSRAM in the heap), min_free ~1.6 MiB
+
+S3 / Louder
+-----------
+    Build-validated only. Pin maps are DevKitC-1 / sonocotta defaults.
+    See docs/hardware/*.md and docs/roadmap.md.

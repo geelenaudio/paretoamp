@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // ESP-IDF ConfigManager implementation (NVS + esp_littlefs).
 
 #include "idf_config_manager.h"
@@ -14,6 +17,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 #include <sys/stat.h>
 
 namespace geelen_idf {
@@ -30,6 +34,7 @@ static const char* NVS_KEY_SNAP_HOST     = "snap_h";
 static const char* NVS_KEY_SNAP_PORT     = "snap_p";
 static const char* NVS_KEY_WIFI_SSID     = "wifi_ssid";
 static const char* NVS_KEY_WIFI_PASS     = "wifi_pass";
+static const char* NVS_KEY_WIFI_EVER     = "wifi_ever";
 // Legacy NVS key retained so we can erase credentials from devices that previously
 // booted with Spotify Connect enabled. Not written by the current firmware.
 static const char* NVS_KEY_LEGACY_SPOTIFY = "spotify_js";
@@ -41,13 +46,26 @@ static const char* NVS_KEY_MUTED         = "muted";
 static const char* NVS_KEY_CH_MODE       = "ch_mode";
 static const char* NVS_KEY_CH_L_ON       = "ch_l_on";
 static const char* NVS_KEY_CH_R_ON       = "ch_r_on";
-static const char* NVS_KEY_EQ_CAL        = "eq_cal";
-static const char* NVS_KEY_EQ_CAL_ON     = "eq_cal_on";
-static const char* NVS_KEY_EQ_PREF       = "eq_pref";
-static const char* NVS_KEY_EQ_PREF_ON    = "eq_pref_on";
-static const char* NVS_KEY_EQ_PREF_SLOT  = "eq_pref_sl";
-static const char* NVS_KEY_EQ_CAL_NB     = "eq_cal_nb";
-static const char* NVS_KEY_EQ_PREF_NB    = "eq_pref_nb";
+static const char* NVS_KEY_LED_R         = "led_r";
+static const char* NVS_KEY_LED_G         = "led_g";
+static const char* NVS_KEY_LED_B         = "led_b";
+static const char* NVS_KEY_LED_BRI       = "led_bri";
+static const char* NVS_KEY_LED_USER      = "led_user";
+// Single-layer PEQ storage. Legacy dual-layer keys (`eq_cal*`, `eq_pref*`)
+// are read on load and migrated into `eq_bands`; the writer only touches
+// the new key set below.
+static const char* NVS_KEY_EQ_BANDS      = "eq_bands";
+static const char* NVS_KEY_EQ_ON         = "eq_on";
+static const char* NVS_KEY_EQ_NB         = "eq_nb";
+static const char* NVS_KEY_EQ_SLOT       = "eq_slot";
+// Legacy keys (read-only after migration).
+static const char* NVS_KEY_LEGACY_EQ_CAL        = "eq_cal";
+static const char* NVS_KEY_LEGACY_EQ_CAL_ON     = "eq_cal_on";
+static const char* NVS_KEY_LEGACY_EQ_PREF       = "eq_pref";
+static const char* NVS_KEY_LEGACY_EQ_PREF_ON    = "eq_pref_on";
+static const char* NVS_KEY_LEGACY_EQ_PREF_SLOT  = "eq_pref_sl";
+static const char* NVS_KEY_LEGACY_EQ_CAL_NB     = "eq_cal_nb";
+static const char* NVS_KEY_LEGACY_EQ_PREF_NB    = "eq_pref_nb";
 static const char* NVS_KEY_EQ_HR_MODE    = "eq_hr_mode";
 static const char* NVS_KEY_EQ_HR_MANUAL  = "eq_hr_man";
 static const char* NVS_KEY_DEV_NAME      = "dev_name";
@@ -85,10 +103,17 @@ static const int8_t FIXED_PRESET_EQ[][EQ_BANDS] = {
   { -3, -2, -1, 0, 1, 2, 3, 4, 4, 5 },
 };
 
-// ISO-262 third-octave centres approximately matching the old 10-band graphic EQ.
+// ISO-262 third-octave centres matching the old 10-band graphic EQ, extended
+// out to 15 bands so a Louder-shaped preset gets sensible defaults for the
+// extra slots the SPA exposes.
+static constexpr size_t kLegacyIsoBaseCount = 10;
 static constexpr float kLegacyIsoCentres[PARAMETRIC_BANDS] = {
   31.5f, 63.0f, 125.0f, 250.0f, 500.0f,
   1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f,
+  // Louder-specific extras — placeholders above 16 kHz so the SPA renders
+  // them at the top of the band list rather than colliding with existing
+  // centres. Users typically re-place these on load.
+  17000.0f, 18000.0f, 19000.0f, 20000.0f, 22050.0f,
 };
 
 static void mountSpiffsOnce() {
@@ -115,7 +140,7 @@ ConfigManager::ConfigManager() {
   wifi_pass_[0] = '\0';
 }
 
-void ConfigManager::loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) {
+void ConfigManager::loadDefaultEqBands(ParametricBand out[PARAMETRIC_BANDS]) {
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
     out[i].freq_hz = kLegacyIsoCentres[i];
     out[i].gain_db = 0.f;
@@ -126,7 +151,16 @@ void ConfigManager::loadDefaultEqCalibration(ParametricBand out[PARAMETRIC_BANDS
   }
 }
 
-void ConfigManager::loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]) {
+// Migration helpers for the two on-disk formats we still expect to encounter:
+//   - 12-byte-per-band (freq/gain/q as three floats, pre-Phase-1)
+//   - 16-byte-per-band (full `ParametricBand`, dual-layer era)
+// Both stored exactly 10 bands. The 10 → 15 band expansion pads the tail
+// with defaults from `kLegacyIsoCentres`.
+
+// Fill `out` with the same defaults as ConfigManager::loadDefaultEqBands.
+// Duplicated as a free function so migration helpers below don't need
+// access to the private static — keeps the class header narrower.
+static void fillDefaultBands(ParametricBand out[PARAMETRIC_BANDS]) {
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
     out[i].freq_hz = kLegacyIsoCentres[i];
     out[i].gain_db = 0.f;
@@ -137,8 +171,10 @@ void ConfigManager::loadDefaultEqPreference(ParametricBand out[PARAMETRIC_BANDS]
   }
 }
 
-static void migrateLegacy12ByteEqBlob(const uint8_t* src, ParametricBand out[PARAMETRIC_BANDS]) {
-  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
+static void migrateLegacy12ByteEqBlob(const uint8_t* src, size_t src_bands,
+                                       ParametricBand out[PARAMETRIC_BANDS]) {
+  fillDefaultBands(out);
+  for (size_t i = 0; i < src_bands && i < PARAMETRIC_BANDS; ++i) {
     float f, g, q;
     memcpy(&f, src + i * 12, sizeof(float));
     memcpy(&g, src + i * 12 + 4, sizeof(float));
@@ -152,6 +188,14 @@ static void migrateLegacy12ByteEqBlob(const uint8_t* src, ParametricBand out[PAR
   }
 }
 
+static void migrateLegacy16ByteEqBlob(const ParametricBand* src, size_t src_bands,
+                                       ParametricBand out[PARAMETRIC_BANDS]) {
+  fillDefaultBands(out);
+  for (size_t i = 0; i < src_bands && i < PARAMETRIC_BANDS; ++i) {
+    out[i] = src[i];
+  }
+}
+
 void ConfigManager::loadDefaults() {
   config_ = Config{};  // zero everything first
   config_.volume = VOLUME_DEFAULT;
@@ -161,15 +205,17 @@ void ConfigManager::loadDefaults() {
   config_.stereo_mode = StereoMode::Stereo;
   config_.ch_l_on = true;
   config_.ch_r_on = true;
+  config_.led_r = 255;
+  config_.led_g = 255;
+  config_.led_b = 255;
+  config_.led_bri = 0;
+  config_.led_user = false;
   config_.preset_id = 0;
   for (size_t i = 0; i < EQ_BANDS; i++) config_.eq_gains[i] = FIXED_PRESET_EQ[0][i];
-  loadDefaultEqCalibration(config_.eq_cal);
-  config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_cal_on = false;
-  loadDefaultEqPreference(config_.eq_pref);
-  config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_pref_on = false;
-  config_.eq_pref_slot = 0xFF;  // "unsaved"
+  loadDefaultEqBands(config_.eq_bands);
+  config_.eq_active_bands = (uint8_t)PARAMETRIC_BANDS;
+  config_.eq_on = false;
+  config_.eq_active_slot = 0xFF;  // "unsaved / modified"
   config_.eq_hr_mode = HeadroomMode::Auto;
   config_.eq_hr_manual_db = 0.0f;
   strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
@@ -183,6 +229,8 @@ void ConfigManager::loadDefaults() {
   snapcast_port_ = SNAPCAST_PORT_DEFAULT;
   wifi_ssid_[0] = '\0';
   wifi_pass_[0] = '\0';
+  wifi_ever_ok_ = false;
+  wifi_ever_flag_present_ = false;
   tt_freq_hz_ = 440.f;
   tt_amp_db_ = -12.f;
   tt_pan_ = 0.f;
@@ -264,6 +312,13 @@ bool ConfigManager::load() {
     config_.stereo_mode = (tmp8 == 1) ? StereoMode::Mono : StereoMode::Stereo;
   config_.ch_l_on = nvsGetBool(h, NVS_KEY_CH_L_ON, true);
   config_.ch_r_on = nvsGetBool(h, NVS_KEY_CH_R_ON, true);
+  if (nvs_get_u8(h, NVS_KEY_LED_R, &tmp8) == ESP_OK) config_.led_r = tmp8;
+  if (nvs_get_u8(h, NVS_KEY_LED_G, &tmp8) == ESP_OK) config_.led_g = tmp8;
+  if (nvs_get_u8(h, NVS_KEY_LED_B, &tmp8) == ESP_OK) config_.led_b = tmp8;
+  if (nvs_get_u8(h, NVS_KEY_LED_BRI, &tmp8) == ESP_OK) {
+    config_.led_bri = tmp8 > 100 ? 100 : tmp8;
+  }
+  config_.led_user = nvsGetBool(h, NVS_KEY_LED_USER, false);
 
   if (nvs_get_u8(h, NVS_KEY_PRESET, &config_.preset_id) != ESP_OK) ok = false;
 
@@ -273,55 +328,125 @@ bool ConfigManager::load() {
     nvs_get_blob(h, NVS_KEY_EQ_LEGACY, config_.eq_gains, &len) == ESP_OK &&
     len == EQ_BANDS * sizeof(int8_t);
 
-  // Parametric EQ curves (16 bytes × 10 = 160) or legacy 12 bytes × 10 = 120.
+  // Parametric EQ — single 15-band curve.
+  //
+  // Try the current 15-band blob first; if absent, fall back to the legacy
+  // 10-band `eq_pref` / `eq_cal` blobs (in that order — preference is what
+  // the user was actively editing before the refactor). Legacy blobs come
+  // in two on-disk shapes:
+  //   - 16 bytes/band × 10 = 160 bytes (dual-layer era)
+  //   - 12 bytes/band × 10 = 120 bytes (pre-Phase-1)
   {
-    uint8_t eq_blob[256];
+    uint8_t eq_blob[512];
     len = sizeof(eq_blob);
-    esp_err_t cal_err = nvs_get_blob(h, NVS_KEY_EQ_CAL, eq_blob, &len);
-    constexpr size_t kOldEq = PARAMETRIC_BANDS * 12u;
-    constexpr size_t kNewEq = sizeof(config_.eq_cal);
-    if (cal_err == ESP_OK && len == kNewEq) {
-      memcpy(config_.eq_cal, eq_blob, kNewEq);
-    } else if (cal_err == ESP_OK && len == kOldEq) {
-      migrateLegacy12ByteEqBlob(eq_blob, config_.eq_cal);
-    } else {
-      loadDefaultEqCalibration(config_.eq_cal);
-      if (legacy_eq_present) {
-        ESP_LOGW(TAG, "Migrating legacy graphic-EQ gains to parametric calibration");
-        for (size_t i = 0; i < PARAMETRIC_BANDS; ++i)
-          config_.eq_cal[i].gain_db = (float)config_.eq_gains[i];
-        config_.eq_cal_on = true;
-        config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
-        markDirtyEq();
-      }
-    }
-  }
-  config_.eq_cal_on = nvsGetBool(h, NVS_KEY_EQ_CAL_ON, false);
-  if (nvs_get_u8(h, NVS_KEY_EQ_CAL_NB, &tmp8) != ESP_OK || tmp8 < 1 || tmp8 > (uint8_t)PARAMETRIC_BANDS)
-    config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  else
-    config_.eq_cal_active_bands = tmp8;
+    constexpr size_t kBands15  = PARAMETRIC_BANDS * sizeof(ParametricBand);          // 15*16 = 240
+    constexpr size_t kBands10  = 10u * sizeof(ParametricBand);                        // 10*16 = 160
+    constexpr size_t kBands10_12 = 10u * 12u;                                         // 10*12 = 120
 
-  {
-    uint8_t eq_blob[256];
-    len = sizeof(eq_blob);
-    esp_err_t pref_err = nvs_get_blob(h, NVS_KEY_EQ_PREF, eq_blob, &len);
-    constexpr size_t kOldEq = PARAMETRIC_BANDS * 12u;
-    constexpr size_t kNewEq = sizeof(config_.eq_pref);
-    if (pref_err == ESP_OK && len == kNewEq) {
-      memcpy(config_.eq_pref, eq_blob, kNewEq);
-    } else if (pref_err == ESP_OK && len == kOldEq) {
-      migrateLegacy12ByteEqBlob(eq_blob, config_.eq_pref);
+    if (nvs_get_blob(h, NVS_KEY_EQ_BANDS, eq_blob, &len) == ESP_OK && len == kBands15) {
+      memcpy(config_.eq_bands, eq_blob, kBands15);
     } else {
-      loadDefaultEqPreference(config_.eq_pref);
+      // Fall back to legacy `eq_pref` (user's active curve pre-refactor).
+      bool migrated = false;
+      len = sizeof(eq_blob);
+      if (nvs_get_blob(h, NVS_KEY_LEGACY_EQ_PREF, eq_blob, &len) == ESP_OK) {
+        if (len == kBands10) {
+          ESP_LOGW(TAG, "Migrating legacy `eq_pref` (10 bands, dual-layer) to `eq_bands`");
+          migrateLegacy16ByteEqBlob(reinterpret_cast<const ParametricBand*>(eq_blob), 10,
+                                    config_.eq_bands);
+          migrated = true;
+        } else if (len == kBands10_12) {
+          ESP_LOGW(TAG, "Migrating legacy `eq_pref` (10 bands, 12-byte) to `eq_bands`");
+          migrateLegacy12ByteEqBlob(eq_blob, 10, config_.eq_bands);
+          migrated = true;
+        }
+      }
+      // If no `eq_pref`, try `eq_cal` — some devices only ever populated the
+      // calibration layer (Snapclient's automatic RMS-matching pass).
+      if (!migrated) {
+        len = sizeof(eq_blob);
+        if (nvs_get_blob(h, NVS_KEY_LEGACY_EQ_CAL, eq_blob, &len) == ESP_OK) {
+          if (len == kBands10) {
+            ESP_LOGW(TAG, "Migrating legacy `eq_cal` (10 bands, dual-layer) to `eq_bands`");
+            migrateLegacy16ByteEqBlob(reinterpret_cast<const ParametricBand*>(eq_blob), 10,
+                                      config_.eq_bands);
+            migrated = true;
+          } else if (len == kBands10_12) {
+            ESP_LOGW(TAG, "Migrating legacy `eq_cal` (10 bands, 12-byte) to `eq_bands`");
+            migrateLegacy12ByteEqBlob(eq_blob, 10, config_.eq_bands);
+            migrated = true;
+          }
+        }
+      }
+      // Final fallback: graphic-EQ int8_t gains, migrated to bell filters.
+      if (!migrated) {
+        loadDefaultEqBands(config_.eq_bands);
+        if (legacy_eq_present) {
+          ESP_LOGW(TAG, "Migrating legacy graphic-EQ gains to `eq_bands`");
+          for (size_t i = 0; i < 10 && i < PARAMETRIC_BANDS; ++i)
+            config_.eq_bands[i].gain_db = (float)config_.eq_gains[i];
+          config_.eq_on = true;
+          config_.eq_active_bands = 10;
+        }
+      }
+      if (migrated) markDirtyEq();
     }
   }
-  config_.eq_pref_on = nvsGetBool(h, NVS_KEY_EQ_PREF_ON, false);
-  if (nvs_get_u8(h, NVS_KEY_EQ_PREF_NB, &tmp8) != ESP_OK || tmp8 < 1 || tmp8 > (uint8_t)PARAMETRIC_BANDS)
-    config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  else
-    config_.eq_pref_active_bands = tmp8;
-  if (nvs_get_u8(h, NVS_KEY_EQ_PREF_SLOT, &tmp8) == ESP_OK) config_.eq_pref_slot = tmp8;
+
+  // Enable flag: prefer the new key, fall back to whichever legacy layer was
+  // enabled (`eq_pref_on` takes precedence over `eq_cal_on`).
+  if (nvs_get_u8(h, NVS_KEY_EQ_ON, &tmp8) == ESP_OK) {
+    config_.eq_on = (tmp8 != 0);
+  } else {
+    const bool pref_on = nvsGetBool(h, NVS_KEY_LEGACY_EQ_PREF_ON, false);
+    const bool cal_on  = nvsGetBool(h, NVS_KEY_LEGACY_EQ_CAL_ON,  false);
+    config_.eq_on = pref_on || cal_on;
+  }
+
+  // Active-band count: prefer the new key, else migrate from `eq_pref_nb`.
+  // A previous WIP of this refactor could persist `eq_nb=1` while the
+  // 15-band blob still held the user's full curve. Prefer a larger legacy
+  // `eq_pref_nb` when present, and raise the count if later bands are
+  // clearly in use.
+  if (nvs_get_u8(h, NVS_KEY_EQ_NB, &tmp8) == ESP_OK && tmp8 >= 1 &&
+      tmp8 <= (uint8_t)PARAMETRIC_BANDS) {
+    config_.eq_active_bands = tmp8;
+    uint8_t legacy_nb = 0;
+    if (nvs_get_u8(h, NVS_KEY_LEGACY_EQ_PREF_NB, &legacy_nb) == ESP_OK &&
+        legacy_nb > tmp8 && legacy_nb <= 10u) {
+      ESP_LOGW(TAG, "Raising eq_nb %u -> %u from leftover eq_pref_nb",
+               (unsigned)tmp8, (unsigned)legacy_nb);
+      config_.eq_active_bands = legacy_nb;
+      markDirtyEq();
+    }
+  } else if (nvs_get_u8(h, NVS_KEY_LEGACY_EQ_PREF_NB, &tmp8) == ESP_OK && tmp8 >= 1 &&
+             tmp8 <= 10u) {
+    config_.eq_active_bands = tmp8;
+  } else if (nvs_get_u8(h, NVS_KEY_LEGACY_EQ_CAL_NB, &tmp8) == ESP_OK && tmp8 >= 1 &&
+             tmp8 <= 10u) {
+    config_.eq_active_bands = tmp8;
+  } else {
+    config_.eq_active_bands = 10;
+  }
+  {
+    uint8_t last_used = 0;
+    for (uint8_t i = 0; i < (uint8_t)PARAMETRIC_BANDS; ++i) {
+      if (std::fabs(config_.eq_bands[i].gain_db) > 0.25f) last_used = (uint8_t)(i + 1);
+    }
+    if (last_used > config_.eq_active_bands) {
+      ESP_LOGW(TAG, "Raising eq_nb %u -> %u (non-flat bands after stored count)",
+               (unsigned)config_.eq_active_bands, (unsigned)last_used);
+      config_.eq_active_bands = last_used;
+      markDirtyEq();
+    }
+  }
+
+  // Active preset slot.
+  if (nvs_get_u8(h, NVS_KEY_EQ_SLOT, &tmp8) == ESP_OK) {
+    config_.eq_active_slot = tmp8;
+  } else if (nvs_get_u8(h, NVS_KEY_LEGACY_EQ_PREF_SLOT, &tmp8) == ESP_OK) {
+    config_.eq_active_slot = tmp8;
+  }
 
   if (nvs_get_u8(h, NVS_KEY_EQ_HR_MODE, &tmp8) == ESP_OK)
     config_.eq_hr_mode = (tmp8 == 1) ? HeadroomMode::Manual : HeadroomMode::Auto;
@@ -368,6 +493,16 @@ bool ConfigManager::load() {
   if (nvs_get_str(h, NVS_KEY_WIFI_SSID, wifi_ssid_, &len) != ESP_OK) wifi_ssid_[0] = '\0';
   len = WIFI_PASS_MAX;
   if (nvs_get_str(h, NVS_KEY_WIFI_PASS, wifi_pass_, &len) != ESP_OK) wifi_pass_[0] = '\0';
+  {
+    uint8_t ever = 0;
+    if (nvs_get_u8(h, NVS_KEY_WIFI_EVER, &ever) == ESP_OK) {
+      wifi_ever_flag_present_ = true;
+      wifi_ever_ok_ = ever != 0;
+    } else {
+      wifi_ever_flag_present_ = false;
+      wifi_ever_ok_ = false;
+    }
+  }
 
   {
     float f = tt_freq_hz_;
@@ -423,13 +558,13 @@ bool ConfigManager::save() {
   if (dm & D_EQ) {
     nvs_set_u8(h, NVS_KEY_PRESET, config_.preset_id);
     nvs_set_blob(h, NVS_KEY_EQ_LEGACY, config_.eq_gains, EQ_BANDS * sizeof(int8_t));
-    nvs_set_blob(h, NVS_KEY_EQ_CAL, config_.eq_cal, sizeof(config_.eq_cal));
-    nvs_set_u8(h, NVS_KEY_EQ_CAL_ON, config_.eq_cal_on ? 1 : 0);
-    nvs_set_u8(h, NVS_KEY_EQ_CAL_NB, config_.eq_cal_active_bands);
-    nvs_set_blob(h, NVS_KEY_EQ_PREF, config_.eq_pref, sizeof(config_.eq_pref));
-    nvs_set_u8(h, NVS_KEY_EQ_PREF_ON, config_.eq_pref_on ? 1 : 0);
-    nvs_set_u8(h, NVS_KEY_EQ_PREF_NB, config_.eq_pref_active_bands);
-    nvs_set_u8(h, NVS_KEY_EQ_PREF_SLOT, config_.eq_pref_slot);
+    // Single-layer PEQ. Legacy `eq_cal*` / `eq_pref*` keys are intentionally
+    // NOT rewritten so a downgrade to old firmware falls back cleanly to its
+    // defaults (better than partially-mangled state).
+    nvs_set_blob(h, NVS_KEY_EQ_BANDS, config_.eq_bands, sizeof(config_.eq_bands));
+    nvs_set_u8(h, NVS_KEY_EQ_ON, config_.eq_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_EQ_NB, config_.eq_active_bands);
+    nvs_set_u8(h, NVS_KEY_EQ_SLOT, config_.eq_active_slot);
     nvs_set_u8(h, NVS_KEY_EQ_HR_MODE, config_.eq_hr_mode == HeadroomMode::Manual ? 1 : 0);
     nvs_set_blob(h, NVS_KEY_EQ_HR_MANUAL, &config_.eq_hr_manual_db, sizeof(float));
   }
@@ -441,6 +576,11 @@ bool ConfigManager::save() {
     nvs_set_u8(h, NVS_KEY_CH_MODE, config_.stereo_mode == StereoMode::Mono ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_CH_L_ON, config_.ch_l_on ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_CH_R_ON, config_.ch_r_on ? 1 : 0);
+    nvs_set_u8(h, NVS_KEY_LED_R, config_.led_r);
+    nvs_set_u8(h, NVS_KEY_LED_G, config_.led_g);
+    nvs_set_u8(h, NVS_KEY_LED_B, config_.led_b);
+    nvs_set_u8(h, NVS_KEY_LED_BRI, config_.led_bri);
+    nvs_set_u8(h, NVS_KEY_LED_USER, config_.led_user ? 1 : 0);
   }
   if (dm & D_NET) {
     nvs_set_u8(h, NVS_KEY_SOURCE, (uint8_t)audio_source_);
@@ -448,6 +588,9 @@ bool ConfigManager::save() {
     nvs_set_u16(h, NVS_KEY_SNAP_PORT, snapcast_port_);
     nvs_set_str(h, NVS_KEY_WIFI_SSID, wifi_ssid_);
     nvs_set_str(h, NVS_KEY_WIFI_PASS, wifi_pass_);
+    if (wifi_ever_flag_present_) {
+      nvs_set_u8(h, NVS_KEY_WIFI_EVER, wifi_ever_ok_ ? 1 : 0);
+    }
     nvs_set_str(h, NVS_KEY_DEV_NAME, config_.dev_name);
     nvs_set_u8(h, NVS_KEY_DLNA_ON, config_.dlna_on ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_VOICE_FB, config_.voice_feedback ? 1 : 0);
@@ -577,6 +720,15 @@ void ConfigManager::setChannels(bool l_on, bool r_on) {
   markDirtyAudio();
 }
 
+void ConfigManager::setLed(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
+  config_.led_r = r;
+  config_.led_g = g;
+  config_.led_b = b;
+  config_.led_bri = brightness > 100 ? 100 : brightness;
+  config_.led_user = true;
+  markDirtyAudio();
+}
+
 // ---- Preset (legacy) ------------------------------------------------------
 
 void ConfigManager::setPresetId(uint8_t id) {
@@ -617,54 +769,31 @@ static void clampBand(ParametricBand& b) {
   if (t > (uint8_t)geelen::EqFilterType::HighPass) b.type = geelen::EqFilterType::Bell;
 }
 
-void ConfigManager::getEqCalibration(ParametricBand out[PARAMETRIC_BANDS]) const {
-  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) out[i] = config_.eq_cal[i];
+void ConfigManager::getEqBands(ParametricBand out[PARAMETRIC_BANDS]) const {
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) out[i] = config_.eq_bands[i];
 }
-void ConfigManager::setEqCalibration(const ParametricBand bands[PARAMETRIC_BANDS]) {
+void ConfigManager::setEqBands(const ParametricBand bands[PARAMETRIC_BANDS]) {
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
-    config_.eq_cal[i] = bands[i];
-    clampBand(config_.eq_cal[i]);
-  }
-  markDirtyEq();
-}
-void ConfigManager::setEqCalibrationEnabled(bool on) {
-  config_.eq_cal_on = on;
-  markDirtyEq();
-}
-
-void ConfigManager::setEqCalibrationActiveBands(uint8_t n) {
-  if (n < 1) n = 1;
-  if (n > (uint8_t)PARAMETRIC_BANDS) n = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_cal_active_bands = n;
-  markDirtyEq();
-}
-
-void ConfigManager::getEqPreference(ParametricBand out[PARAMETRIC_BANDS]) const {
-  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) out[i] = config_.eq_pref[i];
-}
-void ConfigManager::setEqPreference(const ParametricBand bands[PARAMETRIC_BANDS]) {
-  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
-    config_.eq_pref[i] = bands[i];
-    clampBand(config_.eq_pref[i]);
+    config_.eq_bands[i] = bands[i];
+    clampBand(config_.eq_bands[i]);
   }
   // Any live edit marks the slot "modified"; the preset-load handler re-sets
   // this to the slot index after assigning.
-  config_.eq_pref_slot = 0xFF;
+  config_.eq_active_slot = 0xFF;
   markDirtyEq();
 }
-void ConfigManager::setEqPreferenceEnabled(bool on) {
-  config_.eq_pref_on = on;
+void ConfigManager::setEqEnabled(bool on) {
+  config_.eq_on = on;
   markDirtyEq();
 }
-void ConfigManager::setEqPreferenceSlot(uint8_t slot) {
-  config_.eq_pref_slot = slot;
+void ConfigManager::setEqActiveSlot(uint8_t slot) {
+  config_.eq_active_slot = slot;
   markDirtyEq();
 }
-
-void ConfigManager::setEqPreferenceActiveBands(uint8_t n) {
+void ConfigManager::setEqActiveBands(uint8_t n) {
   if (n < 1) n = 1;
   if (n > (uint8_t)PARAMETRIC_BANDS) n = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_pref_active_bands = n;
+  config_.eq_active_bands = n;
   markDirtyEq();
 }
 
@@ -730,6 +859,12 @@ void ConfigManager::setWifiPass(const char* pass) {
   markDirtyNet();
 }
 
+void ConfigManager::setWifiEverConnectedOk(bool ok) {
+  wifi_ever_ok_ = ok;
+  wifi_ever_flag_present_ = true;
+  markDirtyNet();
+}
+
 // ---- Device name / DLNA ---------------------------------------------------
 
 bool ConfigManager::getDeviceName(char* out, size_t max_len) const {
@@ -787,8 +922,11 @@ void ConfigManager::factoryReset() {
 void ConfigManager::resetWifi() {
   wifi_ssid_[0] = '\0';
   wifi_pass_[0] = '\0';
+  wifi_ever_ok_ = false;
+  wifi_ever_flag_present_ = true;  // persist the "never verified" marker
   nvsErase(NVS_KEY_WIFI_SSID);
   nvsErase(NVS_KEY_WIFI_PASS);
+  nvsErase(NVS_KEY_WIFI_EVER);
   markDirtyNet();
   save();
 }
@@ -819,27 +957,30 @@ void ConfigManager::resetDlna() {
 }
 
 void ConfigManager::resetEq() {
-  loadDefaultEqCalibration(config_.eq_cal);
-  config_.eq_cal_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_cal_on = false;
-  loadDefaultEqPreference(config_.eq_pref);
-  config_.eq_pref_active_bands = (uint8_t)PARAMETRIC_BANDS;
-  config_.eq_pref_on = false;
-  config_.eq_pref_slot = 0xFF;
+  loadDefaultEqBands(config_.eq_bands);
+  config_.eq_active_bands = (uint8_t)PARAMETRIC_BANDS;
+  config_.eq_on = false;
+  config_.eq_active_slot = 0xFF;
   config_.eq_hr_mode = HeadroomMode::Auto;
   config_.eq_hr_manual_db = 0.0f;
   for (size_t i = 0; i < EQ_BANDS; i++) config_.eq_gains[i] = 0;
 
-  nvsErase(NVS_KEY_EQ_CAL);
-  nvsErase(NVS_KEY_EQ_CAL_ON);
-  nvsErase(NVS_KEY_EQ_CAL_NB);
-  nvsErase(NVS_KEY_EQ_PREF);
-  nvsErase(NVS_KEY_EQ_PREF_ON);
-  nvsErase(NVS_KEY_EQ_PREF_NB);
-  nvsErase(NVS_KEY_EQ_PREF_SLOT);
+  nvsErase(NVS_KEY_EQ_BANDS);
+  nvsErase(NVS_KEY_EQ_ON);
+  nvsErase(NVS_KEY_EQ_NB);
+  nvsErase(NVS_KEY_EQ_SLOT);
   nvsErase(NVS_KEY_EQ_HR_MODE);
   nvsErase(NVS_KEY_EQ_HR_MANUAL);
   nvsErase(NVS_KEY_EQ_LEGACY);
+  // Also purge legacy dual-layer keys so a factory reset doesn't leak old
+  // state back through the load-time migration on next boot.
+  nvsErase(NVS_KEY_LEGACY_EQ_CAL);
+  nvsErase(NVS_KEY_LEGACY_EQ_CAL_ON);
+  nvsErase(NVS_KEY_LEGACY_EQ_CAL_NB);
+  nvsErase(NVS_KEY_LEGACY_EQ_PREF);
+  nvsErase(NVS_KEY_LEGACY_EQ_PREF_ON);
+  nvsErase(NVS_KEY_LEGACY_EQ_PREF_NB);
+  nvsErase(NVS_KEY_LEGACY_EQ_PREF_SLOT);
 
   // Also clear all SPIFFS preset files so "reset presets" restores factory.
   for (size_t i = 0; i < PRESET_SLOT_COUNT; ++i) {
@@ -860,6 +1001,11 @@ void ConfigManager::resetAudio() {
   config_.stereo_mode = StereoMode::Stereo;
   config_.ch_l_on = true;
   config_.ch_r_on = true;
+  config_.led_r = 255;
+  config_.led_g = 255;
+  config_.led_b = 255;
+  config_.led_bri = 0;
+  config_.led_user = false;
   markDirtyAudio();
   save();
 }

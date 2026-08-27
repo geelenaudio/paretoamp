@@ -204,6 +204,15 @@ void test_eqLinearMagProduct_bell_boost_at_centre(void) {
  * actual dispatch end-to-end.
  */
 
+void test_q131_zero(void);
+void test_q131_one_saturates(void);
+void test_q131_neg_one_saturates(void);
+void test_q131_half(void);
+void test_q131_neg_half(void);
+void test_q131_nan_is_zero(void);
+void test_q131_roundtrip_quarter(void);
+void test_q131_identity_biquad_b0(void);
+
 void test_event_ids_are_stable(void) {
   /* Adding a new event at the end of the enum is fine. Reordering or
    * inserting in the middle changes the wire-style integer ids handlers
@@ -226,7 +235,9 @@ void test_event_ids_are_stable(void) {
   TEST_ASSERT_EQUAL_INT(14, EV_SNAP_DISCONNECTED);
   TEST_ASSERT_EQUAL_INT(15, EV_DLNA_PLAY_REQUESTED);
   TEST_ASSERT_EQUAL_INT(16, EV_STATE_DIFF);
-  TEST_ASSERT_EQUAL_INT(17, EV_COUNT_);
+  TEST_ASSERT_EQUAL_INT(17, EV_WIFI_PROBE_START);
+  TEST_ASSERT_EQUAL_INT(18, EV_WIFI_PROBE_RESULT);
+  TEST_ASSERT_EQUAL_INT(19, EV_COUNT_);
 }
 
 void test_event_payloads_are_pod(void) {
@@ -237,6 +248,8 @@ void test_event_payloads_are_pod(void) {
   TEST_ASSERT_TRUE(std::is_trivially_copyable<ev_wifi_up_t>::value);
   TEST_ASSERT_TRUE(std::is_standard_layout<ev_wifi_down_t>::value);
   TEST_ASSERT_TRUE(std::is_trivially_copyable<ev_wifi_down_t>::value);
+  TEST_ASSERT_TRUE(std::is_standard_layout<ev_wifi_probe_result_t>::value);
+  TEST_ASSERT_TRUE(std::is_trivially_copyable<ev_wifi_probe_result_t>::value);
   TEST_ASSERT_TRUE(std::is_standard_layout<ev_mode_change_t>::value);
   TEST_ASSERT_TRUE(std::is_trivially_copyable<ev_mode_change_t>::value);
   TEST_ASSERT_TRUE(std::is_standard_layout<ev_voice_prompt_t>::value);
@@ -314,6 +327,7 @@ void test_event_payload_sizes(void) {
    * which uses 256-char URI buffers (see s_current_uri in idf_dlna.cpp). */
   TEST_ASSERT_EQUAL_size_t(4, sizeof(ev_wifi_up_t));
   TEST_ASSERT_EQUAL_size_t(1, sizeof(ev_wifi_down_t));
+  TEST_ASSERT_EQUAL_size_t(2, sizeof(ev_wifi_probe_result_t));
   TEST_ASSERT_EQUAL_size_t(2, sizeof(ev_mode_change_t));
   TEST_ASSERT_EQUAL_size_t(2, sizeof(ev_voice_prompt_t));
   TEST_ASSERT_EQUAL_size_t(256, sizeof(ev_dlna_play_t));
@@ -346,5 +360,13 @@ int main(int argc, char** argv) {
   RUN_TEST(test_mode_fsm_bluetooth_either_side_reboots);
   RUN_TEST(test_mode_fsm_non_bluetooth_currently_reboots);
   RUN_TEST(test_mode_fsm_name_for_source);
+  RUN_TEST(test_q131_zero);
+  RUN_TEST(test_q131_one_saturates);
+  RUN_TEST(test_q131_neg_one_saturates);
+  RUN_TEST(test_q131_half);
+  RUN_TEST(test_q131_neg_half);
+  RUN_TEST(test_q131_nan_is_zero);
+  RUN_TEST(test_q131_roundtrip_quarter);
+  RUN_TEST(test_q131_identity_biquad_b0);
   return UNITY_END();
 }
