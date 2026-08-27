@@ -29,9 +29,10 @@ Set audio source.
 
 ### GET /api/eq
 
-Get 10-band EQ gains (dB, -12 to +12).
+Get the active PEQ curve. Band count is clamped to `max_bands` (10 on
+Amped software PEQ, 15 on Louder TAS5825M hardware PEQ).
 
-**Response:** `{ "bands": [ number, ... ] }` (10 elements)
+**Response:** `{ enabled, band_count, max_bands, backend, bands[], headroom, active_slot }`
 
 ### GET /api/snapcast
 
@@ -39,13 +40,36 @@ Get Snapcast server config.
 
 **Response:** `{ "host": string, "port": number }`
 
+### POST /api/wifi/validate
+
+JSON `{ssid, pass}`. Does not persist. Returns `{ok, reason, detail, ip?}`.
+Reasons: `AUTH_FAIL`, `NO_AP_FOUND`, `ASSOC_FAIL`, `TIMEOUT`, `FAIL`.
+
+### POST /api/wifi/commit
+
+Persists the last successful validate and reboots. 400 if none.
+
 ### POST /api/wifi
 
-Save WiFi credentials (used when in AP mode or from Web UI).
+Form-encoded `ssid=&pass=`. Now probes first; only reboots on success.
 
-**Body (application/x-www-form-urlencoded):** `ssid=...&pass=...`
+### GET /api/system/summary
 
-**Response:** `{ "ok": true }`
+Small metrics blob for the overview card.
+
+### GET /api/system/tasks
+
+`uxTaskGetSystemState` dump (name, prio, stack HWM, runtime).
+
+### POST /api/led
+
+WS2812 colour and brightness. Takes over from the boot/pairing animation.
+
+**Body:** `{ "color": "#rrggbb", "brightness": 0-100 }` (omitted fields keep the current value).
+
+**Response:** `{ present, count, phase, color, brightness }`. `count` is compile-time `HAL_WS2812_COUNT` (not writable). 404 if this image has no WS2812.
+
+Also exposed on `GET /api/state` as `led`.
 
 ### POST /api/factory_reset
 

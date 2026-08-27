@@ -1,9 +1,12 @@
-/**
- * Audio Engine – multi-stage EQ, inter-sample peak limit, PSRAM ring, I2S out.
- */
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// Audio Engine — single-layer parametric EQ, inter-sample peak limiter,
+// PSRAM ring, I2S out.
 
 #include "audio_engine.h"
 #include "audio_util.h"
+#include "hal/hal_board.h"
 #include <driver/i2s_std.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -50,27 +53,25 @@ static void logf(const char* fmt, ...) {
   va_end(ap);
 }
 
-static const float EQ_CENTER_HZ[AUDIO_EQ_BANDS] = {
+// Legacy 10-band graphic EQ centres, retained only for `setEQGains`
+// (the Snapcast `ServerSettings` graphic-EQ compat path). Everything else
+// uses the caller-provided `EqBand.freq_hz`.
+static constexpr size_t LEGACY_GRAPHIC_EQ_BANDS = 10;
+static const float LEGACY_GRAPHIC_EQ_CENTER_HZ[LEGACY_GRAPHIC_EQ_BANDS] = {
   31.f, 62.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f, 16000.f
 };
 static constexpr float DEFAULT_Q = 1.2f;
 
-/** RAII: pair with `ringFillSamplesLocked()` / ring index updates vs `feedPCM`. */
-struct FeedMutexLock {
-  SemaphoreHandle_t m;
-  explicit FeedMutexLock(void* mutex) : m(mutex ? (SemaphoreHandle_t)mutex : nullptr) {
-    if (m) xSemaphoreTake(m, portMAX_DELAY);
-  }
-  ~FeedMutexLock() {
-    if (m) xSemaphoreGive(m);
-  }
-  FeedMutexLock(const FeedMutexLock&) = delete;
-  FeedMutexLock& operator=(const FeedMutexLock&) = delete;
-};
-
 static EqBand makeDefaultBand(size_t i) {
   EqBand b{};
-  b.freq_hz = EQ_CENTER_HZ[i];
+  // First 10 bands seed the legacy centres; remaining 5 spread logarithmically
+  // between 20 kHz and 22 kHz so they render sanely if the SPA ever surfaces
+  // them on an Amped device.
+  if (i < LEGACY_GRAPHIC_EQ_BANDS) {
+    b.freq_hz = LEGACY_GRAPHIC_EQ_CENTER_HZ[i];
+  } else {
+    b.freq_hz = 16000.f + 1000.f * (float)(i - LEGACY_GRAPHIC_EQ_BANDS + 1);
+  }
   b.gain_db = 0.f;
   b.q = DEFAULT_Q;
   b.type = EqFilterType::Bell;
@@ -82,21 +83,18 @@ static EqBand makeDefaultBand(size_t i) {
 }  // namespace
 
 void AudioEngine::initBiquads() {
-  for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
-    Cascade& c = cascades_[layer];
-    c.enabled = false;
-    c.active_band_count = (uint8_t)AUDIO_EQ_BANDS;
-    for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
-      c.bands[i] = makeDefaultBand(i);
-      for (size_t s = 0; s < EQ_MAX_STAGES_PER_LAYER; ++s) {
-        for (int ch = 0; ch < 2; ++ch) {
-          c.zx1[s][ch] = c.zx2[s][ch] = 0.f;
-          c.zy1[s][ch] = c.zy2[s][ch] = 0.f;
-        }
-      }
-    }
-    rebuildCascade(layer);
+  cascade_.enabled = false;
+  cascade_.active_band_count = (uint8_t)AUDIO_EQ_BANDS;
+  for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
+    cascade_.bands[i] = makeDefaultBand(i);
   }
+  for (size_t s = 0; s < EQ_MAX_STAGES_PER_LAYER; ++s) {
+    for (int ch = 0; ch < 2; ++ch) {
+      cascade_.zx1[s][ch] = cascade_.zx2[s][ch] = 0.f;
+      cascade_.zy1[s][ch] = cascade_.zy2[s][ch] = 0.f;
+    }
+  }
+  rebuildCascade();
   headroom_linear_ = 1.f;
   intersample_limiter_gain_ = 1.f;
   volume_ = 1.f;
@@ -108,11 +106,11 @@ void AudioEngine::initBiquads() {
   mono_ = false;
 }
 
-void AudioEngine::rebuildCascade(int layer) {
-  if (layer < 0 || layer >= (int)AUDIO_EQ_LAYERS) return;
-  Cascade& c = cascades_[layer];
+void AudioEngine::rebuildCascade() {
+  Cascade& c = cascade_;
   if (c.active_band_count < 1) c.active_band_count = 1;
-  if (c.active_band_count > (uint8_t)AUDIO_EQ_BANDS) c.active_band_count = (uint8_t)AUDIO_EQ_BANDS;
+  const uint8_t hw_cap = maxBands();
+  if (c.active_band_count > hw_cap) c.active_band_count = hw_cap;
   c.stage_count = (uint8_t)eqBuildStageList((float)SAMPLE_RATE, c.bands, c.active_band_count, c.stages);
   for (size_t s = 0; s < EQ_MAX_STAGES_PER_LAYER; ++s) {
     for (int ch = 0; ch < 2; ++ch) {
@@ -120,6 +118,10 @@ void AudioEngine::rebuildCascade(int layer) {
       c.zy1[s][ch] = c.zy2[s][ch] = 0.f;
     }
   }
+}
+
+uint8_t AudioEngine::maxBands() const {
+  return (uint8_t)HAL_EQ_MAX_BANDS_ACTIVE;
 }
 
 AudioEngine::AudioEngine()
@@ -143,19 +145,14 @@ AudioEngine::AudioEngine()
 }
 
 size_t AudioEngine::ringFillSamplesLocked() const {
-  size_t h = ring_head_;
-  size_t t = ring_tail_;
+  size_t h = ring_head_.load(std::memory_order_acquire);
+  size_t t = ring_tail_.load(std::memory_order_relaxed);
   if (h >= t) return h - t;
   return ring_cap_ - (t - h);
 }
 
 size_t AudioEngine::ringFillSamples() const {
-  if (!feed_mutex_) return ringFillSamplesLocked();
-  SemaphoreHandle_t mx = (SemaphoreHandle_t)feed_mutex_;
-  xSemaphoreTake(mx, portMAX_DELAY);
-  size_t n = ringFillSamplesLocked();
-  xSemaphoreGive(mx);
-  return n;
+  return ringFillSamplesLocked();
 }
 
 size_t AudioEngine::bufferedFrames() const { return ringFillSamples() / 2; }
@@ -167,9 +164,9 @@ AudioEngine::~AudioEngine() {
     vSemaphoreDelete((SemaphoreHandle_t)eq_mutex_);
     eq_mutex_ = nullptr;
   }
-  if (feed_mutex_) {
-    vSemaphoreDelete((SemaphoreHandle_t)feed_mutex_);
-    feed_mutex_ = nullptr;
+  if (producer_mutex_) {
+    vSemaphoreDelete((SemaphoreHandle_t)producer_mutex_);
+    producer_mutex_ = nullptr;
   }
   if (ring_buf_) {
     heap_caps_free(ring_buf_);
@@ -182,16 +179,16 @@ bool AudioEngine::begin() {
     eq_mutex_ = xSemaphoreCreateMutex();
     if (!eq_mutex_) return false;
   }
-  if (!feed_mutex_) {
-    feed_mutex_ = xSemaphoreCreateMutex();
-    if (!feed_mutex_) return false;
+  if (!producer_mutex_) {
+    producer_mutex_ = xSemaphoreCreateMutex();
+    if (!producer_mutex_) return false;
   }
   ring_cap_ = RING_BUF_SAMPLES * 2;
   ring_buf_ = (int16_t*)heap_caps_malloc(RING_BUF_BYTES, MALLOC_CAP_SPIRAM);
   if (!ring_buf_) ring_buf_ = (int16_t*)malloc(RING_BUF_BYTES);
   if (!ring_buf_) return false;
-  ring_head_ = 0;
-  ring_tail_ = 0;
+  ring_head_.store(0, std::memory_order_relaxed);
+  ring_tail_.store(0, std::memory_order_relaxed);
   playing_ = false;
   underruns_ = 0;
   overflows_ = 0;
@@ -201,39 +198,48 @@ bool AudioEngine::begin() {
 }
 
 void AudioEngine::setEQGains(const int8_t gains[AUDIO_EQ_BANDS]) {
+  // Legacy graphic-EQ path (Snapcast ServerSettings). Maps the first 10 bands
+  // to fixed centres and pads any trailing bands with 0 dB / DEFAULT_Q.
   SemaphoreHandle_t em = eq_mutex_ ? (SemaphoreHandle_t)eq_mutex_ : nullptr;
   if (em) xSemaphoreTake(em, portMAX_DELAY);
-  Cascade& c = cascades_[EQ_LAYER_CALIBRATION];
+  Cascade& c = cascade_;
   for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) {
-    c.bands[i].freq_hz = EQ_CENTER_HZ[i];
-    c.bands[i].gain_db = (float)gains[i];
+    c.bands[i].freq_hz = (i < LEGACY_GRAPHIC_EQ_BANDS)
+                             ? LEGACY_GRAPHIC_EQ_CENTER_HZ[i]
+                             : 16000.f + 1000.f * (float)(i - LEGACY_GRAPHIC_EQ_BANDS + 1);
+    c.bands[i].gain_db = (i < LEGACY_GRAPHIC_EQ_BANDS) ? (float)gains[i] : 0.f;
     c.bands[i].q = DEFAULT_Q;
     c.bands[i].type = EqFilterType::Bell;
     c.bands[i].slope_db_oct = 12;
   }
-  c.active_band_count = (uint8_t)AUDIO_EQ_BANDS;
+  c.active_band_count = (uint8_t)LEGACY_GRAPHIC_EQ_BANDS;
   c.enabled = true;
-  rebuildCascade(EQ_LAYER_CALIBRATION);
+  rebuildCascade();
   eq_peak_db_ = computeEqPeakGainDbUnlocked();
   eq_peak_valid_ = true;
   if (em) xSemaphoreGive(em);
 }
 
-void AudioEngine::setEqCurve(int layer, const EqBand bands[AUDIO_EQ_BANDS], uint8_t active_band_count,
-                             bool enabled) {
-  if (layer < 0 || layer >= (int)AUDIO_EQ_LAYERS) return;
+void AudioEngine::setEqCurve(const EqBand* bands, uint8_t active_band_count, bool enabled) {
+  if (!bands) return;
   SemaphoreHandle_t em = eq_mutex_ ? (SemaphoreHandle_t)eq_mutex_ : nullptr;
   if (em) xSemaphoreTake(em, portMAX_DELAY);
-  Cascade& c = cascades_[layer];
+  Cascade& c = cascade_;
   for (size_t i = 0; i < AUDIO_EQ_BANDS; ++i) c.bands[i] = bands[i];
   if (active_band_count < 1) active_band_count = 1;
   if (active_band_count > (uint8_t)AUDIO_EQ_BANDS) active_band_count = (uint8_t)AUDIO_EQ_BANDS;
+  const uint8_t hw_cap = maxBands();
+  if (active_band_count > hw_cap) active_band_count = hw_cap;
   c.active_band_count = active_band_count;
   c.enabled = enabled;
-  rebuildCascade(layer);
+  rebuildCascade();
   eq_peak_db_ = computeEqPeakGainDbUnlocked();
   eq_peak_valid_ = true;
   if (em) xSemaphoreGive(em);
+}
+
+void AudioEngine::setEqBackend(EqBackend b) {
+  eq_backend_ = b;
 }
 
 void AudioEngine::setHeadroomDb(float db) {
@@ -251,14 +257,11 @@ float AudioEngine::computeEqPeakGainDbUnlocked() const {
   const float log_hi = std::log(f_hi);
 
   float peak = 1e-12f;
+  const Cascade& c = cascade_;
+  const bool active = c.enabled && c.stage_count > 0;
   for (int i = 0; i < N; ++i) {
     const float f = expf(log_lo + (log_hi - log_lo) * (float)i / (float)(N - 1));
-    float mag = 1.f;
-    for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
-      const Cascade& c = cascades_[layer];
-      if (!c.enabled || c.stage_count == 0) continue;
-      mag *= eqLinearMagProduct(c.stages, c.stage_count, f, sr);
-    }
+    float mag = active ? eqLinearMagProduct(c.stages, c.stage_count, f, sr) : 1.f;
     if (mag > peak) peak = mag;
   }
   return 20.f * log10f(peak) + kIntersampleHeadroomDb;
@@ -301,19 +304,22 @@ void AudioEngine::setChannels(bool l_on, bool r_on, bool mono) {
 
 void AudioEngine::feedPCM(const uint8_t* data, size_t len_bytes) {
   if (!ring_buf_ || !data) return;
-  if (feed_mutex_) xSemaphoreTake((SemaphoreHandle_t)feed_mutex_, portMAX_DELAY);
+  if (producer_mutex_) xSemaphoreTake((SemaphoreHandle_t)producer_mutex_, portMAX_DELAY);
   size_t num_samples = len_bytes / sizeof(int16_t);
   const int16_t* src = (const int16_t*)data;
+  size_t head = ring_head_.load(std::memory_order_relaxed);
   for (size_t i = 0; i < num_samples; i++) {
-    size_t next = (ring_head_ + 1) % ring_cap_;
-    if (next == ring_tail_) {
+    size_t next = (head + 1) % ring_cap_;
+    const size_t tail = ring_tail_.load(std::memory_order_acquire);
+    if (next == tail) {
       overflows_++;
       break;
     }
-    ring_buf_[ring_head_] = src[i];
-    ring_head_ = next;
+    ring_buf_[head] = src[i];
+    head = next;
   }
-  if (feed_mutex_) xSemaphoreGive((SemaphoreHandle_t)feed_mutex_);
+  ring_head_.store(head, std::memory_order_release);
+  if (producer_mutex_) xSemaphoreGive((SemaphoreHandle_t)producer_mutex_);
 }
 
 IRAM_ATTR void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
@@ -328,12 +334,12 @@ IRAM_ATTR void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
   if (num_frames > 128) num_frames = 128;
   float work[128 * 2];
 
+  Cascade& c = cascade_;
+  const bool eq_active = c.enabled && c.stage_count > 0;
   for (size_t f = 0; f < num_frames; f++) {
     float L = (float)buf[f * 2];
     float R = (float)buf[f * 2 + 1];
-    for (int layer = 0; layer < (int)AUDIO_EQ_LAYERS; ++layer) {
-      Cascade& c = cascades_[layer];
-      if (!c.enabled || c.stage_count == 0) continue;
+    if (eq_active) {
       for (uint8_t si = 0; si < c.stage_count; ++si) {
         const EqStage& st = c.stages[si];
         const float x0L = L;
@@ -372,15 +378,13 @@ IRAM_ATTR void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
     work[f * 2 + 1] = R;
   }
 
-  // Short-circuit the true-peak limiter when both cascades are bypassed and the
+  // Short-circuit the true-peak limiter when the cascade is bypassed and the
   // EQ contributes no positive gain. In that case `work[] = buf[] * hr` with
   // `hr <= 1`, input was int16 so |work[]| <= 32767, and the linear midpoint
   // can only be smaller — so the pk scan is guaranteed to produce target=1.f.
   // Skips ~510 abs+compares per 128-frame chunk (~25 % of processSamples in the
   // trivial pass-through case).
-  const bool eq0_bypass = !cascades_[0].enabled || cascades_[0].stage_count == 0;
-  const bool eq1_bypass = !cascades_[1].enabled || cascades_[1].stage_count == 0;
-  const bool skip_pk_scan = eq0_bypass && eq1_bypass && eq_peak_db_ <= 0.f;
+  const bool skip_pk_scan = !eq_active && eq_peak_db_ <= 0.f;
 
   if (!skip_pk_scan) {
     float pk = 0.f;
@@ -449,7 +453,6 @@ bool AudioEngine::process() {
   size_t rd = 0;
 
   {
-    FeedMutexLock lk(feed_mutex_);
     const size_t fill_samples = ringFillSamplesLocked();
     const size_t fill_frames = fill_samples / 2;
     const size_t prefill_frames = (size_t)((uint64_t)SAMPLE_RATE * AUDIO_PREFILL_MS / 1000);
@@ -485,8 +488,9 @@ bool AudioEngine::process() {
       }
     }
 
-    size_t temp_tail = ring_tail_;
-    while (temp_tail != ring_head_ && rd < chunk_samples) {
+    size_t temp_tail = ring_tail_.load(std::memory_order_relaxed);
+    const size_t head = ring_head_.load(std::memory_order_acquire);
+    while (temp_tail != head && rd < chunk_samples) {
       process_buf[rd++] = ring_buf_[temp_tail];
       temp_tail = (temp_tail + 1) % ring_cap_;
     }
@@ -520,13 +524,11 @@ bool AudioEngine::process() {
   if (dt > kProcessBudgetUs) {
     if (t1 - last_contention_log_us_ > 1000000ULL) {
       last_contention_log_us_ = t1;
-      const Cascade& c0 = cascades_[0];
-      const Cascade& c1 = cascades_[1];
+      const Cascade& c = cascade_;
       ESP_LOGW("Audio",
-               "EQ processing slow: %llu us (budget %llu) cal en=%d st=%u ab=%u | pref en=%d st=%u ab=%u",
-               (unsigned long long)dt, (unsigned long long)kProcessBudgetUs, (int)c0.enabled,
-               (unsigned)c0.stage_count, (unsigned)c0.active_band_count, (int)c1.enabled,
-               (unsigned)c1.stage_count, (unsigned)c1.active_band_count);
+               "EQ processing slow: %llu us (budget %llu) en=%d stages=%u active_bands=%u",
+               (unsigned long long)dt, (unsigned long long)kProcessBudgetUs, (int)c.enabled,
+               (unsigned)c.stage_count, (unsigned)c.active_band_count);
     }
   }
 #endif
@@ -563,12 +565,11 @@ bool AudioEngine::process() {
                  (int)err, (unsigned long long)waited);
       }
       {
-        FeedMutexLock lk(feed_mutex_);
-        ring_tail_ = (ring_tail_ + rd) % ring_cap_;
+        size_t t = ring_tail_.load(std::memory_order_relaxed);
+        ring_tail_.store((t + rd) % ring_cap_, std::memory_order_release);
       }
       if (eq_mutex_) xSemaphoreTake((SemaphoreHandle_t)eq_mutex_, portMAX_DELAY);
-      rebuildCascade(0);
-      rebuildCascade(1);
+      rebuildCascade();
       eq_peak_db_ = computeEqPeakGainDbUnlocked();
       eq_peak_valid_ = true;
       if (eq_mutex_) xSemaphoreGive((SemaphoreHandle_t)eq_mutex_);
@@ -608,8 +609,8 @@ bool AudioEngine::process() {
 #endif
 
   {
-    FeedMutexLock lk(feed_mutex_);
-    ring_tail_ = (ring_tail_ + rd) % ring_cap_;
+    size_t t = ring_tail_.load(std::memory_order_relaxed);
+    ring_tail_.store((t + rd) % ring_cap_, std::memory_order_release);
   }
 
   unsigned long now = nowMs();

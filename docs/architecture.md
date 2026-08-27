@@ -21,14 +21,16 @@ on the bus instead of being tangled into the producer code.
 ```mermaid
 flowchart LR
   subgraph Core0["Core 0 (Wi-Fi / BT / LwIP)"]
-    BT["Bluedroid + A2DP"]
+    BT["Bluedroid + A2DP cb"]
     WIFI["Wi-Fi driver"]
-    HTTP["esp_http_server (httpd)"]
+    TCPIP["tcpip_task (pinned CPU0)"]
     DLNA_TX["DLNA SSDP / SOAP"]
   end
 
   subgraph Core1["Core 1 (audio + control plane)"]
-    AUDIO["audio_task (prio 20)<br/>AudioEngine::process -> I2S"]
+    HTTP["esp_http_server (httpd, prio 10)"]
+    PUMP["a2dp_pump (prio 12)<br/>StreamBuffer -> resample -> feedPCM"]
+    AUDIO["audio_task (prio 20)<br/>SPSC ring -> EQ -> I2S"]
     SNAP["snap (prio 5)<br/>Snapcast TCP -> feedPCM"]
     MP3["dlna-mp3 (prio 5)<br/>HTTP MP3 -> feedPCM (DLNA only)"]
     VOICE["voice (prio 3)<br/>PSRAM PCM -> feedPCM"]
@@ -36,15 +38,16 @@ flowchart LR
     SUP["supervisor (prio 8)<br/>geelen_event loop"]
   end
 
-  RING[(PSRAM ring buffer<br/>~2 s, 44.1 kHz s16 stereo)]
+  RING[(PSRAM SPSC ring<br/>atomic head/tail, ~2 s)]
 
-  BT -- a2dpDataCb_ --> RING
+  BT --> PUMP
+  PUMP --> RING
   SNAP -- feedPCM --> RING
   MP3 -- feedPCM --> RING
   TT -- feedPCM --> RING
   VOICE -. drives .-> MP3
   RING --> AUDIO
-  AUDIO --> I2S[(I2S0 -> PCM5100A DAC)]
+  AUDIO --> I2S[(I2S0 -> board DAC)]
 ```
 
 Source-of-truth references:
@@ -60,8 +63,10 @@ static geelen_idf::A2dpSink g_a2dp;
 ```
 
 The audio task is pinned to Core 1 at priority 20 to outrank everything that
-might preempt it; producers (Snapcast, MP3 streamer, voice) sit at prio 3–5
-on the same core so they can never starve I2S, while Wi-Fi / BT / LwIP keep
+might preempt it. `a2dp_pump` sits at prio 12 — above httpd at 10 — so SPA
+SSE accept/prune/JSON cannot stall PCM drainage; httpd must stay below the
+pump. Other producers (Snapcast, MP3 streamer, voice) sit at prio 3–5 on
+the same core so they can never starve I2S, while Wi-Fi / BT / LwIP keep
 Core 0 free to do their own scheduling.
 
 ```220:234:ESP32_AudioPlatform/src/idf_main.cpp
@@ -98,10 +103,13 @@ Two thresholds drive the producer/consumer dance:
   classic "first prompt is silent" symptom, so the voice task never lets the
   ring drain past `AUDIO_LOW_WATER_MS + 40 ms` between prompts (see below).
 
-`feedPCM` is mutex-guarded so multiple producers (A2DP, Snapcast, MP3) can
-write concurrently without corrupting the head/tail pointers. EQ + limiter +
-volume run inside `process()` on the consumer side, so producers never need
-to know about DSP.
+`feedPCM` serializes multiple producers (A2DP, Snapcast, MP3, voice)
+against each other with a small `producer_mutex_`. The consumer never
+takes that lock: `ring_head_` / `ring_tail_` are atomics (SPSC between
+the serialized producers and `audio_task`). EQ + limiter + volume run
+inside `process()` on the consumer side, so producers never need to
+know about DSP. A2DP resampling lives on `a2dp_pump` (Core 1 prio 12,
+above httpd), not on the Bluedroid callback.
 
 ## MP3 streamer command queue
 
@@ -214,6 +222,7 @@ before it hands the URI to the streamer — see [audio_modes.md](audio_modes.md)
   hot-swap).
 - [voice_prompts.md](voice_prompts.md) — every clip in the cache, when
   each fires, FIFO ordering guarantees.
-- [wifi_onboarding.md](wifi_onboarding.md) — STA timeout, AP fallback,
-  the new exponential-backoff reconnect ladder, captive HTML, the
-  `/api/wifi` form and `/wifi` SPA page.
+- [eq.md](eq.md) — single-layer PEQ, software vs TAS5825M hardware backends.
+- [board_variants.md](board_variants.md) — four PlatformIO envs and HAL pins.
+- [wifi_onboarding.md](wifi_onboarding.md) — validate-then-commit, AP
+  fallback, reconnect ladder, captive HTML, `/wifi` SPA page.

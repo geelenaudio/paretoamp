@@ -1,6 +1,9 @@
-/**
- * EQ stage expansion (RBJ biquads + first-order LP/HP) and linear magnitude product.
- */
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
+// EQ stage expansion (RBJ biquads + first-order LP/HP) and linear
+// magnitude product used by both the software cascade and the SPA
+// preview.
 
 #include "eq_coeffs.h"
 #include <cmath>
@@ -220,12 +223,13 @@ static float magOnePole(float b0, float b1, float a1, float w) {
 
 }  // namespace
 
-size_t eqBuildStageList(float sample_rate, const EqBand bands[EQ_MAX_BANDS], uint8_t active_band_count,
+size_t eqBuildStageList(float sample_rate, const EqBand* bands, uint8_t active_band_count,
                         EqStage out[EQ_MAX_STAGES_PER_LAYER]) {
   const float sr = sample_rate;
   size_t idx = 0;
   if (active_band_count > EQ_MAX_BANDS) active_band_count = (uint8_t)EQ_MAX_BANDS;
   if (active_band_count < 1) active_band_count = 1;
+  if (!bands) return 0;
 
   for (uint8_t bi = 0; bi < active_band_count; ++bi) {
     const EqBand& b = bands[bi];

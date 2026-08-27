@@ -11,7 +11,7 @@ cleanly (see "Why mode changes reboot" below).
 
 | Mode | Enum | API string | Producer that feeds the engine | DLNA renderer always on? |
 |---|---|---|---|---|
-| Bluetooth | `AudioSource::Bluetooth` | `bluetooth` | `A2dpSink::a2dpDataCb_` (Bluedroid SBC -> resample -> `feedPCM`) | Yes (if `dlna_enabled`) |
+| Bluetooth | `AudioSource::Bluetooth` | `bluetooth` | `a2dp_pump` prio 12 (Bluedroid SBC → StreamBuffer → resample → `feedPCM`) | Yes (if `dlna_enabled`) |
 | Snapcast | `AudioSource::Network` | `snapclient` | `Snapclient::tick` (TCP WireChunk -> `feedPCM`) | Yes (if `dlna_enabled`) |
 | DLNA only | `AudioSource::Dlna` | `dlna` | `mp3::Streamer` (HTTP MP3 -> Helix -> resample -> `feedPCM`) | Yes |
 | Test tone | `AudioSource::TestTone` | `test_tone` | `idf_test_tone` (sine / square / pink / log sweep) | No |

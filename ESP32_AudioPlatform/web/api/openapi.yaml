@@ -17,12 +17,13 @@ info:
     they exist only to keep older scripts working and will be removed
     once the SPA fully owns configuration. `POST /api/wifi` is documented
     under the `WiFi` tag — it is still the primary credential-save path.
-  version: 0.3.1
+  version: 0.4.0
   contact:
     name: Geelen Audio
     url: https://github.com/geelen/ESP32_AudioPlatform
   license:
-    name: MIT
+    name: GPL-3.0-or-later
+    url: https://www.gnu.org/licenses/gpl-3.0.txt
 
 servers:
   - url: http://geelen.local
@@ -42,7 +43,11 @@ tags:
   - name: Sources
     description: Per-source configuration (Snapcast, DLNA).
   - name: EQ
-    description: Dual parametric EQ (calibration + preference), presets, headroom.
+    description: |
+      Single-layer parametric EQ with per-board runtime cap (10 bands on
+      Amped, up to 15 on Louder — Louder uses the TAS5825M's on-chip DSP
+      when available, otherwise falls back to the software cascade),
+      shared preset store (10 slots), and headroom control.
   - name: Admin
     description: Device name, granular reset.
   - name: WiFi
@@ -62,7 +67,8 @@ paths:
       description: |
         Single round-trip snapshot of everything the SPA needs to render:
         current mode, volume, channel config, Snapcast host, DLNA settings,
-        both EQ curves, headroom settings, device name, firmware version.
+        the EQ curve + backend + per-board `max_bands`, headroom settings,
+        device name, firmware version.
 
         SPA fetches this once per page mount; live metrics (CPU / heap /
         WiFi RSSI) live on `GET /api/system` and should be polled
@@ -86,14 +92,17 @@ paths:
                 wifi: { power_save: "none" }
                 voice_feedback: true
                 eq:
-                  calibration:
-                    enabled: true
-                    bands:
-                      - { freq: 1000, gain_db: -1.5, q: 1.2 }
-                  preference:
-                    enabled: false
-                    bands:
-                      - { freq: 1000, gain_db: 0, q: 1.2 }
+                  enabled: true
+                  band_count: 6
+                  max_bands: 10
+                  backend: "software"
+                  bands:
+                    - { freq: 60,   gain_db:  3.0, q: 1.00, type: "bell" }
+                    - { freq: 200,  gain_db: -1.5, q: 1.20, type: "bell" }
+                    - { freq: 1000, gain_db:  0.0, q: 1.20, type: "bell" }
+                    - { freq: 4000, gain_db:  2.0, q: 0.90, type: "bell" }
+                    - { freq: 8000, gain_db:  2.0, q: 0.80, type: "high_shelf" }
+                    - { freq: 12000,gain_db:  1.0, q: 0.80, type: "bell" }
                   headroom: { mode: "auto", manual_db: 0, auto_db: -2.3 }
                   active_slot: 255
 
@@ -125,6 +134,52 @@ paths:
                   channel: 36
                   ip: "10.0.80.34"
                 cpu: { core0_pct: 12, core1_pct: 34 }
+
+  /api/system/summary:
+    get:
+      tags: [State]
+      summary: Compact runtime metrics for the Overview page
+      description: |
+        Same fields as `/api/system/metrics` minus the audio meters.
+        Polled at ~0.3 Hz by the Overview page so BT playback is not
+        blocked by large JSON serialization.
+      operationId: getSystemSummary
+      responses:
+        "200":
+          description: Compact metrics snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemInfo" }
+
+  /api/system/tasks:
+    get:
+      tags: [State]
+      summary: FreeRTOS task dump
+      description: |
+        `uxTaskGetSystemState` snapshot: name, priority, stack high-water
+        mark, run-time counter, and core id. Requires
+        `CONFIG_FREERTOS_USE_TRACE_FACILITY`.
+      operationId: getSystemTasks
+      responses:
+        "200":
+          description: Task list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        prio: { type: integer }
+                        stack_hwm: { type: integer }
+                        runtime: { type: number }
+                        runtime_pct: { type: number }
+                        core: { type: integer }
 
   /api/volume:
     post:
@@ -168,6 +223,30 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ChannelSetting" }
+
+  /api/led:
+    post:
+      tags: [Audio]
+      summary: WS2812 colour and brightness
+      description: |
+        Sets the user colour for every pixel on the compile-time strip
+        (`HAL_WS2812_COUNT`). Does not change pixel count. Takes over from
+        the boot/pairing status animation immediately.
+      operationId: setLed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LedSetting" }
+            example: { color: "#ff8800", brightness: 40 }
+      responses:
+        "200":
+          description: Effective LED setting (includes compile-time count and phase).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedState" }
+        "404":
+          description: This firmware image has no WS2812 (`HAL_HAS_WS2812=0`).
 
   /api/mode:
     post:
@@ -291,13 +370,14 @@ paths:
   /api/eq:
     post:
       tags: [EQ]
-      summary: Update an EQ layer
+      summary: Update the parametric EQ curve
       description: |
-        Writes the parametric curve (up to 10 logical bands per layer) and/or
-        toggles the layer enable for calibration or preference. The device
-        always stores **10** band slots; `band_count` selects how many are
-        **active** in the DSP (1–10). Inactive tail slots are kept in NVS but
-        not processed.
+        Writes the single parametric curve and/or toggles the EQ enable.
+        The device always stores **15** band slots (matches the widest
+        supported board); `band_count` selects how many are **active** in
+        the DSP. The active count is clamped to `state.eq.max_bands`
+        (10 on Amped, up to 15 on Louder). Inactive tail slots are kept
+        in NVS but not processed.
 
         `bands` may be a partial array; entries are merged by index with the
         current curve so the client can send a single edited band.
@@ -306,17 +386,20 @@ paths:
         `low_pass`, `high_pass`) and optional `slope_db_oct` (**6**, **12**, or
         **24**) for low-pass / high-pass only.
 
-        The firmware clamps frequencies, gains, and Q before storage. The JSON
-        response includes `headroom` (auto attenuation may change when the
-        EQ chain changes).
-      operationId: setEqLayer
+        The firmware clamps frequencies, gains, and Q before storage. On
+        Louder boards the coefficients are pushed to the TAS5825M's on-chip
+        DSP; the response's `backend` field reports the actual applied
+        backend ("hardware", "software", or "software (fallback)" when the
+        HW upload failed and the software cascade took over). The response
+        also includes `headroom` (auto attenuation may change when the EQ
+        chain changes).
+      operationId: setEqCurve
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/EqLayerUpdate" }
+            schema: { $ref: "#/components/schemas/EqCurveUpdate" }
             example:
-              layer: "preference"
               enabled: true
               band_count: 6
               bands:
@@ -324,16 +407,24 @@ paths:
                 - { freq: 8000, gain_db: 2.0, q: 0.8, type: "high_shelf" }
       responses:
         "200":
-          description: The full curve after clamping, plus layer id and headroom.
+          description: The full curve after clamping, plus backend and headroom.
           content:
             application/json:
               schema:
                 allOf:
                   - $ref: "#/components/schemas/EqCurve"
                   - type: object
-                    required: [layer, headroom]
+                    required: [headroom, backend, max_bands]
                     properties:
-                      layer: { type: string, enum: [calibration, preference] }
+                      max_bands:
+                        type: integer
+                        minimum: 1
+                        maximum: 15
+                        description: Per-board runtime cap for `band_count`.
+                      backend:
+                        type: string
+                        enum: [software, hardware, "software (fallback)"]
+                        description: Which EQ backend is currently applied.
                       headroom: { $ref: "#/components/schemas/HeadroomSetting" }
 
   /api/eq/headroom:
@@ -361,7 +452,7 @@ paths:
   /api/eq/presets:
     get:
       tags: [EQ]
-      summary: List preference EQ preset slots
+      summary: List EQ preset slots
       operationId: getPresets
       responses:
         "200":
@@ -373,7 +464,7 @@ paths:
   /api/eq/presets/{idx}/save:
     post:
       tags: [EQ]
-      summary: Save the live preference curve into slot `idx`
+      summary: Save the live EQ curve into slot `idx`
       operationId: savePreset
       parameters:
         - $ref: "#/components/parameters/PresetIndex"
@@ -395,13 +486,13 @@ paths:
   /api/eq/presets/{idx}/load:
     post:
       tags: [EQ]
-      summary: Replace the live preference curve with slot `idx`
+      summary: Replace the live EQ curve with slot `idx`
       operationId: loadPreset
       parameters:
         - $ref: "#/components/parameters/PresetIndex"
       responses:
         "200":
-          description: Slot contents + resulting preference curve.
+          description: Slot contents + resulting live curve.
           content:
             application/json:
               schema:
@@ -409,7 +500,7 @@ paths:
                 properties:
                   index: { type: integer }
                   name: { type: string }
-                  preference: { $ref: "#/components/schemas/EqCurve" }
+                  eq: { $ref: "#/components/schemas/EqCurve" }
         "404":
           description: Slot is empty.
           content:
@@ -520,6 +611,58 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+  /api/wifi/validate:
+    post:
+      tags: [WiFi]
+      summary: Probe Wi-Fi credentials without persisting
+      description: |
+        JSON `{ssid, pass}`. Tries STA while keeping the captive AP up.
+        Does not write NVS and does not reboot. Timeout is 12 s.
+      operationId: validateWifi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ssid]
+              properties:
+                ssid: { type: string, maxLength: 32 }
+                pass: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: Probe result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  reason: { type: string, enum: [OK, AUTH_FAIL, NO_AP_FOUND, ASSOC_FAIL, TIMEOUT, FAIL] }
+                  detail: { type: string }
+                  ip: { type: string }
+
+  /api/wifi/commit:
+    post:
+      tags: [WiFi]
+      summary: Persist last successful validate and reboot
+      operationId: commitWifi
+      responses:
+        "200":
+          description: Saved; rebooting.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  reboot: { type: boolean }
+        "400":
+          description: No successful validate in this session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/wifi/scan:
     get:
       tags: [WiFi]
@@ -618,7 +761,7 @@ paths:
                 mode: "min_modem"
                 applies_on_next_boot: true
         "400":
-          description: `mode` missing or not in the enum.
+          description: "`mode` missing or not in the enum."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -680,6 +823,33 @@ components:
         l_on: { type: boolean }
         r_on: { type: boolean }
 
+    LedSetting:
+      type: object
+      properties:
+        color:
+          type: string
+          pattern: "^#[0-9a-fA-F]{6}$"
+          description: sRGB hex. Omitted fields keep the current value.
+        brightness:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    LedState:
+      type: object
+      properties:
+        present: { type: boolean }
+        count:
+          type: integer
+          minimum: 0
+          maximum: 64
+          description: Compile-time `HAL_WS2812_COUNT`. Read-only.
+        phase:
+          type: string
+          enum: [boot, wifi, pairing, user]
+        color: { type: string, pattern: "^#[0-9a-fA-F]{6}$" }
+        brightness: { type: integer, minimum: 0, maximum: 100 }
+
     SnapcastSetting:
       type: object
       properties:
@@ -729,26 +899,34 @@ components:
         band_count:
           type: integer
           minimum: 1
-          maximum: 10
-          description: Number of logical bands processed for this layer.
+          maximum: 15
+          description: |
+            Number of logical bands processed. Clamped to the per-board
+            runtime cap (`state.eq.max_bands`, 10 on Amped, up to 15 on
+            Louder). Inactive tail slots are stored but not applied.
         bands:
           type: array
-          minItems: 10
-          maxItems: 10
-          description: Always 10 entries; only the first `band_count` are active in DSP.
+          minItems: 15
+          maxItems: 15
+          description: |
+            Always 15 entries (fits the widest supported board). Only the
+            first `band_count` are active in DSP; the remainder are stored
+            for round-tripping preset files across boards.
           items: { $ref: "#/components/schemas/EqBand" }
 
-    EqLayerUpdate:
+    EqCurveUpdate:
       type: object
-      required: [layer]
+      description: |
+        Partial update payload accepted by `POST /api/eq`. All fields are
+        optional; the firmware merges into the current live curve. `bands`
+        is index-merged, so the client can send a single edited band.
       properties:
-        layer: { type: string, enum: [calibration, preference] }
         enabled: { type: boolean }
         band_count:
           type: integer
           minimum: 1
-          maximum: 10
-          description: Active logical bands (1–10); optional if unchanged.
+          maximum: 15
+          description: Active logical bands; clamped to `state.eq.max_bands`.
         bands:
           type: array
           items: { $ref: "#/components/schemas/EqBand" }
@@ -806,6 +984,7 @@ components:
         mode:        { $ref: "#/components/schemas/Mode" }
         volume:      { $ref: "#/components/schemas/VolumeSetting" }
         channels:    { $ref: "#/components/schemas/ChannelSetting" }
+        led:         { $ref: "#/components/schemas/LedState" }
         snapcast:    { $ref: "#/components/schemas/SnapcastSetting" }
         dlna:        { $ref: "#/components/schemas/DlnaSetting" }
         wifi:        { $ref: "#/components/schemas/WifiSetting" }
@@ -817,14 +996,26 @@ components:
             by the `/api/state/stream` SSE consumer (and as an ETag analogue
             on `/api/state`) so SPA clients can detect skipped frames.
         eq:
-          type: object
-          properties:
-            calibration: { $ref: "#/components/schemas/EqCurve" }
-            preference:  { $ref: "#/components/schemas/EqCurve" }
-            headroom:    { $ref: "#/components/schemas/HeadroomSetting" }
-            active_slot:
-              type: integer
-              description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
+          allOf:
+            - $ref: "#/components/schemas/EqCurve"
+            - type: object
+              properties:
+                max_bands:
+                  type: integer
+                  minimum: 1
+                  maximum: 15
+                  description: |
+                    Per-board runtime cap for `band_count`. 10 on Amped
+                    (software cascade), up to 15 on Louder (TAS5825M
+                    on-chip DSP or software fallback).
+                backend:
+                  type: string
+                  enum: [software, hardware, "software (fallback)"]
+                  description: Which EQ backend is currently applied.
+                headroom: { $ref: "#/components/schemas/HeadroomSetting" }
+                active_slot:
+                  type: integer
+                  description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
 
     WifiSetting:
       type: object

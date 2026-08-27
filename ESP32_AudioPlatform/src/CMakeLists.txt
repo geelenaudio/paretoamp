@@ -22,6 +22,14 @@ idf_component_register(
     "idf_voice_cache.cpp"
     "idf_state_stream.cpp"
     "idf_mode_manager.cpp"
+    "idf_led.cpp"
+    # Hardware Abstraction Layer sources. Both DAC backends are always compiled;
+    # each one is empty when `HAL_HAS_I2C_DAC` doesn't match the board (the
+    # `#if` gates inside the .cpp collapse the file to nothing on the wrong
+    # board so we don't need per-env `build_src_filter` gymnastics here).
+    "hal/dac_none.cpp"
+    "hal/dac_tas5825m.cpp"
+    "hal/led_ws2812.cpp"
   INCLUDE_DIRS
     "."
     "../include"
@@ -39,4 +47,7 @@ idf_component_register(
     bt
     json
     libhelix-mp3
+    driver
+    tas5805m
+    led_strip
 )

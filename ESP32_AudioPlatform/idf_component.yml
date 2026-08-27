@@ -1,4 +1,5 @@
 dependencies:
   espressif/mdns: "^1.2.2"
   chmorgan/esp-libhelix-mp3: "^1.0.3"
+  espressif/led_strip: "^3.0.3"
 

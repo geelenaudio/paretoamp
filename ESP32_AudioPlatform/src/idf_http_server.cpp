@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // ESP-IDF HTTP server implementation (esp_http_server)
 //
 // Layout:
@@ -21,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -105,11 +109,11 @@ button[disabled]{opacity:.55;cursor:default}
     <label for="pass">Password</label>
     <input id="pass" name="pass" type="password" autocomplete="new-password" />
     <div id="err" class="err"></div>
-    <button id="save" type="submit">Save & connect</button>
+    <button id="save" type="submit">Validate & save</button>
   </form>
   <div id="busy" class="card busy">
     <div class="spinner"></div>
-    <div>Saving and rebooting…</div>
+    <div id="busymsg">Checking credentials…</div>
     <p class="muted">Reconnect your phone/laptop to its normal Wi-Fi. The amplifier will join <span id="targetssid">your network</span> in <span id="cd">15</span> s.</p>
   </div>
 </main>
@@ -156,15 +160,27 @@ button[disabled]{opacity:.55;cursor:default}
     if(!ssid){err.textContent='Pick or type a network name.';return}
     err.textContent='';
     save.disabled=true;
-    var body='ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass.value);
-    fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
-      .then(function(r){if(!r.ok)throw new Error(r.status);return r.json()})
-      .then(function(){
+    var busymsg=document.getElementById('busymsg');
+    fetch('/api/wifi/validate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ssid:ssid,pass:pass.value})})
+      .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+      .then(function(x){
+        if(!x.j || !x.j.ok){
+          var reason=(x.j&&x.j.reason)||'FAIL';
+          var detail=(x.j&&x.j.detail)||'';
+          err.textContent=reason+(detail?' — '+detail:'');
+          save.disabled=false;
+          return;
+        }
+        busymsg.textContent='Wi-Fi credentials validated. Saving and rebooting…';
         f.style.display='none';busy.classList.add('show');tg.textContent=ssid;
-        var n=15;cd.textContent=n;
-        var t=setInterval(function(){n--;cd.textContent=n;if(n<=0)clearInterval(t)},1000);
+        return fetch('/api/wifi/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+          .then(function(){
+            var n=15;cd.textContent=n;
+            var t=setInterval(function(){n--;cd.textContent=n;if(n<=0)clearInterval(t)},1000);
+          });
       })
-      .catch(function(e2){err.textContent='Save failed: '+e2;save.disabled=false});
+      .catch(function(e2){err.textContent='Validate failed: '+e2;save.disabled=false});
   };
 })();
 </script>
@@ -212,6 +228,159 @@ static const char* mime_for(const char* path) {
   if (!strcmp(dot, ".txt"))  return "text/plain; charset=utf-8";
   if (!strcmp(dot, ".map"))  return "application/json; charset=utf-8";
   return "application/octet-stream";
+}
+
+// ---- Async streaming for large static files -------------------------------
+//
+// Why this exists: ESP-IDF's `esp_http_server` uses ONE worker thread that
+// processes requests sequentially. While that thread is mid-`send` on a
+// large response, every other client (SSE, /api/state polls, page asset
+// loads) waits until it's done. The Swagger UI bundle (`/docs/ui.js`,
+// ~400 KiB gzipped) made this very visible: a single request could occupy
+// the worker for tens of seconds, occasionally getting truncated when TCP
+// backpressure (5 s send_wait_timeout) tripped. Concurrent navigation to
+// other pages (e.g. /dsp) timed out because the worker was still busy.
+//
+// Fix: for any file ≥ kAsyncThreshold we detach the request to a worker
+// task (PSRAM-backed stack) using `httpd_req_async_handler_begin` — exactly
+// the same pattern the SSE handlers use. The httpd worker returns to its
+// accept loop within microseconds and other requests proceed in parallel.
+// The detached worker streams the file at its own pace with periodic yields
+// so lwip's TX path drains between chunks.
+//
+// Cap: at most kAsyncMaxWorkers concurrent async sends. Beyond that we
+// fall back to inline streaming (which still works for the *first* couple
+// of large requests; this just prevents a request flood from spawning
+// arbitrarily many tasks). 2 is enough for one browser tab refreshing
+// the Swagger page while the SPA is also loading.
+static constexpr size_t kAsyncThreshold = 32 * 1024;
+static constexpr size_t kAsyncMaxWorkers = 2;
+static std::atomic<size_t> s_async_workers{0};
+
+struct AsyncFileSendArgs {
+  httpd_req_t* req;     // detached request handle (owns its own copy)
+  int fd;               // open fd; worker takes ownership and closes it
+  size_t total_bytes;   // for logging
+};
+
+// Drain `fd` to `req` in 2 KiB chunks with a 1-tick yield between sends so
+// the lwip TX task can recycle pbufs between iterations. `httpd_resp_set_*`
+// headers must already have been written before `async_handler_begin` —
+// IDF locks the response state at handoff, so the worker only emits body.
+static void async_file_send_task(void* arg) {
+  auto* a = static_cast<AsyncFileSendArgs*>(arg);
+  httpd_req_t* req = a->req;
+  int fd = a->fd;
+  const size_t total = a->total_bytes;
+  delete a;
+
+  // 2 KiB chunks: a balance between fewer send_chunk calls (vs. 1 KiB) and
+  // a cheap stack footprint (vs. malloc). Stays well below the 5760 B TCP
+  // send buf so each chunk fits in a single lwip write. Lives on the task
+  // stack — we sized it to 6 KiB below specifically to accommodate this.
+  char buf[2048];
+  size_t sent = 0;
+  ssize_t r;
+  while ((r = read(fd, buf, sizeof(buf))) > 0) {
+    esp_err_t rc = httpd_resp_send_chunk(req, buf, r);
+    if (rc != ESP_OK) {
+      ESP_LOGW(TAG, "async send_chunk failed after %u/%u B (rc=0x%x)",
+               (unsigned)sent, (unsigned)total, rc);
+      goto done;
+    }
+    sent += (size_t)r;
+    // Yield one tick so the lwip TCPIP task can drain its tx queue. Without
+    // this we hot-loop into send_chunk faster than ACKs come back, the
+    // socket buffer fills, and the next send blocks for up to 5 s — which
+    // either truncates the response or stalls other handlers waiting on
+    // shared httpd state. One tick = 10 ms (CONFIG_FREERTOS_HZ=100), so
+    // a 400 KiB file takes ~2 s of wall-clock yields on top of network
+    // time — fine for a one-time SwaggerUI bundle load.
+    vTaskDelay(1);
+  }
+
+  // Terminating empty chunk completes the chunked body.
+  httpd_resp_send_chunk(req, nullptr, 0);
+  if (sent != total) {
+    ESP_LOGW(TAG, "async send: short read %u/%u B",
+             (unsigned)sent, (unsigned)total);
+  }
+
+done:
+  close(fd);
+  httpd_req_async_handler_complete(req);
+  s_async_workers.fetch_sub(1, std::memory_order_relaxed);
+  vTaskDelete(nullptr);
+}
+
+// Hand off `fd` (already-opened, headers already set on `req`) to a detached
+// worker. Returns ESP_OK if the worker is running (httpd thread should also
+// return ESP_OK so it stops touching `req`); on failure caller is responsible
+// for closing fd / returning an error to the client.
+static esp_err_t start_async_file_send(httpd_req_t* req, int fd, size_t total_bytes) {
+  // Bound concurrency so a request flood can't spawn unbounded workers.
+  size_t cur = s_async_workers.load(std::memory_order_relaxed);
+  if (cur >= kAsyncMaxWorkers) {
+    return ESP_ERR_NO_MEM;
+  }
+  if (!s_async_workers.compare_exchange_strong(cur, cur + 1)) {
+    // Someone raced us to a slot — refuse rather than overshoot.
+    return ESP_ERR_NO_MEM;
+  }
+
+  httpd_req_t* detached = nullptr;
+  esp_err_t rc = httpd_req_async_handler_begin(req, &detached);
+  if (rc != ESP_OK || !detached) {
+    s_async_workers.fetch_sub(1, std::memory_order_relaxed);
+    return rc != ESP_OK ? rc : ESP_FAIL;
+  }
+
+  auto* args = new (std::nothrow) AsyncFileSendArgs{detached, fd, total_bytes};
+  if (!args) {
+    httpd_req_async_handler_complete(detached);
+    s_async_workers.fetch_sub(1, std::memory_order_relaxed);
+    return ESP_ERR_NO_MEM;
+  }
+
+  // Stack on internal DRAM (default for `xTaskCreatePinnedToCore` — see
+  // idf_logs.cpp's `sse_stream_task` for the same pattern). 6 KiB
+  // accommodates the 2 KiB on-stack chunk buffer plus lwip/httpd/file IO
+  // call frames with margin. PSRAM stacks tested unstable here (long
+  // chunked writes hit PSRAM-cache flush windows in lwip), so we accept
+  // the internal-DRAM cost — capped at 12 KiB total via kAsyncMaxWorkers.
+  // Pin to Core 1 to mirror the httpd worker (Core 0 is full of Wi-Fi /
+  // BT / lwip; see HttpServer::begin for the rationale).
+  // Priority 4: below httpd (10) so /api/state JSON polls take priority,
+  // mirrors the SSE log streamer (4).
+  BaseType_t ok = xTaskCreatePinnedToCore(
+      async_file_send_task, "http-bigsend", /*stack*/ 6144, args,
+      /*prio*/ 4, nullptr, /*core*/ 1);
+  if (ok != pdPASS) {
+    delete args;
+    httpd_req_async_handler_complete(detached);
+    s_async_workers.fetch_sub(1, std::memory_order_relaxed);
+    return ESP_ERR_NO_MEM;
+  }
+
+  return ESP_OK;
+}
+
+// Inline streaming — used for small files and for the fallback when the
+// async worker pool is full. Identical to the historical implementation
+// (1 KiB chunks). For small files this is fine: a 7 KiB asset is 7 chunks
+// and the httpd worker is back to the accept loop in milliseconds.
+static esp_err_t inline_file_send(httpd_req_t* req, int fd) {
+  char buf[1024];
+  ssize_t r;
+  while ((r = read(fd, buf, sizeof(buf))) > 0) {
+    if (httpd_resp_send_chunk(req, buf, r) != ESP_OK) {
+      close(fd);
+      return ESP_FAIL;
+    }
+  }
+  close(fd);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
 }
 
 // Serve `/spiffs/<abs_path>`. Tries `<path>.gz` first (sets Content-Encoding:
@@ -266,17 +435,26 @@ static esp_err_t serve_file(httpd_req_t* req, const char* fs_path_no_gz,
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
   httpd_resp_set_hdr(req, "ETag", etag);
 
-  char buf[1024];
-  ssize_t r;
-  while ((r = read(fd, buf, sizeof(buf))) > 0) {
-    if (httpd_resp_send_chunk(req, buf, r) != ESP_OK) {
-      close(fd);
-      return ESP_FAIL;
+  // Detach large files to a worker task so the single httpd thread isn't
+  // monopolised. Without this, a Swagger-UI page load (`/docs/ui.js` ≈
+  // 400 KiB) blocks /api/state, /pages/dsp.js, etc., for the duration of
+  // the transfer — which manifests as "EQ page won't load" if the user
+  // has a docs tab open. Async path also handles TCP backpressure more
+  // gracefully (yields between chunks instead of hot-spinning send_chunk).
+  if ((size_t)st.st_size >= kAsyncThreshold) {
+    esp_err_t rc = start_async_file_send(req, fd, (size_t)st.st_size);
+    if (rc == ESP_OK) {
+      // Worker owns fd + req from here. Returning ESP_OK frees the httpd
+      // thread immediately to accept the next request.
+      return ESP_OK;
     }
+    // Pool full or async setup failed — fall back to inline send. Better
+    // a slow request than a dropped one. We still own fd at this point.
+    ESP_LOGW(TAG, "async pool busy, sending %s inline (%u B)",
+             path, (unsigned)st.st_size);
   }
-  close(fd);
-  httpd_resp_send_chunk(req, nullptr, 0);
-  return ESP_OK;
+
+  return inline_file_send(req, fd);
 }
 
 // Send the inline Wi-Fi setup page. Used both for the captive `/` redirect
@@ -370,6 +548,7 @@ static esp_err_t handle_static(httpd_req_t* req) {
   //   /                -> /spiffs/web/index.html           (SPA shell)
   //   /docs or /docs/  -> /spiffs/web/docs/index.html      (Swagger UI)
   //   /openapi.yaml    -> /spiffs/web/api/openapi.yaml     (API spec)
+  //   /COPYING         -> /spiffs/web/COPYING.txt          (GPL-3.0 licence)
   //   anything else    -> /spiffs/web<path>
   char fs_path[160];
   if (path[0] == '\0' || strcmp(path, "/") == 0) {
@@ -378,6 +557,10 @@ static esp_err_t handle_static(httpd_req_t* req) {
     snprintf(fs_path, sizeof(fs_path), "/spiffs/web/docs/index.html");
   } else if (strcmp(path, "/openapi.yaml") == 0) {
     snprintf(fs_path, sizeof(fs_path), "/spiffs/web/api/openapi.yaml");
+  } else if (strcmp(path, "/COPYING") == 0) {
+    // "Appropriate Legal Notices" surface required by GPL §5(d) — the SPA
+    // links here from the About screen (`web/pages/system.js`).
+    snprintf(fs_path, sizeof(fs_path), "/spiffs/web/COPYING.txt");
   } else {
     snprintf(fs_path, sizeof(fs_path), "/spiffs/web%s", path);
   }
@@ -515,15 +698,31 @@ static esp_err_t handle_wifi(httpd_req_t* req) {
   getField("ssid=", ssid, sizeof(ssid));
   getField("pass=", pass, sizeof(pass));
 
-  if (ssid[0] != '\0') {
-    cfg->setWifiSsid(ssid);
-    cfg->setWifiPass(pass);
-    cfg->save();
-    ESP_LOGI(TAG, "WiFi credentials saved via Web UI; rebooting.");
-    scheduleRestart(800);
+  httpd_resp_set_type(req, "application/json");
+  if (ssid[0] == '\0') {
+    return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"FAIL\",\"detail\":\"missing ssid\"}",
+                           HTTPD_RESP_USE_STRLEN);
+  }
+  if (!s_wifi) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no wifi");
   }
 
-  httpd_resp_set_type(req, "application/json");
+  WifiProbeResult pr{};
+  bool ok = s_wifi->probeCredentials(ssid, pass, 12000, &pr);
+  if (!ok) {
+    char out[256];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":false,\"reason\":\"%s\",\"detail\":\"%s\"}",
+                     pr.reason[0] ? pr.reason : "FAIL",
+                     pr.detail[0] ? pr.detail : "probe failed");
+    return httpd_resp_send(req, out, n);
+  }
+  if (!s_wifi->commitValidated()) {
+    return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"FAIL\",\"detail\":\"commit failed\"}",
+                           HTTPD_RESP_USE_STRLEN);
+  }
+  ESP_LOGI(TAG, "WiFi credentials validated and saved; rebooting.");
+  scheduleRestart(800);
   return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
@@ -531,6 +730,7 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   cfg_ = cfg;
   wifi_ = wifi;
   s_wifi = wifi;  // expose to static handlers
+  apiSetWifiManager(wifi);
   if (!cfg_) return false;
   if (server_) return true;
 

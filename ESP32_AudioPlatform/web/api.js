@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // Thin JSON wrappers around the firmware REST API. Every call returns a
 // resolved JSON body or throws; component code handles the throw via the toast
 // system.
@@ -74,6 +77,16 @@ export const api = {
     catch (_) { return { _unimplemented: true }; }
   },
 
+  async getSystemSummary() {
+    try { return await j("GET", "/api/system/summary"); }
+    catch (_) { return { _unimplemented: true }; }
+  },
+
+  async getSystemTasks() {
+    try { return await j("GET", "/api/system/tasks"); }
+    catch (_) { return { _unimplemented: true }; }
+  },
+
   async getTestTone() {
     return await j("GET", "/api/test-tone");
   },
@@ -110,6 +123,10 @@ export const api = {
     return await j("POST", "/api/channels", patch);
   },
 
+  async setLed(patch) {
+    return await j("POST", "/api/led", patch);
+  },
+
   async setDlna(patch) {
     return await j("POST", "/api/dlna", patch);
   },
@@ -122,9 +139,15 @@ export const api = {
     return await j("POST", "/api/device-name", { name });
   },
 
-  async setEqLayer(patch) {
+  // Single-layer PEQ. The server accepts { enabled, band_count, bands }
+  // and clamps `band_count` to the per-board runtime cap
+  // (`state.eq.max_bands`).
+  async setEqCurve(patch) {
     return await j("POST", "/api/eq", patch);
   },
+  // Alias kept temporarily so any external caller / bookmarklet that already
+  // used the pre-refactor name still works. New code should call setEqCurve.
+  async setEqLayer(patch) { return this.setEqCurve(patch); },
 
   async setHeadroom(patch) {
     return await j("POST", "/api/eq/headroom", patch);
@@ -145,8 +168,21 @@ export const api = {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
-    if (!res.ok) throw new Error(res.statusText);
-    return res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      const reason = data.reason || res.statusText;
+      const detail = data.detail ? ` — ${data.detail}` : "";
+      throw new Error(`${reason}${detail}`);
+    }
+    return data;
+  },
+
+  async validateWifi(ssid, pass) {
+    return await j("POST", "/api/wifi/validate", { ssid, pass });
+  },
+
+  async commitWifi() {
+    return await j("POST", "/api/wifi/commit", {});
   },
 
   // Wi-Fi onboarding helpers used by the /wifi page and (in AP-only mode)
@@ -174,12 +210,17 @@ export const api = {
   // sockets total — see kMaxSubscribers in idf_state_stream.cpp).
   //
   // Returns an `unsubscribe()` function. Closing the last subscription
-  // closes the EventSource so a long-idled tab does not hold the firmware
-  // socket forever; the next `subscribeState` reopens it on demand.
+  // does not FIN the EventSource immediately: App unmounts the old page
+  // (`setPage(null)`) before the next module loads, so every nav click
+  // has a gap with zero subscribers. A ~2 s grace keeps the socket so
+  // firmware does not prune/accept on each click (that starved a2dp_pump
+  // and produced BT_APPL Pkt dropped). A long-idled tab with no
+  // subscribers still closes after the timer.
   //
   // The callback fires:
   //   - immediately if a snapshot is already cached (late joiner)
   //   - on every fresh `event: snapshot` from the server
+  //   - on `event: diff` (top-level keys merged into the last snapshot)
   //   - never on heartbeats (`event: ping` is silently consumed)
   //
   // If the stream fails for any reason the helper falls back to a single
@@ -197,6 +238,11 @@ const _stateBus = (() => {
   let lastSnapshot = null;
   const subs = new Set();
   let fallbackTried = false;
+  // App sets Page to null before the next lazy page module loads, so
+  // subscribe-count hits 0 on every nav click. Delay close so the next
+  // page reuses the same EventSource instead of FINing the firmware SSE.
+  let closeTimer = null;
+  const CLOSE_GRACE_MS = 2000;
 
   function open() {
     if (es) return;
@@ -206,16 +252,20 @@ const _stateBus = (() => {
       tryFallback();
       return;
     }
-    es.addEventListener("snapshot", (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        lastSnapshot = data;
-        for (const cb of subs) {
-          try { cb(data); } catch { /* swallow component errors */ }
-        }
-      } catch {
-        // Malformed JSON — ignore one frame; next one will likely be fine.
+    function emit(data) {
+      lastSnapshot = data;
+      for (const cb of subs) {
+        try { cb(data); } catch { /* swallow component errors */ }
       }
+    }
+    es.addEventListener("snapshot", (ev) => {
+      try { emit(JSON.parse(ev.data)); } catch { /* malformed; wait for next */ }
+    });
+    es.addEventListener("diff", (ev) => {
+      try {
+        const patch = JSON.parse(ev.data);
+        emit({ ...(lastSnapshot || {}), ...patch });
+      } catch { /* malformed; wait for next */ }
     });
     es.addEventListener("ping", () => { /* heartbeat */ });
     es.addEventListener("error", () => {
@@ -225,11 +275,27 @@ const _stateBus = (() => {
     });
   }
 
+  function cancelCloseTimer() {
+    if (closeTimer != null) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+
   function close() {
+    cancelCloseTimer();
     if (es) {
       es.close();
       es = null;
     }
+  }
+
+  function scheduleClose() {
+    cancelCloseTimer();
+    closeTimer = setTimeout(() => {
+      closeTimer = null;
+      if (subs.size === 0) close();
+    }, CLOSE_GRACE_MS);
   }
 
   function tryFallback() {
@@ -248,6 +314,7 @@ const _stateBus = (() => {
 
   return {
     subscribe(cb) {
+      cancelCloseTimer();
       subs.add(cb);
       open();
       // Replay the latest snapshot synchronously so a page mounting
@@ -257,7 +324,7 @@ const _stateBus = (() => {
       }
       return () => {
         subs.delete(cb);
-        if (subs.size === 0) close();
+        if (subs.size === 0) scheduleClose();
       };
     },
   };

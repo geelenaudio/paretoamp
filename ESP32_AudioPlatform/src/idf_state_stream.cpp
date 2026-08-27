@@ -1,8 +1,13 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Geelen Audio contributors
+//
 // See idf_state_stream.h for the design.
 
 #include "idf_state_stream.h"
 #include "idf_api.h"
 #include "idf_config_manager.h"
+#include "idf_a2dp_sink.h"
+#include "idf_voice_feedback.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -20,25 +25,42 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <errno.h>
+
 namespace geelen_idf {
 
 namespace {
 
 constexpr const char* TAG = "state-stream";
 
-// Caps come from `httpd.max_open_sockets = 10`. We reserve a few for the
-// log SSE + regular GETs, so 6 concurrent state subscribers is the most
-// any reasonable SPA fleet would hit (1 user × 4 tabs is the realistic
-// upper bound). New connections beyond this are 503'd with a Retry-After
-// hint rather than booting the oldest, so opening a fifth tab never
-// disconnects the visible four.
-constexpr size_t kMaxSubscribers = 6;
+// Caps come from `httpd.max_open_sockets = 10` *minus* the working set the
+// device cannot live without while subscribers are active:
+//   - 1 SSE log slot (idf_logs.cpp)
+//   - 2 async file-send slots (idf_http_server.cpp serve_file path)
+//   - 2-3 transient REST handlers (state polls, EQ writes, scan)
+//   - LRU + httpd internal slack
+// Each SSE state subscriber pins ~3 lwip TX pbufs (~4.5 KiB internal DRAM)
+// in steady state, plus the detached httpd_req_t (~600 B). We measured
+// the device falling into a `wifi:m f null`/`BT_APPL: Pkt dropped` storm
+// at 4-5 simultaneous subscribers with A2DP playing — the contiguous
+// internal-DRAM pool drops to <4 KiB and lwip can't allocate fresh pbufs
+// for inbound Wi-Fi frames. 3 is the highest cap that survives.
+//
+// This is also the cap that protects against EventSource auto-reconnect
+// storms: when the device transiently fails a send, the browser opens a
+// fresh SSE while the OLD one is still in `s_subs` (we only detect dead
+// sockets on the next broadcast). The smaller cap + the pre-accept prune
+// (`prune_dead_subscribers_unlocked`) below stop the ghost pile-up.
+constexpr size_t kMaxSubscribers = 3;
 
 // Broadcaster cadence. 250 ms is the smallest interval that still feels
 // "instant" to a UI without amplifying slider-drag bursts; ConfigManager
 // itself debounces NVS writes on a similar timer, so no slider produces
 // more frames than this regardless of how fast the user moves.
 constexpr int kBroadcastPeriodMs = 250;
+constexpr int kBroadcastPeriodStreamingMs = 500;
 
 // Snapshot framing buffer. Sized for the largest realistic state JSON
 // (full EQ curve + test-tone settings + identity). 4 KiB is comfortable.
@@ -75,6 +97,13 @@ std::atomic<bool> s_force_publish{false};
 // to decide whether to rebuild the snapshot.
 std::atomic<uint32_t> s_last_published_v{0};
 
+// Previous full-state tree, used to compute `event: diff` frames.
+cJSON* s_last_state = nullptr;
+
+// If more than this many top-level keys changed, send a full snapshot
+// instead of a diff (the EQ curve alone can dominate the payload).
+constexpr int kMaxDiffKeys = 4;
+
 // Locking helpers.
 struct Lock {
   Lock() { xSemaphoreTake(s_lock, portMAX_DELAY); }
@@ -108,6 +137,47 @@ void compact_unlocked() {
   s_sub_count = w;
 }
 
+// Probe each subscriber's underlying socket and drop any whose peer has
+// closed the connection (FIN observed) or errored out. Caller holds the
+// lock. Designed to be called *before* registering a new subscriber so
+// EventSource auto-reconnect doesn't pile up zombie slots — the typical
+// failure mode is: (1) old socket sees a transient lwip ENOMEM, (2) IDF
+// httpd quietly half-closes it, (3) browser silently opens a fresh SSE,
+// (4) the old s_subs slot stays "alive" until the next broadcast send
+// fails on it (up to 250 ms + however long lwip takes to give us EAGAIN).
+// During that window the count grows unbounded and pbufs pile up, which
+// is what triggered the wifi:m f null / Pkt dropped cascade in the
+// previous bug report.
+//
+// Detection uses `recv(MSG_PEEK | MSG_DONTWAIT)`:
+//   r == 0  → peer sent FIN (clean close)        → drop
+//   r > 0   → unexpected data on an SSE socket   → drop (broken client)
+//   r < 0 + errno == EAGAIN/EWOULDBLOCK → alive  → keep
+//   r < 0 + other errno → socket error           → drop
+size_t prune_dead_subscribers_unlocked() {
+  size_t pruned = 0;
+  for (size_t i = 0; i < s_sub_count; ++i) {
+    if (!s_subs[i].alive) continue;
+    int fd = httpd_req_to_sockfd(s_subs[i].req);
+    if (fd < 0) {
+      close_and_drop_unlocked(i);
+      ++pruned;
+      continue;
+    }
+    char probe;
+    ssize_t r = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (r > 0 || r == 0 ||
+        (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+      ESP_LOGI(TAG, "subscriber %u pruned (probe: r=%d errno=%d)",
+               (unsigned)i, (int)r, (int)errno);
+      close_and_drop_unlocked(i);
+      ++pruned;
+    }
+  }
+  if (pruned) compact_unlocked();
+  return pruned;
+}
+
 // Build "data: …\n\n" framed SSE event with explicit type. Returns bytes
 // written to `frame` (may be 0 if json_text doesn't fit in the cap minus
 // framing overhead).
@@ -123,36 +193,44 @@ size_t format_frame(char* frame, size_t cap, const char* event_name,
   return (size_t)n;
 }
 
-// Serialize the current state and broadcast the snapshot. Drops any
-// subscriber whose chunk write fails. Caller need NOT hold the lock —
-// this routine takes it itself.
-void publish_snapshot() {
-  if (!s_cfg) return;
-  cJSON* root = buildStateJson(s_cfg);
-  if (!root) return;
-  char* json = cJSON_PrintUnformatted(root);
-  cJSON_Delete(root);
-  if (!json) return;
-
-  const uint32_t version = s_cfg->stateVersion();
-  s_last_published_v.store(version, std::memory_order_release);
-
-  // One frame buffer reused across subscribers. A larger snapshot (e.g.
-  // post-Phase-3 with mode-state metadata) would exceed kFrameCapBytes;
-  // we log + skip rather than truncate so subscribers don't see an
-  // incomplete JSON document.
-  static char frame[kFrameCapBytes];
-  size_t n = format_frame(frame, sizeof(frame), "snapshot", version, json);
-  free(json);
-  if (n == 0) {
-    ESP_LOGE(TAG, "snapshot too large for frame buffer (cap=%u); skip", (unsigned)kFrameCapBytes);
-    return;
+cJSON* build_top_level_diff(cJSON* prev, cJSON* cur) {
+  if (!prev || !cur) return nullptr;
+  cJSON* diff = cJSON_CreateObject();
+  if (!diff) return nullptr;
+  int nkeys = 0;
+  for (cJSON* c = cur->child; c; c = c->next) {
+    cJSON* p = cJSON_GetObjectItemCaseSensitive(prev, c->string);
+    char* cs = cJSON_PrintUnformatted(c);
+    char* ps = p ? cJSON_PrintUnformatted(p) : nullptr;
+    const bool changed = !cs || !ps || std::strcmp(cs, ps) != 0;
+    free(cs);
+    free(ps);
+    if (!changed) continue;
+    cJSON_AddItemToObject(diff, c->string, cJSON_Duplicate(c, 1));
+    ++nkeys;
   }
+  for (cJSON* p = prev->child; p; p = p->next) {
+    if (cJSON_GetObjectItemCaseSensitive(cur, p->string)) continue;
+    cJSON_AddNullToObject(diff, p->string);
+    ++nkeys;
+  }
+  if (nkeys == 0 || nkeys > kMaxDiffKeys) {
+    cJSON_Delete(diff);
+    return nullptr;
+  }
+  return diff;
+}
 
+bool send_frame_to_subs(const char* frame, size_t n, uint32_t version,
+                        bool snapshot_only_new) {
   Lock lk;
   bool any_dropped = false;
   for (size_t i = 0; i < s_sub_count; ++i) {
     if (!s_subs[i].alive) continue;
+    if (snapshot_only_new && s_subs[i].last_sent_v != 0) continue;
+    // Diff frames skip anyone who already received this version (a full
+    // snapshot sent earlier in the same publish).
+    if (!snapshot_only_new && s_subs[i].last_sent_v == version) continue;
     if (!sse_send(s_subs[i].req, frame, n)) {
       ESP_LOGI(TAG, "subscriber %u dropped (send failed)", (unsigned)i);
       close_and_drop_unlocked(i);
@@ -162,6 +240,75 @@ void publish_snapshot() {
     s_subs[i].last_sent_v = version;
   }
   if (any_dropped) compact_unlocked();
+  return true;
+}
+
+// Serialize the current state and broadcast a snapshot (new subscribers)
+// and/or a compact top-level diff (existing subscribers).
+void publish_snapshot() {
+  if (!s_cfg) return;
+  cJSON* root = buildStateJson(s_cfg);
+  if (!root) return;
+
+  const uint32_t version = s_cfg->stateVersion();
+  s_last_published_v.store(version, std::memory_order_release);
+
+  char* snap_json = cJSON_PrintUnformatted(root);
+  if (!snap_json) {
+    cJSON_Delete(root);
+    return;
+  }
+
+  cJSON* diff = build_top_level_diff(s_last_state, root);
+  char* diff_json = diff ? cJSON_PrintUnformatted(diff) : nullptr;
+  if (diff) cJSON_Delete(diff);
+
+  char* frame = static_cast<char*>(heap_caps_malloc(kFrameCapBytes, MALLOC_CAP_SPIRAM));
+  if (!frame) {
+    free(snap_json);
+    free(diff_json);
+    cJSON_Delete(root);
+    ESP_LOGE(TAG, "snapshot frame OOM (PSRAM)");
+    return;
+  }
+
+  bool need_snapshot = true;
+  {
+    Lock lk;
+    need_snapshot = false;
+    for (size_t i = 0; i < s_sub_count; ++i) {
+      if (s_subs[i].alive && s_subs[i].last_sent_v == 0) {
+        need_snapshot = true;
+        break;
+      }
+    }
+  }
+  if (!diff_json) need_snapshot = true;
+
+  if (need_snapshot) {
+    size_t n = format_frame(frame, kFrameCapBytes, "snapshot", version, snap_json);
+    if (n == 0) {
+      ESP_LOGE(TAG, "snapshot too large for frame buffer (cap=%u); skip",
+               (unsigned)kFrameCapBytes);
+    } else if (diff_json) {
+      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/true);
+    } else {
+      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/false);
+    }
+  }
+  if (diff_json) {
+    size_t n = format_frame(frame, kFrameCapBytes, "diff", version, diff_json);
+    if (n != 0) {
+      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/false);
+    }
+  }
+
+  heap_caps_free(frame);
+  free(snap_json);
+  free(diff_json);
+
+  if (s_last_state) cJSON_Delete(s_last_state);
+  s_last_state = root;
 }
 
 // Send a heartbeat comment so middleboxes don't time out the TCP. SSE
@@ -215,7 +362,8 @@ void broadcaster_task(void*) {
            kBroadcastPeriodMs, (unsigned)kMaxSubscribers);
   TickType_t last_heartbeat = xTaskGetTickCount();
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(kBroadcastPeriodMs));
+    const bool streaming = a2dpPlaybackActive() || voiceFeedbackActive();
+    vTaskDelay(pdMS_TO_TICKS(streaming ? kBroadcastPeriodStreamingMs : kBroadcastPeriodMs));
 
     // Cheap: a single uint32 read in ConfigManager (a relaxed-atomic
     // counter is fine for this comparison; we never lock cfg here).
@@ -249,8 +397,20 @@ esp_err_t handle_state_stream(httpd_req_t* req) {
   // forever, defeating the point). esp_http_server's `HTTPD_xxx_*` enum
   // does not include 503, so we set the status line + body manually —
   // the SPA's EventSource auto-reconnect will respect the Retry-After.
+  //
+  // BEFORE checking capacity, prune any stale subscribers. EventSource
+  // auto-reconnects fire faster than our 250 ms broadcast tick, so a
+  // single browser refresh can stack 2-3 ghost slots that block real
+  // tabs from connecting. Pruning here also handles the case where the
+  // user closed a tab cleanly: the FIN is observable via MSG_PEEK well
+  // before the broadcaster's next send-and-fail would notice.
   {
     Lock lk;
+    size_t pruned = prune_dead_subscribers_unlocked();
+    if (pruned) {
+      ESP_LOGI(TAG, "pruned %u stale subscriber(s) before accept (now count=%u)",
+               (unsigned)pruned, (unsigned)s_sub_count);
+    }
     if (s_sub_count >= kMaxSubscribers) {
       httpd_resp_set_status(req, "503 Service Unavailable");
       httpd_resp_set_type(req, "text/plain");
@@ -264,62 +424,62 @@ esp_err_t handle_state_stream(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Connection", "keep-alive");
   httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
 
-  // Seed the connection with the current snapshot before detaching, so the
-  // SPA can render immediately without a follow-up REST round-trip. If
-  // this initial send fails, the client will simply retry — no async slot
-  // leaks because we haven't called async_handler_begin yet.
-  cJSON* root = buildStateJson(s_cfg);
-  char* initial_json = root ? cJSON_PrintUnformatted(root) : nullptr;
-  if (root) cJSON_Delete(root);
-  if (!initial_json) {
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "snapshot oom");
-  }
-  const uint32_t initial_v = s_cfg->stateVersion();
-  char initial_frame[kFrameCapBytes];
-  size_t n = format_frame(initial_frame, sizeof(initial_frame), "snapshot",
-                          initial_v, initial_json);
-  free(initial_json);
-  if (n == 0 || httpd_resp_send_chunk(req, initial_frame, n) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "snapshot send failed");
-  }
-
-  // Detach so the httpd worker can return; broadcaster_task will use the
-  // detached `req` for all subsequent chunks.
+  // CRITICAL: detach BEFORE writing any body. Calling httpd_resp_send_chunk
+  // on `req` first puts the response into chunked mode; when this handler
+  // returns ESP_OK the httpd cleanup path then emits the terminator chunk
+  // (`0\r\n\r\n`) on the socket — even though we tried to detach with
+  // async_handler_begin. The browser sees the terminator, treats the SSE
+  // response as complete, closes the connection, and EventSource fires its
+  // ~1 s auto-reconnect. The recv():ENOTCONN noise immediately after
+  // "subscriber added" was the smoking gun: the *just-accepted* socket
+  // was already half-closed by the time the worker returned.
+  //
+  // Pattern matches handle_logs_stream (idf_logs.cpp): set headers,
+  // detach, queue the body work for the broadcaster, return ESP_OK.
+  // Initial snapshot delivery is now the broadcaster's job and arrives
+  // within at most one tick (250 ms) — imperceptible to the SPA.
   httpd_req_t* detached = nullptr;
   if (httpd_req_async_handler_begin(req, &detached) != ESP_OK || !detached) {
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "async begin failed");
   }
 
-  Lock lk;
-  // Race-recheck under the lock — another connection might have used the
-  // last slot between our initial check and now. Unlikely in practice
-  // (single broadcaster task) but cheap to be safe.
-  if (s_sub_count >= kMaxSubscribers) {
-    httpd_req_async_handler_complete(detached);
-    // We've already started the SSE response (initial snapshot was
-    // chunk-sent above), so we cannot rewrite the status line at this
-    // point. Just close the chunked stream cleanly with an empty
-    // terminator and let the broadcaster never see this client.
-    httpd_resp_send_chunk(req, nullptr, 0);
-    return ESP_OK;
-  }
+  {
+    Lock lk;
+    // Race-recheck under the lock — another connection might have used the
+    // last slot between our pre-accept prune and now. Unlikely in practice
+    // but cheap to be safe.
+    if (s_sub_count >= kMaxSubscribers) {
+      httpd_req_async_handler_complete(detached);
+      // Headers were sent but no body chunks; httpd will emit the chunked
+      // terminator on cleanup which is fine here (we *want* the client to
+      // see the response close).
+      return ESP_OK;
+    }
 
-  static std::atomic<uint32_t> s_epoch_seq{1};
-  s_subs[s_sub_count] = Subscriber{
-      detached,
-      s_epoch_seq.fetch_add(1, std::memory_order_relaxed),
-      initial_v,
-      true,
-  };
-  ++s_sub_count;
-  ESP_LOGI(TAG, "subscriber added (count=%u)", (unsigned)s_sub_count);
-  // First subscriber: bring the broadcaster online. `stateStreamInit`
-  // intentionally does *not* spawn the task at boot — its 4 KiB stack
-  // is allocated from the same `MALLOC_CAP_INTERNAL` pool that
-  // Bluedroid's host-side queues need at `g_a2dp.begin` time, and on
-  // this build the contiguous-block budget is too tight to spend it
-  // before BT is up. Idempotent on subsequent subscribers.
-  ensure_broadcaster_started_locked();
+    static std::atomic<uint32_t> s_epoch_seq{1};
+    s_subs[s_sub_count] = Subscriber{
+        detached,
+        s_epoch_seq.fetch_add(1, std::memory_order_relaxed),
+        // last_sent_v=0 is the "needs initial snapshot" sentinel; the
+        // broadcaster's force-publish branch below sends to every
+        // subscriber regardless of last_sent_v on the next tick.
+        0,
+        true,
+    };
+    ++s_sub_count;
+    ESP_LOGI(TAG, "subscriber added (count=%u)", (unsigned)s_sub_count);
+    // First subscriber: bring the broadcaster online. `stateStreamInit`
+    // intentionally does *not* spawn the task at boot — its 4 KiB stack
+    // is allocated from the same `MALLOC_CAP_INTERNAL` pool that
+    // Bluedroid's host-side queues need at `g_a2dp.begin` time, and on
+    // this build the contiguous-block budget is too tight to spend it
+    // before BT is up. Idempotent on subsequent subscribers.
+    ensure_broadcaster_started_locked();
+    // Force the broadcaster to publish on its next tick so this fresh
+    // subscriber gets a snapshot within ≤ kBroadcastPeriodMs even if no
+    // state has changed.
+    s_force_publish.store(true, std::memory_order_release);
+  }
   return ESP_OK;
 }
 

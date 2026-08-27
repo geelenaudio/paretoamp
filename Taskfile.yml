@@ -16,6 +16,7 @@ vars:
   # have to touch your shell rc just to run `task`.
   PIO:
     sh: command -v pio 2>/dev/null || echo "$HOME/.platformio/penv/bin/pio"
+  # Override per-board: `PIO_ENV=louder-esp32-idf task fw:build`
   PIO_ENV: amped-esp32-idf
   PIO_PORT: /dev/ttyUSB0
   FW_DIR: ESP32_AudioPlatform
