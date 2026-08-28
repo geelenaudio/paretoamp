@@ -50,8 +50,8 @@ GPIO or via a TAS5825M state machine — are captured in the
 | `HAL_EQ_MAX_BANDS_ACTIVE`    | Runtime cap for the EQ (10 on Amped, up to 15 on Louder). |
 | `HAL_HAS_WS2812`             | 1 if this board has an optional WS2812B data pin. |
 | `HAL_PIN_WS2812`             | Data GPIO (see table below). Initialise in `app_main`, not the bootloader. |
-| `HAL_WS2812_COUNT`           | Compile-time pixel count (1–64). Header default is 1; override with `-DHAL_WS2812_COUNT=N`. Not NVS, not `POST /api/led`. |
-| `HAL_WS2812_MAX_DUTY`        | Peak electrical brightness (1–100%). Header default is 50; override with `-DHAL_WS2812_MAX_DUTY=N`. Applied in `ledSetRgb`; not NVS, not API. |
+| `HAL_WS2812_COUNT`           | Compile-time pixel count (1–64). Per-board header default (see table); override with `-DHAL_WS2812_COUNT=N`. Not NVS, not `POST /api/led`. |
+| `HAL_WS2812_MAX_DUTY`        | Peak electrical brightness (1–100%). Per-board header default (see table); override with `-DHAL_WS2812_MAX_DUTY=N`. Applied in `ledSetRgb`; not NVS, not API. |
 | `HAL_PIN_I2C_{SDA,SCL}`, `HAL_I2C_FREQ_HZ` (Louder only) | I2C bus for DAC control. |
 | `HAL_TAS5825M_I2C_ADDR` (Louder only) | 7-bit DAC address. |
 
@@ -63,7 +63,7 @@ RMT writes go nowhere.
 
 | Board            | `HAL_PIN_WS2812` | Default `HAL_WS2812_COUNT` | Default `HAL_WS2812_MAX_DUTY` |
 | ---------------- | ---------------- | -------------------------- | ----------------------------- |
-| Amped-WROVER     | GPIO 12          | 1                          | 50                            |
+| Amped-WROVER     | GPIO 12          | 12                         | 10                            |
 | Louder-WROVER    | GPIO 12          | 1                          | 50                            |
 | Amped-S3         | GPIO 9           | 1                          | 50                            |
 | Louder-S3        | GPIO 21          | 1                          | 50                            |
@@ -73,10 +73,12 @@ is safe at reset. Do not hold the line high in the bootloader.
 
 Count is a firmware-image constant (1–64). A daisy-chain on the same data
 pin is a rebuild, not an NVS or SPA setting — the protocol cannot probe
-length. Override without editing the board header:
+length. A longer strip is `-DHAL_WS2812_COUNT=N` (e.g. **35**), not a
+larger RMT buffer — 512 symbols is already the ESP32 SRAM cap. Override
+without editing the board header:
 
 ```
-build_flags = -DBOARD_AMPED_WROVER=1 -DHAL_WS2812_COUNT=8 -DHAL_WS2812_MAX_DUTY=50
+build_flags = -DBOARD_AMPED_WROVER=1 -DHAL_WS2812_COUNT=35
 ```
 
 Each board header wraps the defaults in `#ifndef HAL_WS2812_COUNT` /

@@ -25,6 +25,7 @@ flowchart LR
     WIFI["Wi-Fi driver"]
     TCPIP["tcpip_task (pinned CPU0)"]
     DLNA_TX["DLNA SSDP / SOAP"]
+    LED["led (prio 3)<br/>WS2812 animator, PSRAM stack"]
   end
 
   subgraph Core1["Core 1 (audio + control plane)"]
@@ -45,21 +46,23 @@ flowchart LR
   SNAP -- feedPCM --> RING
   MP3 -- feedPCM --> RING
   TT -- feedPCM --> RING
-  VOICE -. drives .-> MP3
+  VOICE -- feedPCM --> RING
   RING --> AUDIO
   AUDIO --> I2S[(I2S0 -> board DAC)]
 ```
 
 Source-of-truth references:
 
-```30:46:ESP32_AudioPlatform/src/idf_main.cpp
+```51:59:ESP32_AudioPlatform/src/idf_main.cpp
 static geelen::AudioEngine g_engine;
 static i2s_chan_handle_t g_i2s_tx = nullptr;
 static geelen_idf::ConfigManager g_cfg;
 static geelen_idf::WifiManager g_wifi;
 static geelen_idf::HttpServer g_http;
 static geelen_idf::Snapclient g_snap;
+#if CONFIG_BT_ENABLED
 static geelen_idf::A2dpSink g_a2dp;
+#endif
 ```
 
 The audio task is pinned to Core 1 at priority 20 to outrank everything that
@@ -69,8 +72,9 @@ pump. Other producers (Snapcast, MP3 streamer, voice) sit at prio 3–5 on
 the same core so they can never starve I2S, while Wi-Fi / BT / LwIP keep
 Core 0 free to do their own scheduling.
 
-```220:234:ESP32_AudioPlatform/src/idf_main.cpp
+```265:278:ESP32_AudioPlatform/src/idf_main.cpp
 static void audio_task(void*) {
+  // … yield one tick only on prefill / rebuffer / empty-ring …
   for (;;) {
     if (!g_engine.process()) {
       vTaskDelay(1);
@@ -83,7 +87,7 @@ static void audio_task(void*) {
 
 `AudioEngine` owns a PSRAM ring sized for ~2 s of stereo s16 at 44.1 kHz:
 
-```22:31:ESP32_AudioPlatform/include/audio_engine.h
+```39:46:ESP32_AudioPlatform/include/audio_engine.h
 constexpr int SAMPLE_RATE = 44100;
 constexpr size_t RING_BUF_SAMPLES = (size_t)SAMPLE_RATE * 2;
 constexpr size_t RING_BUF_BYTES = RING_BUF_SAMPLES * sizeof(int16_t) * 2;

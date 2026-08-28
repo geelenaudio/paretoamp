@@ -89,8 +89,18 @@ reverts to factory. 400 on invalid hostname or MAC.
 Friendly name only (`{ "name": "Kitchen" }`). Applied live to Bluetooth
 GAP, DLNA, and mDNS instance.
 
-### POST /api/factory_reset
+### POST /api/reset
 
-Reset all config to defaults and restart the device.
+Reset a scope of persistent config. Body: `{ "scope": "…" }`.
 
-**Response:** `{ "ok": true }` (then device restarts)
+| Scope | Effect | Reboot |
+| ----- | ------ | ------ |
+| `wifi` | STA credentials / power-save | yes |
+| `bluetooth` | pairing list | yes |
+| `snapcast` | Snapcast host/port | no |
+| `dlna` | DLNA name/enabled | no |
+| `eq` | PEQ curve + preset slots | no |
+| `audio` | volume, channels, LED user colour | no |
+| `all` / `factory` | everything | yes |
+
+**Response:** `{ "scope": "…", "reboot": true|false }`

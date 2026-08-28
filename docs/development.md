@@ -9,7 +9,7 @@ audio / Snapcast helpers.
 
 Three main layers:
 
-1. **Audio Engine** – I2S output, multi-stage parametric EQ + auto
+1. **Audio Engine** – I2S output, single-layer parametric EQ + auto
    headroom + limiter, PSRAM ring buffer. Receives PCM via `feedPCM`
    from any number of producers and drains it to the DAC in `process()`.
 2. **HTTP server** – `esp_http_server` serves the SPA, a JSON REST API,
@@ -62,6 +62,13 @@ Helpful flags:
   AVTransport / RenderingControl / ConnectionManager).
 - `src/idf_mp3_streamer.{h,cpp}` — Helix-based MP3 decoder for HTTP +
   SPIFFS clips.
+- `src/idf_led.{h,cpp}` — WS2812 boot/pairing/user animator (Core 0,
+  prio 3, PSRAM stack).
+- `src/idf_identity.{h,cpp}` — device name, hostname slug, MAC
+  override helpers.
+- `src/idf_mdns.{h,cpp}` — STA `_http._tcp` responder after got-IP.
+- `src/idf_voice_cache.{h,cpp}` — boot-time MP3 → PSRAM PCM cache;
+  prompt paths live in the `kClipManifest` table there.
 - `src/idf_voice_feedback.{h,cpp}` — voice-owner state machine + prompt
   queue.
 - `src/idf_test_tone.{h,cpp}` — sine / square / pink-noise / log-sweep
@@ -94,24 +101,25 @@ To iterate on UI changes:
 ## SPIFFS audio assets
 
 Voice prompts live in `ESP32_AudioPlatform/data/audio/`. Names must match
-the `kPath…` constants in `src/idf_voice_feedback.cpp`:
+the `kClipManifest` table in `src/idf_voice_cache.cpp`:
 
-```22:28:ESP32_AudioPlatform/src/idf_voice_feedback.cpp
-constexpr const char* kPathWifiConnected = "/spiffs/audio/WifiConnected.mp3";
-constexpr const char* kPathWifiDisconnected = "/spiffs/audio/WifiDisconnected.mp3";
-constexpr const char* kPathBluetoothMode = "/spiffs/audio/BluetoothMode.mp3";
-constexpr const char* kPathSnapcastMode = "/spiffs/audio/SnapcastMode.mp3";
-constexpr const char* kPathDlnaMode = "/spiffs/audio/DLNAMode.mp3";
-constexpr const char* kPathBluetoothConnected = "/spiffs/audio/BluetoothConnected.mp3";
-constexpr const char* kPathPairing = "/spiffs/audio/Pairing.mp3";
+```46:52:ESP32_AudioPlatform/src/idf_voice_cache.cpp
+    {VOICE_CLIP_WIFI_CONNECTED,      "/spiffs/audio/WifiConnected.mp3",      "WifiConnected.mp3"},
+    {VOICE_CLIP_WIFI_DISCONNECTED,   "/spiffs/audio/WifiDisconnected.mp3",   "WifiDisconnected.mp3"},
+    {VOICE_CLIP_BLUETOOTH_MODE,      "/spiffs/audio/BluetoothMode.mp3",      "BluetoothMode.mp3"},
+    {VOICE_CLIP_SNAPCAST_MODE,       "/spiffs/audio/SnapcastMode.mp3",       "SnapcastMode.mp3"},
+    {VOICE_CLIP_DLNA_MODE,           "/spiffs/audio/DLNAMode.mp3",           "DLNAMode.mp3"},
+    {VOICE_CLIP_BLUETOOTH_CONNECTED, "/spiffs/audio/BluetoothConnected.mp3", "BluetoothConnected.mp3"},
+    {VOICE_CLIP_PAIRING,             "/spiffs/audio/Pairing.mp3",            "Pairing.mp3"},
 ```
 
 To add a new prompt:
 
 1. Drop a short MP3 (≤ 2 s, mono or stereo, any common sample rate) in
    `data/audio/`.
-2. Add a `kPathFoo` constant in `idf_voice_feedback.cpp` and call
-   `voiceFeedbackEnqueuePrompt(kPathFoo)` from wherever the event lives.
+2. Add a `VOICE_CLIP_*` enum value and a matching `kClipManifest` row
+   in `idf_voice_cache.{h,cpp}`, then enqueue it from
+   `idf_voice_feedback.cpp` (or the event that should speak it).
 3. `pio run -t uploadfs && pio run -t upload`.
 
 To swap an existing prompt, just replace the MP3 with a same-named file
