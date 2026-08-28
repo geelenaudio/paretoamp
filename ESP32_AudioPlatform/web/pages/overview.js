@@ -80,7 +80,6 @@ export default function Overview({ api, navigate, toast }) {
   const [state, setState] = useState(null);
   const [sys, setSys] = useState(null);
   const [err, setErr] = useState(null);
-  const [wifiState, setWifiState] = useState(null);
   const inflight = useRef(false);
   const [ledColor, setLedColor] = useState("#ffffff");
   const [ledBri, setLedBri] = useState(0);
@@ -88,6 +87,8 @@ export default function Overview({ api, navigate, toast }) {
   const [nameDraft, setNameDraft] = useState("");
   const [nameBusy, setNameBusy] = useState(false);
   const nameSeeded = useRef(false);
+  const [pairLeftMs, setPairLeftMs] = useState(0);
+  const [pairBusy, setPairBusy] = useState(false);
 
   // Push-based config subscription. The first frame arrives within one
   // RTT of mount (the broadcaster sends an initial snapshot before
@@ -107,18 +108,6 @@ export default function Overview({ api, navigate, toast }) {
       }
     });
     return stop;
-  }, []);
-
-  // One-shot Wi-Fi state fetch — used to render the AP-only setup banner.
-  // Cheap (returns from RAM-resident WifiManager state); only called once
-  // because the banner is only relevant until the user reboots into STA.
-  useEffect(() => {
-    let cancelled = false;
-    api.getWifiState().then(
-      (s) => { if (!cancelled) setWifiState(s); },
-      () => { /* banner is best-effort */ },
-    );
-    return () => { cancelled = true; };
   }, []);
 
   // 1 Hz metrics poll.
@@ -152,6 +141,21 @@ export default function Overview({ api, navigate, toast }) {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
+  const bt = (state && state.bluetooth) || {};
+  useEffect(() => {
+    const base = bt.window_ms_left || 0;
+    if (!bt.discoverable || base <= 0) {
+      setPairLeftMs(0);
+      return;
+    }
+    const start = Date.now();
+    setPairLeftMs(base);
+    const t = setInterval(() => {
+      setPairLeftMs(Math.max(0, base - (Date.now() - start)));
+    }, 500);
+    return () => clearInterval(t);
+  }, [bt.discoverable, bt.window_ms_left, bt.connected]);
+
   if (err) return html`<div class="card">${err}</div>`;
   if (!state) return html`<div class="stub">Loading device state…</div>`;
 
@@ -171,6 +175,18 @@ export default function Overview({ api, navigate, toast }) {
 
   const nameDirty = nameDraft !== (state.device_name || "");
 
+  async function pairNew() {
+    setPairBusy(true);
+    try {
+      await api.setBluetooth({ discoverable: true });
+      toast && toast("Discoverable for 3 minutes", "ok");
+    } catch (e) {
+      toast && toast(String(e), "err");
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
   async function saveName() {
     const n = (nameDraft || "").trim();
     if (!n) return;
@@ -188,22 +204,6 @@ export default function Overview({ api, navigate, toast }) {
   return html`
     <h1 class="page__title">Overview</h1>
     <p class="page__subtitle">Live status for ${state.device_name || "this device"}.</p>
-
-    ${wifiState && wifiState.ap_only
-      ? html`<div class="card" style="border-color:var(--warn);margin-bottom:var(--sp-4)">
-          <div class="card__title" style="color:var(--warn)">Setup hotspot active</div>
-          <p style="margin:6px 0 10px">
-            The amplifier hasn't joined a Wi-Fi network yet, so it's running its own
-            <strong>${wifiState.ap_ssid || "Geelen-Audio"}</strong> hotspot.
-          </p>
-          <button
-            type="button"
-            class="btn btn--primary"
-            onClick=${() => navigate && navigate("/wifi")}>
-            Configure Wi-Fi
-          </button>
-        </div>`
-      : ""}
 
     <div class="grid">
       <div class="card card--metric">
@@ -324,6 +324,31 @@ export default function Overview({ api, navigate, toast }) {
           </div>
         </div>
       </div>` : ""}
+
+    ${mode === "bluetooth"
+      ? html`
+        <div class="card" style="margin-top:var(--sp-4)">
+          <div class="card__title">Bluetooth</div>
+          <div class="card__value" style="font-size:18px">
+            ${bt.connected
+              ? "Connected"
+              : bt.discoverable
+                ? `Pairing — ${Math.ceil(pairLeftMs / 1000)}s left`
+                : "Hidden — last paired phone can reconnect"}
+          </div>
+          <p class="card__sub" style="margin:8px 0 12px">
+            Discoverable for 3 minutes after Bluetooth starts, after a disconnect,
+            or when you tap Pair. Only one phone at a time.
+          </p>
+          <button
+            type="button"
+            class="btn btn--primary"
+            disabled=${pairBusy || !!bt.connected}
+            onClick=${pairNew}>
+            ${pairBusy ? "…" : "Pair new device"}
+          </button>
+        </div>`
+      : ""}
 
     ${state.mode === "snapclient" || state.source === 1
       ? html`

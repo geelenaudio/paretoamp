@@ -13,10 +13,14 @@
 //                    ganged and split is just a UI concern — no round-trip
 //                    to the server.
 //
-// Debouncing: the sliders fire `input` at ~60 Hz while dragging. We commit
-// on `change` (mouse-up) only, to avoid hammering the device with HTTP
-// requests. A tiny 120 ms trailing-edge timer picks up the last value if
-// the user lets go between frames on a flaky browser.
+  // Debouncing: the sliders fire `input` at ~60 Hz while dragging. We commit
+  // on `change` (mouse-up) only, to avoid hammering the device with HTTP
+  // requests. A tiny 120 ms trailing-edge timer picks up the last value if
+  // the user lets go between frames on a flaky browser.
+  //
+  // Remote volume (phone AVRCP, another tab) arrives via subscribeState.
+  // Apply it unless the user is dragging, or we just committed locally
+  // (ignore a stale snapshot for a short echo window).
 
 import { html, useEffect, useState, useRef } from "/vendor/htm-preact.mjs";
 
@@ -42,6 +46,18 @@ function lrToGanged(l, r) {
   return [master, clamp(balance, -100, 100)];
 }
 
+function readVolume(s) {
+  const v = s && s.volume;
+  if (!v) return null;
+  if (typeof v.l === "number" && typeof v.r === "number") {
+    return { l: v.l, r: v.r, muted: !!v.muted };
+  }
+  if (typeof v.volume === "number") {
+    return { l: v.volume, r: v.volume, muted: !!v.muted };
+  }
+  return null;
+}
+
 export default function Audio({ api, toast }) {
   const [state, setState] = useState(null);
   const [mode, setMode] = useState("ganged"); // "ganged" | "split"
@@ -60,38 +76,34 @@ export default function Audio({ api, toast }) {
 
   // Debounce timer for trailing-edge commit.
   const commitT = useRef(null);
+  const dragging = useRef(false);
+  const seeded = useRef(false);
+  const echoUntil = useRef(0);
 
   useEffect(() => {
-    // Seed once from the first push-based snapshot, then ignore subsequent
-    // frames so a slider drag isn't clobbered by an in-flight SSE update
-    // (the server-side debounce is 250 ms; the UI updates per-frame). The
-    // SSE channel still keeps `state` fresh for non-interactive fields like
-    // the mode badge in the page subtitle, which is why we keep updating
-    // the snapshot ref but only seed L/R/mute/channels on the very first
-    // delivery.
-    let seeded = false;
     const stop = api.subscribeState((s) => {
       setState(s);
-      if (seeded) return;
-      seeded = true;
-      const ll = s.volume?.l ?? 80;
-      const rr = s.volume?.r ?? 80;
-      setL(ll); setR(rr);
-      setMuted(!!s.volume?.muted);
-      setLon(s.channels?.l_on !== false);
-      setRon(s.channels?.r_on !== false);
-      setStereo(s.channels?.stereo_mono !== "mono");
-      const [m, b] = lrToGanged(ll, rr);
+      const vol = readVolume(s);
+      if (!vol) return;
+      if (dragging.current) return;
+      if (seeded.current && Date.now() < echoUntil.current) return;
+      setL(vol.l); setR(vol.r);
+      setMuted(vol.muted);
+      const [m, b] = lrToGanged(vol.l, vol.r);
       setMaster(m); setBalance(b);
-      // If the split is significant (>2 pct), the user is clearly using
-      // the per-channel view; default to split mode so they're not
-      // surprised.
-      if (Math.abs(ll - rr) > 2) setMode("split");
+      if (!seeded.current) {
+        seeded.current = true;
+        setLon(s.channels?.l_on !== false);
+        setRon(s.channels?.r_on !== false);
+        setStereo(s.channels?.stereo_mono !== "mono");
+        if (Math.abs(vol.l - vol.r) > 2) setMode("split");
+      }
     });
     return stop;
   }, []);
 
   async function commitVolume(nextL, nextR, nextMuted) {
+    echoUntil.current = Date.now() + 300;
     clearTimeout(commitT.current);
     commitT.current = setTimeout(async () => {
       try { await api.setVolume(nextL, nextR, nextMuted); }
@@ -105,23 +117,28 @@ export default function Audio({ api, toast }) {
 
   // Ganged slider input -> update master+balance -> recompute L/R -> commit.
   function onMasterInput(v) {
+    dragging.current = true;
     setMaster(v);
     const [nl, nr] = gangedToLR(v, balance);
     setL(nl); setR(nr);
   }
   function onBalanceInput(v) {
+    dragging.current = true;
     setBalance(v);
     const [nl, nr] = gangedToLR(master, v);
     setL(nl); setR(nr);
   }
   function onGangedCommit() {
+    dragging.current = false;
     commitVolume(l, r, muted);
   }
 
   function onSplitInput(channel, v) {
+    dragging.current = true;
     if (channel === "l") setL(v); else setR(v);
   }
   function onSplitCommit() {
+    dragging.current = false;
     commitVolume(l, r, muted);
     const [m, b] = lrToGanged(l, r);
     setMaster(m); setBalance(b);

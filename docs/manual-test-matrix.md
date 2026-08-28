@@ -14,7 +14,10 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
 
 - **Boot**: device prints boot banner and does not reboot-loop.
 - **HTTP**: open `/` and `/api/status` returns JSON with `volume`, `source`, `preset`.
-- **WiFi AP fallback** (if STA not configured): AP comes up, Web UI reachable at `192.168.4.1`.
+- **WiFi AP fallback** (if STA not configured): AP comes up. Captive OS
+  probes still get the Wi-Fi setup HTML. `http://192.168.4.1/` serves the
+  full SPA (banner + `/wifi`). Snapcast / home-LAN DLNA / mDNS `.local`
+  do not work until STA has an IP.
 
 ### NVS migration
 
@@ -46,8 +49,9 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
 ### LED (WS2812)
 
 - **Boot colours**: slow red pulse until STA, one green breath on
-  Wi-Fi up, blue pulse while Bluetooth is unpaired (peaks capped by
-  `HAL_WS2812_MAX_DUTY`).
+  Wi-Fi up, blue pulse only while the 180 s Bluetooth pairing window is
+  open (peaks capped by `HAL_WS2812_MAX_DUTY`). Connected or quiet
+  (window elapsed) uses the user colour.
 - **Overview**: `POST /api/led` with `{ "color": "#rrggbb", "brightness": 0-100 }`
   takes over immediately (`phase: user`).
 - **Count**: `GET /api/state` `led.count` matches compile-time
@@ -57,12 +61,24 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
 ### Bluetooth (A2DP sink)
 
 - **Select source**: `POST /api/source?s=0` and wait for reboot.
-- **Discoverability**: phone sees the configured device name (default
-  **“Geelen Audio”**). Rename from Overview or About; re-pair if the
-  phone keeps the old GAP name.
+- **Pairing window**: after A2DP start the device is inquiry-visible for
+  180 s (`GET /api/bluetooth` `discoverable` + `window_ms_left`). Then it
+  goes quiet (`CONNECTABLE` + `NON_DISCOVERABLE`). Overview **Pair new
+  device** (`POST /api/bluetooth` `{ "discoverable": true }`) reopens the
+  window. While connected it is not in scan lists.
+- **PIN**: **About → Identity** (or `POST /api/bluetooth` `{ "pin": "1234" }`).
+  Legacy PIN_REQ only; changing PIN does not unpair. **Reset → Bluetooth
+  pairings** actually wipes Bluedroid peers.
 - **Connect and play**: start playback; audio is heard on I2S output.
-- **Reconnect**: disconnect/reconnect from phone and verify playback resumes.
-- **Volume**: use device Web UI volume buttons; confirm change is audible.
+- **Reconnect**: disconnect/reconnect from phone (disconnect opens a new
+  180 s window) and verify playback resumes.
+- **Volume**: Web UI / `POST /api/volume` is audible **and** the phone
+  slider should follow (AVRCP Target absolute volume). Phone volume keys
+  persist to NVS like the SPA. Volume 0 is level 0, not SPA mute.
+- **AP + BT heap**: pair from the Geelen-Audio AP (full SPA at
+  `192.168.4.1`). Confirm UART `heap: int8=` / `Bluedroid pre-init heap:
+  int8=` after pair; soak a few minutes with SPA + A2DP. Do not expect
+  more than ~24 KiB internal DRAM in this configuration.
 
 ### Network (Snapclient)
 

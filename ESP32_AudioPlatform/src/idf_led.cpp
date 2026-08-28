@@ -4,6 +4,7 @@
 #include "idf_led.h"
 
 #include "hal/led.h"
+#include "idf_a2dp_sink.h"
 #include "idf_config_manager.h"
 #include "idf_events.h"
 #include "idf_state_stream.h"
@@ -54,7 +55,7 @@ void apply_user_from_cfg() {
 bool want_bt_pairing() {
   if (!s_cfg) return false;
   if (s_cfg->getAudioSource() != AudioSource::Bluetooth) return false;
-  return !s_a2dp_connected.load(std::memory_order_relaxed);
+  return a2dpIsDiscoverable();
 }
 
 void set_phase(Phase p) {
@@ -132,6 +133,11 @@ void led_task(void*) {
         }
         break;
       case Phase::User:
+        if (!s_user_takeover.load(std::memory_order_relaxed) && want_bt_pairing()) {
+          pulse_t = 0;
+          set_phase(Phase::Pairing);
+          break;
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
         break;
     }

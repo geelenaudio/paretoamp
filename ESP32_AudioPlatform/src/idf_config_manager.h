@@ -62,6 +62,7 @@ constexpr size_t DEV_NAME_MAX = 32;
 // DHCP / mDNS LDH label (null included). Empty stored value means "slug
 // from device_name".
 constexpr size_t HOSTNAME_MAX = 32;
+constexpr size_t BT_PIN_MAX = 5;  // 4 digits + NUL
 // Snapcast STREAM port. 1704 is the Snapcast audio stream; 1705 is the
 // JSON-RPC control channel used by snapweb / CLI clients, and connecting a
 // Snapclient there yields silence (server waits for Hello which never
@@ -233,6 +234,12 @@ class ConfigManager {
   bool getVoiceFeedbackEnabled() const { return config_.voice_feedback; }
   void setVoiceFeedbackEnabled(bool on);
 
+  // Classic PIN for legacy PIN_REQ (SSP phones often never ask). Four digits.
+  bool getBtPin(char* out, size_t max_len) const;
+  bool setBtPin(const char* pin);
+  bool consumeBtWipeBonds();
+  void requestBtWipeBonds();
+
   // ---- Wi-Fi power-save (Phase 5) ---------------------------------------
   // Persisted in NVS. The radio is reconfigured on next boot; we don't
   // hot-apply because flipping ps mid-stream interacts badly with active
@@ -268,11 +275,8 @@ class ConfigManager {
   // those fields. No scope triggers a reboot — callers decide whether to
   // restart afterwards (WiFi/BT typically do; Snap/DLNA don't).
   void resetWifi();
-  void resetBluetoothPairings();     // only erases our `last_bt` hint; actual
-                                     // BT bond storage is in the BT stack's
-                                     // own NVS namespace and needs a reboot
-                                     // after an `esp_bt_gap_remove_bond_*`
-                                     // sweep to fully take effect.
+  void resetBluetoothPairings();     // flags a Bluedroid bond wipe (applied in
+                                     // A2dpSink::begin / before reboot)
   void resetSnapcast();
   void resetDlna();
   void resetEq();                    // both curves + all preset slots
@@ -306,6 +310,8 @@ class ConfigManager {
   bool wifi_ever_ok_{false};
   bool wifi_ever_flag_present_{false};
   char hostname_[HOSTNAME_MAX]{};
+  char bt_pin_[BT_PIN_MAX]{};
+  bool bt_wipe_bonds_{false};
   uint8_t sta_mac_[6]{};
   uint8_t bt_mac_[6]{};
   bool sta_mac_set_{false};

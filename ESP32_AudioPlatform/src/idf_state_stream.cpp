@@ -93,8 +93,14 @@ std::atomic<bool> s_broadcaster_started{false};
 // mutation didn't go through ConfigManager::markDirty*.
 std::atomic<bool> s_force_publish{false};
 
-// Last version we serialized. Compared each tick against cfg->stateVersion()
-// to decide whether to rebuild the snapshot.
+static uint32_t s_publish_seq = 0;
+static int s_last_pub_vol_l = -1;
+static int s_last_pub_vol_r = -1;
+
+// Last ConfigManager version we serialized. Compared each tick against
+// cfg->stateVersion() to decide whether to rebuild the snapshot. Live
+// AVRCP volume can change without bumping that counter, so the
+// broadcaster also compares displayed L/R.
 std::atomic<uint32_t> s_last_published_v{0};
 
 // Previous full-state tree, used to compute `event: diff` frames.
@@ -193,6 +199,15 @@ size_t format_frame(char* frame, size_t cap, const char* event_name,
   return (size_t)n;
 }
 
+void displayed_volume(uint8_t* l, uint8_t* r) {
+  *l = s_cfg->getVolumeL();
+  *r = s_cfg->getVolumeR();
+  const int live = a2dpLiveVolumePct();
+  if (live >= 0) {
+    *l = *r = static_cast<uint8_t>(live);
+  }
+}
+
 cJSON* build_top_level_diff(cJSON* prev, cJSON* cur) {
   if (!prev || !cur) return nullptr;
   cJSON* diff = cJSON_CreateObject();
@@ -251,6 +266,7 @@ void publish_snapshot() {
   if (!root) return;
 
   const uint32_t version = s_cfg->stateVersion();
+  const uint32_t seq = ++s_publish_seq;
   s_last_published_v.store(version, std::memory_order_release);
 
   char* snap_json = cJSON_PrintUnformatted(root);
@@ -291,15 +307,15 @@ void publish_snapshot() {
       ESP_LOGE(TAG, "snapshot too large for frame buffer (cap=%u); skip",
                (unsigned)kFrameCapBytes);
     } else if (diff_json) {
-      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/true);
+      send_frame_to_subs(frame, n, seq, /*snapshot_only_new=*/true);
     } else {
-      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/false);
+      send_frame_to_subs(frame, n, seq, /*snapshot_only_new=*/false);
     }
   }
   if (diff_json) {
     size_t n = format_frame(frame, kFrameCapBytes, "diff", version, diff_json);
     if (n != 0) {
-      send_frame_to_subs(frame, n, version, /*snapshot_only_new=*/false);
+      send_frame_to_subs(frame, n, seq, /*snapshot_only_new=*/false);
     }
   }
 
@@ -372,8 +388,17 @@ void broadcaster_task(void*) {
     const bool forced = s_force_publish.exchange(false, std::memory_order_acq_rel);
     const bool changed = (cur_v != last_v);
 
-    if ((changed || forced) && s_sub_count > 0) {
+    bool vol_changed = false;
+    uint8_t vol_l = 0, vol_r = 0;
+    if (s_cfg) {
+      displayed_volume(&vol_l, &vol_r);
+      vol_changed = (s_last_pub_vol_l != (int)vol_l || s_last_pub_vol_r != (int)vol_r);
+    }
+
+    if ((changed || forced || vol_changed) && s_sub_count > 0) {
       publish_snapshot();
+      s_last_pub_vol_l = (int)vol_l;
+      s_last_pub_vol_r = (int)vol_r;
     } else if (s_sub_count > 0) {
       // 10 s heartbeat — long enough to be invisible to the SPA's RTT but
       // short enough that load balancers / reverse proxies don't half-close

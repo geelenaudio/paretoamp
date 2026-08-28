@@ -86,6 +86,7 @@ namespace geelen_idf { void scheduleRestart(unsigned delay_ms); }
 static void apply_volume_from_cfg() {
   g_engine.setVolumeLR(g_cfg.getVolumeL(), g_cfg.getVolumeR());
   g_engine.setMuted(g_cfg.isMuted());
+  geelen_idf::a2dpNotifyLocalVolume();
 }
 static void apply_channels_from_cfg() {
   g_engine.setChannels(
@@ -235,8 +236,9 @@ static void test_tone_after_voice_task(void*) {
 // never fix Wi-Fi can still pair for audio.
 #if CONFIG_BT_ENABLED
 static constexpr int kBtDeferPollMs = 500;
-// 120 * 500 ms = 60 s max wait while still in captive AP-only mode.
-static constexpr int kBtDeferMaxPolls = 120;
+// 6 * 500 ms = 3 s settle after AP is up. Do not start Bluedroid in the
+// same tick as the AP (osi_alarm OOM); do not wait a full minute either.
+static constexpr int kBtDeferMaxPolls = 6;
 
 static const char* a2dp_name_from_cfg() {
   static char name[geelen_idf::DEV_NAME_MAX];
@@ -257,6 +259,7 @@ static void deferred_a2dp_start_task(void*) {
         "(pair for audio without fixing Wi-Fi)",
         (unsigned)((kBtDeferMaxPolls * kBtDeferPollMs) / 1000));
   }
+  a2dpSetConfig(&g_cfg);
   g_a2dp.begin(a2dp_name_from_cfg());
   vTaskDelete(nullptr);
 }
@@ -437,6 +440,7 @@ extern "C" void app_main(void) {
   // still in captive APSTA onboarding — see deferred_a2dp_start_task.
 #if CONFIG_BT_ENABLED
   if (src == geelen_idf::AudioSource::Bluetooth) {
+    geelen_idf::a2dpSetConfig(&g_cfg);
     if (!g_wifi.isApOnly()) {
       g_a2dp.begin(a2dp_name_from_cfg());
     } else {

@@ -57,9 +57,10 @@ bool parseAudioSource(const char* s, AudioSource* out) {
 
 - Bluedroid + A2DP sink come up immediately on boot if Wi-Fi is in STA or
   is disabled. If Wi-Fi is in AP-only onboarding mode, BT is deferred (up
-  to 60 s, or until Wi-Fi gets an IP) so the captive APSTA stack does not
+  to ~3 s, or until Wi-Fi gets an IP) so the captive APSTA stack does not
   blow out the Bluedroid OSI timer pool. After the deferral, A2DP starts
-  anyway so the user can pair without ever touching Wi-Fi.
+  anyway so the user can pair without ever touching Wi-Fi. Discoverable
+  only during the 180 s pairing window (Overview Pair reopens it).
 - On `ESP_A2D_CONNECTION_STATE_CONNECTED`, the A2DP callback enqueues the
   `BluetoothConnected.mp3` voice prompt. Music PCM is gated behind the
   voice owner refcount, so the prompt finishes (including the 340 ms tail
