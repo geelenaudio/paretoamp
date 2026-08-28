@@ -71,6 +71,8 @@ static const char* NVS_KEY_EQ_HR_MODE    = "eq_hr_mode";
 static const char* NVS_KEY_EQ_HR_MANUAL  = "eq_hr_man";
 static const char* NVS_KEY_DEV_NAME      = "dev_name";
 static const char* NVS_KEY_HOSTNAME      = "hostname";
+static const char* NVS_KEY_BT_PIN        = "bt_pin";
+static const char* NVS_KEY_BT_WIPE       = "bt_wipe";
 static const char* NVS_KEY_STA_MAC       = "sta_mac";
 static const char* NVS_KEY_BT_MAC        = "bt_mac";
 static const char* NVS_KEY_DLNA_ON       = "dlna_on";
@@ -225,6 +227,9 @@ void ConfigManager::loadDefaults() {
   strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   hostname_[0] = '\0';
+  strncpy(bt_pin_, "1234", BT_PIN_MAX - 1);
+  bt_pin_[BT_PIN_MAX - 1] = '\0';
+  bt_wipe_bonds_ = false;
   sta_mac_set_ = false;
   bt_mac_set_ = false;
   memset(sta_mac_, 0, sizeof(sta_mac_));
@@ -483,6 +488,22 @@ bool ConfigManager::load() {
     }
   }
   {
+    size_t pl = BT_PIN_MAX;
+    char pinbuf[BT_PIN_MAX]{};
+    if (nvs_get_str(h, NVS_KEY_BT_PIN, pinbuf, &pl) == ESP_OK &&
+        pinbuf[0] && pinbuf[1] && pinbuf[2] && pinbuf[3] && !pinbuf[4] &&
+        pinbuf[0] >= '0' && pinbuf[0] <= '9' &&
+        pinbuf[1] >= '0' && pinbuf[1] <= '9' &&
+        pinbuf[2] >= '0' && pinbuf[2] <= '9' &&
+        pinbuf[3] >= '0' && pinbuf[3] <= '9') {
+      memcpy(bt_pin_, pinbuf, BT_PIN_MAX);
+    } else {
+      strncpy(bt_pin_, "1234", BT_PIN_MAX - 1);
+      bt_pin_[BT_PIN_MAX - 1] = '\0';
+    }
+  }
+  bt_wipe_bonds_ = nvsGetBool(h, NVS_KEY_BT_WIPE, false);
+  {
     size_t ml = 6;
     uint8_t blob[6] = {};
     if (nvs_get_blob(h, NVS_KEY_STA_MAC, blob, &ml) == ESP_OK && ml == 6 &&
@@ -631,6 +652,8 @@ bool ConfigManager::save() {
     } else {
       nvs_erase_key(h, NVS_KEY_HOSTNAME);
     }
+    nvs_set_str(h, NVS_KEY_BT_PIN, bt_pin_);
+    nvs_set_u8(h, NVS_KEY_BT_WIPE, bt_wipe_bonds_ ? 1 : 0);
     if (sta_mac_set_) {
       nvs_set_blob(h, NVS_KEY_STA_MAC, sta_mac_, 6);
     } else {
@@ -1010,6 +1033,37 @@ void ConfigManager::setVoiceFeedbackEnabled(bool on) {
   markDirtyNet();
 }
 
+bool ConfigManager::getBtPin(char* out, size_t max_len) const {
+  if (!out || max_len == 0) return false;
+  strncpy(out, bt_pin_[0] ? bt_pin_ : "1234", max_len - 1);
+  out[max_len - 1] = '\0';
+  return true;
+}
+
+bool ConfigManager::setBtPin(const char* pin) {
+  if (!pin || strlen(pin) != 4) return false;
+  for (int i = 0; i < 4; ++i) {
+    if (pin[i] < '0' || pin[i] > '9') return false;
+  }
+  memcpy(bt_pin_, pin, 4);
+  bt_pin_[4] = '\0';
+  markDirtyNet();
+  return true;
+}
+
+bool ConfigManager::consumeBtWipeBonds() {
+  if (!bt_wipe_bonds_) return false;
+  bt_wipe_bonds_ = false;
+  markDirtyNet();
+  save();
+  return true;
+}
+
+void ConfigManager::requestBtWipeBonds() {
+  bt_wipe_bonds_ = true;
+  markDirtyNet();
+}
+
 void ConfigManager::setWifiPsMode(WifiPsMode mode) {
   if (config_.wifi_ps == mode) return;
   config_.wifi_ps = mode;
@@ -1034,6 +1088,7 @@ void ConfigManager::factoryReset() {
     (void)nvs_commit(h);
     nvs_close(h);
   }
+  requestBtWipeBonds();
   markDirtyAll();
   save();
 }
@@ -1051,11 +1106,7 @@ void ConfigManager::resetWifi() {
 }
 
 void ConfigManager::resetBluetoothPairings() {
-  // Pairing bonds live in the Bluedroid NVS namespace, not ours; the proper
-  // path is to call esp_bt_gap_remove_bond_device() for each bonded peer on
-  // reboot. We just mark dirty so a `save()` sync happens and rely on the
-  // caller to trigger a restart that does the actual bond wipe.
-  markDirtyNet();
+  requestBtWipeBonds();
   save();
 }
 

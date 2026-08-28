@@ -37,7 +37,7 @@ const SECTIONS = [
       },
       {
         id: "bluetooth", label: "Bluetooth pairings", tone: "warn", icon: IcoHeadphones, reboot: true,
-        blurb: "Drop all paired A2DP devices. You'll need to re-pair from each source. Only relevant in Bluetooth mode.",
+        blurb: "Forget every bonded phone (Bluedroid peer list). You will need to pair again. Changing the PIN on About does not do this.",
       },
       {
         id: "snapcast", label: "Snapcast host", tone: "ok", icon: IcoCast, reboot: false,

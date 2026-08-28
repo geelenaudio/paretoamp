@@ -67,6 +67,7 @@ paths:
       description: |
         Single round-trip snapshot of everything the SPA needs to render:
         current mode, volume, channel config, Snapcast host, DLNA settings,
+        Bluetooth connection / pairing-window status (PIN is not included),
         the EQ curve + backend + per-board `max_bands`, headroom settings,
         device name, hostname (mDNS), firmware version.
 
@@ -254,6 +255,10 @@ paths:
         Accepts `{l, r, muted}` for independent channels, or `{v}` to set
         both channels to the same level. Values are clamped to 0..100. If
         both `v` and `l`/`r` are supplied, the per-channel fields win.
+        In Bluetooth mode the new level is also reported to the phone via
+        AVRCP Target absolute volume (0–127). Phone volume keys map the
+        other way onto ganged L/R; volume 0 is level 0, not the SPA mute
+        flag.
       operationId: setVolume
       requestBody:
         required: true
@@ -518,6 +523,62 @@ paths:
         "400":
           description: Invalid hostname or MAC.
 
+  /api/bluetooth:
+    get:
+      tags: [Admin]
+      summary: Bluetooth pairing state
+      description: |
+        Classic PIN (legacy PIN_REQ), whether an A2DP phone is connected,
+        and whether the 180 s inquiry window is open. The PIN is the pairing
+        secret and is returned here (LAN is unauthenticated); it is **not**
+        included on `GET /api/state` or the SSE snapshot.
+      operationId: getBluetooth
+      responses:
+        "200":
+          description: Current Bluetooth pairing state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BluetoothSetting" }
+    post:
+      tags: [Admin]
+      summary: Set PIN or reopen the pairing window
+      description: |
+        Optional `pin` (exactly 4 digits) is stored in NVS and applied live
+        with `esp_bt_gap_set_pin` when the sink is up. Changing the PIN does
+        not drop existing bonds.
+
+        Optional `discoverable: true` restarts the 180 s
+        CONNECTABLE+GENERAL_DISCOVERABLE window. 400 if Bluetooth mode is
+        not running (sink not started). While an A2DP phone is connected the
+        sink stays non-discoverable (ACL=1).
+      operationId: setBluetooth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pin:
+                  type: string
+                  pattern: '^[0-9]{4}$'
+                discoverable:
+                  type: boolean
+            examples:
+              pin: { value: { pin: "1234" } }
+              pair: { value: { discoverable: true } }
+      responses:
+        "200":
+          description: Effective pairing state (includes PIN).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BluetoothSetting" }
+        "400":
+          description: Bad PIN, or pairing window requested while the sink is down.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/eq:
     post:
       tags: [EQ]
@@ -705,7 +766,9 @@ paths:
       description: |
         Available scopes: `wifi`, `bluetooth`, `snapcast`, `dlna`, `eq`,
         `audio`, `all`. WiFi and Bluetooth scopes force a reboot; others
-        stay live. The `eq` scope also clears all preset slots.
+        stay live. The `eq` scope also clears all preset slots. The
+        `bluetooth` scope wipes Bluedroid bonded peers (not only an NVS
+        hint) before reboot.
       operationId: resetScope
       requestBody:
         required: true
@@ -1144,6 +1207,27 @@ components:
       type: string
       enum: [wifi, bluetooth, snapcast, dlna, eq, audio, all, factory]
 
+    BluetoothPublic:
+      type: object
+      description: A2DP pairing window; PIN is only on GET /api/bluetooth.
+      properties:
+        connected: { type: boolean }
+        discoverable: { type: boolean }
+        window_ms_left:
+          type: integer
+          minimum: 0
+          description: Milliseconds remaining in the inquiry window; 0 if hidden.
+
+    BluetoothSetting:
+      allOf:
+        - $ref: "#/components/schemas/BluetoothPublic"
+        - type: object
+          properties:
+            pin:
+              type: string
+              pattern: '^[0-9]{4}$'
+              description: Legacy Classic PIN (default 1234).
+
     DeviceState:
       type: object
       properties:
@@ -1160,6 +1244,7 @@ components:
         snapcast:    { $ref: "#/components/schemas/SnapcastSetting" }
         dlna:        { $ref: "#/components/schemas/DlnaSetting" }
         wifi:        { $ref: "#/components/schemas/WifiSetting" }
+        bluetooth:   { $ref: "#/components/schemas/BluetoothPublic" }
         voice_feedback: { type: boolean, description: "Cached PSRAM voice cues (boot + BT events)." }
         _v:
           type: integer

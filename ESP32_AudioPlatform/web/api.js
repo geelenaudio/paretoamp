@@ -12,7 +12,10 @@
 // that previously called `api.getState()` once on mount can switch to a
 // subscription with no additional polling — mutations on any device or tab
 // land in the local view within ~250 ms (the firmware-side debounce).
-// Pages that need the one-shot semantics keep using `api.getState()`.
+// Phone volume is overlaid on those snapshots as soon as the engine has
+// it, so the SPA does not need a REST poll. The App shell keeps one
+// subscription for the lifetime of the tab so volume stays fresh on every
+// route. Pages that need the one-shot semantics keep using `api.getState()`.
 
 async function j(method, url, body) {
   const init = { method, headers: {} };
@@ -148,6 +151,14 @@ export const api = {
     return await j("POST", "/api/identity", patch);
   },
 
+  async getBluetooth() {
+    return await j("GET", "/api/bluetooth");
+  },
+
+  async setBluetooth(patch) {
+    return await j("POST", "/api/bluetooth", patch);
+  },
+
   // Single-layer PEQ. The server accepts { enabled, band_count, bands }
   // and clamps `band_count` to the per-board runtime cap
   // (`state.eq.max_bands`).
@@ -253,6 +264,23 @@ const _stateBus = (() => {
   let closeTimer = null;
   const CLOSE_GRACE_MS = 2000;
 
+  function normalizeState(data) {
+    if (!data || !data.volume) return data;
+    const v = data.volume;
+    if (typeof v.l === "number" && typeof v.r === "number") return data;
+    if (typeof v.volume === "number") {
+      return { ...data, volume: { l: v.volume, r: v.volume, muted: !!v.muted } };
+    }
+    return data;
+  }
+
+  function emit(data) {
+    lastSnapshot = normalizeState(data);
+    for (const cb of subs) {
+      try { cb(lastSnapshot); } catch { /* swallow component errors */ }
+    }
+  }
+
   function open() {
     if (es) return;
     try {
@@ -260,12 +288,6 @@ const _stateBus = (() => {
     } catch (e) {
       tryFallback();
       return;
-    }
-    function emit(data) {
-      lastSnapshot = data;
-      for (const cb of subs) {
-        try { cb(data); } catch { /* swallow component errors */ }
-      }
     }
     es.addEventListener("snapshot", (ev) => {
       try { emit(JSON.parse(ev.data)); } catch { /* malformed; wait for next */ }
@@ -311,12 +333,7 @@ const _stateBus = (() => {
     if (fallbackTried || lastSnapshot) return;
     fallbackTried = true;
     api.getState().then(
-      (s) => {
-        lastSnapshot = s;
-        for (const cb of subs) {
-          try { cb(s); } catch {}
-        }
-      },
+      (s) => { emit(s); },
       () => { /* surfaced on the page that called subscribeState */ },
     );
   }

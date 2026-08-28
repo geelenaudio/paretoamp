@@ -62,10 +62,10 @@ a{color:#8aa890}code{background:#24282c;padding:2px 6px;border-radius:4px;font-f
 <p>Legacy API probes: <a href="/api/status">/api/status</a></p>
 </body></html>)raw";
 
-// Wi‑Fi onboarding portal shown at `/` (and on captive-portal probe URLs)
-// while the device runs the AP fallback. Self-contained so it works even
-// when SPIFFS is empty / not yet uploaded. Posts form-encoded creds to
-// `POST /api/wifi`, reads nearby SSIDs from `GET /api/wifi/scan`.
+// Wi‑Fi onboarding portal shown on OS captive-portal probe URLs while the
+// device runs the AP fallback. `/` itself serves the full SPA. Self-contained
+// so it works even when SPIFFS is empty / not yet uploaded. Posts form-encoded
+// creds to `POST /api/wifi`, reads nearby SSIDs from `GET /api/wifi/scan`.
 static const char SETUP_HTML[] = R"raw(<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Geelen Audio — Wi-Fi setup</title>
@@ -116,6 +116,10 @@ button[disabled]{opacity:.55;cursor:default}
     <div id="busymsg">Checking credentials…</div>
     <p class="muted">Reconnect your phone/laptop to its normal Wi-Fi. The amplifier will join <span id="targetssid">your network</span> in <span id="cd">15</span> s.</p>
   </div>
+  <p class="muted" style="margin-top:16px">
+    <a href="/" style="color:#8aa890">Open full controls</a>
+    — volume, EQ, Bluetooth pairing, and the rest of the amp UI at 192.168.4.1.
+  </p>
 </main>
 <script>
 (function(){
@@ -530,18 +534,10 @@ static esp_err_t handle_static(httpd_req_t* req) {
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "nope");
   }
 
-  // AP-only mode: hijack `/` and any "looks like a page" miss with the
-  // inline Wi-Fi onboarding portal. Static SPA assets (.js, .css, …) keep
-  // working so the SPA can still load if the user navigates there
-  // explicitly, but the default landing is the setup form. Captive probe
-  // URLs are also intercepted (they have their own dedicated handler when
-  // registered, but the catch-all logic here covers them too if probes
-  // arrive with a different URI shape).
-  const bool ap_only = s_wifi && s_wifi->isApOnly();
-  if (ap_only) {
-    if (path[0] == '\0' || strcmp(path, "/") == 0 || path_is_captive_probe(path)) {
-      return send_setup_page(req);
-    }
+  // Captive OS probes share this catch-all so we do not spend 11 URI slots
+  // that previously overflowed the table and dropped `/*` (SPA pages 404).
+  if (path_is_captive_probe(path)) {
+    return handle_captive_probe(req);
   }
 
   // Route rewrites for non-file URLs that should still map to static assets:
@@ -577,9 +573,6 @@ static esp_err_t handle_static(httpd_req_t* req) {
   const bool looks_like_page =
       !strchr(path, '.') && strncmp(path, "/api/", 5) != 0;
   if (looks_like_page) {
-    // In AP-only mode the setup page is the right thing to show on any
-    // unknown route (avoids a blank screen if SPIFFS is empty).
-    if (ap_only) return send_setup_page(req);
     if (serve_file(req, "/spiffs/web/index.html", "text/html; charset=utf-8") == ESP_OK) {
       return ESP_OK;
     }
@@ -611,27 +604,6 @@ static esp_err_t handle_status(httpd_req_t* req) {
                    (unsigned)cfg->getPresetId(),
                    host,
                    (unsigned)cfg->getSnapcastPort());
-  httpd_resp_set_type(req, "application/json");
-  return httpd_resp_send(req, out, n);
-}
-
-static esp_err_t handle_volume(httpd_req_t* req) {
-  auto* cfg = (ConfigManager*)req->user_ctx;
-  if (!cfg) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
-
-  char query[64];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-    char vbuf[16];
-    if (httpd_query_key_value(query, "v", vbuf, sizeof(vbuf)) == ESP_OK) {
-      int v = atoi(vbuf);
-      if (v < 0) v = 0;
-      if (v > 100) v = 100;
-      cfg->setVolume((uint8_t)v);
-    }
-  }
-
-  char out[64];
-  int n = snprintf(out, sizeof(out), "{\"volume\":%u}", (unsigned)cfg->getVolume());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, n);
 }
@@ -737,9 +709,10 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
   config.lru_purge_enable = true;
-  // Phase 1+ registers many /api/* handlers + legacy + SSE + static. If this
-  // is too low, httpd_register_uri_handler fails silently unless we log it.
-  config.max_uri_handlers = 48;
+  // Phase 1+ registers many /api/* handlers + legacy + 11 captive probes +
+  // 2 SSE + static /*. Bluetooth GET/POST added two more (~49 without DLNA).
+  // DLNA adds 8. 48 overflowed: `/*` never registered, so `/pages/*.js` 404'd.
+  config.max_uri_handlers = 64;
   // Enable wildcard matching so `/*` actually fires for /foo.js.gz, /vendor/…,
   // /pages/…. Without this the catch-all only matches the literal string `/*`.
   config.uri_match_fn = httpd_uri_match_wildcard;
@@ -800,55 +773,20 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   // idf_api.cpp, but these are retained so existing tools/probes keep
   // working:
   //   GET  /api/status        — scalar snapshot (Phase 1 ships GET /api/state)
-  //   GET  /api/volume?v=N    — convenience GET (Phase 1 adds POST JSON)
+  //   GET  /api/volume?v=N    — registered in idf_api.cpp (JSON l/r + legacy scalar)
   //   POST /api/source?s=N    — old Bluetooth/Network toggle
   //   POST /api/wifi          — form-encoded creds (also driven by the new
   //                             /wifi SPA page and the inline AP-mode portal)
   httpd_uri_t status_uri{ .uri="/api/status",   .method=HTTP_GET,  .handler=handle_status,   .user_ctx=cfg_ };
-  httpd_uri_t vol_uri{    .uri="/api/volume",   .method=HTTP_GET,  .handler=handle_volume,   .user_ctx=cfg_ };
   httpd_uri_t src_uri{    .uri="/api/source",   .method=HTTP_POST, .handler=handle_source,   .user_ctx=cfg_ };
   httpd_uri_t wifi_uri{   .uri="/api/wifi",     .method=HTTP_POST, .handler=handle_wifi,     .user_ctx=cfg_ };
   httpd_register_uri_handler(h, &status_uri);
-  httpd_register_uri_handler(h, &vol_uri);
   httpd_register_uri_handler(h, &src_uri);
   httpd_register_uri_handler(h, &wifi_uri);
 
   // Phase 1 JSON API (POST /api/state, POST /api/volume JSON, /api/mode,
   // /api/channels, /api/eq, /api/reset, …). Lives in idf_api.cpp.
   registerApiHandlers(h, cfg_);
-
-  // Captive-portal probe handlers. Registering them as their own URIs
-  // (before the catch-all `/*`) means we can return a 200 + the setup
-  // page directly even when device IS in STA mode (which is what makes
-  // OS captive sheets pop). When already in STA mode the probes still
-  // get HTML but the OS interprets them as "internet works" because
-  // the response includes our success-html-shaped iOS variant. These
-  // handlers also win over the SPA shell on Wi-Fi-less iOS Safari which
-  // probes during initial AP join.
-  static const char* const kCaptiveUris[] = {
-      "/hotspot-detect.html",
-      "/library/test/success.html",
-      "/generate_204",
-      "/gen_204",
-      "/connecttest.txt",
-      "/ncsi.txt",
-      "/redirect",
-      "/canonical.html",
-      "/check_network_status.txt",
-      "/.well-known/captive-portal",
-      "/.well-known/captive-portal/",
-  };
-  for (const char* p : kCaptiveUris) {
-    httpd_uri_t u{};
-    u.uri = p;
-    u.method = HTTP_GET;
-    u.handler = handle_captive_probe;
-    u.user_ctx = cfg_;
-    esp_err_t e = httpd_register_uri_handler(h, &u);
-    if (e != ESP_OK) {
-      ESP_LOGW(TAG, "captive probe register %s failed: %s", p, esp_err_to_name(e));
-    }
-  }
 
   // SSE endpoint for the Logs page. Registered before the catch-all so
   // /api/logs/stream wins over the static handler's /* pattern.
@@ -859,9 +797,12 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   geelen_idf::stateStreamRegister(h);
 
   // Catch-all static handler, registered last so the /api/* URIs win by
-  // prefix-specificity above it.
+  // prefix-specificity above it. Captive probes are handled inside
+  // handle_static (no extra URI slots).
   httpd_uri_t static_uri{ .uri="/*", .method=HTTP_GET, .handler=handle_static, .user_ctx=cfg_ };
-  httpd_register_uri_handler(h, &static_uri);
+  if (httpd_register_uri_handler(h, &static_uri) != ESP_OK) {
+    ESP_LOGE(TAG, "failed to register static /* — raise max_uri_handlers");
+  }
 
   ESP_LOGI(TAG, "HTTP server started (static from /spiffs/web/, JSON API on /api/*)");
   return true;

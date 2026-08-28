@@ -26,8 +26,12 @@ If you turn voice feedback off in the Web UI, the device starts silent.
    in.
 3. **Connect your phone or laptop** to `Geelen-Audio`. Most operating
    systems pop a captive-portal browser within ~10 s and land you on the
-   setup page directly. If yours does not, open
-   [http://192.168.4.1/](http://192.168.4.1/) manually.
+   Wi-Fi setup sheet. That page links into the full app. If yours does
+   not pop a sheet, open
+   [http://192.168.4.1/](http://192.168.4.1/) for Overview, Mode, Audio,
+   EQ, Test, Wi-Fi, Reset, Logs, and About — the same SPA as on the LAN.
+   Snapcast to a home-LAN server, mDNS `*.local`, and DLNA from a phone
+   that is still on home Wi-Fi do not work until this device joins STA.
 4. **Pick your home network** from the SSID list (or type one in) and
    enter the Wi-Fi password. Click Save.
 5. The device restarts (~500 ms). On the next boot you should hear
@@ -60,20 +64,34 @@ See [audio_modes.md](audio_modes.md) for the full breakdown.
 
 ## Pairing Bluetooth
 
-1. Make sure the device is in Bluetooth mode (or has DLNA enabled — DLNA
-   does not interfere with the BT pairing flow). The device advertises
-   as `Geelen Audio`.
-2. From your phone's Bluetooth settings, choose `Geelen Audio` and
-   confirm the pairing prompt.
-   - For phones that ask for a PIN, the firmware accepts `1234`.
-   - You will hear a "Pairing" voice prompt while the request is in
+The stack stays **one phone** (`CONFIG_BT_ACL_CONNECTIONS=1`). It is
+inquiry-visible only during a **3-minute pairing window** after A2DP
+starts, after the phone disconnects, or when you tap **Pair new device**
+on Overview. While connected it is connectable but hidden from scan
+lists. After the window it is quiet: the last bonded phone can still
+reconnect; nobody new will see it in a scan.
+
+1. Put the device in Bluetooth mode. It advertises as the friendly name
+   (default `Geelen Audio`).
+2. During the pairing window, choose it from the phone's Bluetooth
+   settings.
+   - Modern phones often use SSP and never ask for a PIN.
+   - For legacy PIN_REQ, the PIN is set under **About → Identity**
+     (default `1234`). Changing the PIN does not unpair phones;
+     **Reset → Bluetooth pairings** does.
+   - You will hear a "Pairing" voice prompt while a PIN request is in
      flight.
-3. On successful connect, you will hear "Bluetooth connected".
-4. Music plays only AFTER the connect prompt finishes — that is by
+3. On successful connect, you will hear "Bluetooth connected". The LED
+   pairing pulse stops; the device drops out of scan lists.
+4. Phone volume keys (AVRCP Target absolute volume) move the amp's
+   ganged L/R level and persist like the Web UI. Play/pause stays on
+   the phone (A2DP audio-state); this firmware does not handle
+   transport keys.
+5. Music plays only AFTER the connect prompt finishes — that is by
    design so you don't lose the first second of a song.
 
 The last paired device is remembered and will reconnect on next
-power-on.
+power-on (quiet mode still accepts that bond).
 
 ## Snapcast quick-start
 
@@ -133,7 +151,8 @@ the spoken mode confirmation.
 - Try the URL of any HTTP site (e.g. `http://example.com/`); the
   captive DNS will redirect to the setup page.
 - If your OS is iOS / Android and refuses to follow the captive prompt,
-  go directly to `http://192.168.4.1/` once connected to the AP.
+  go directly to `http://192.168.4.1/` once connected to the AP — that
+  is the full SPA, not only the Wi-Fi sheet.
 
 ### "Wi-Fi keeps falling back to AP"
 

@@ -76,3 +76,19 @@ device's STA address will drop that TCP connection: the STA interface
 must leave the current AP to try the candidate credentials. Onboarding
 through the captive AP is unaffected (the phone stays on Geelen-Audio).
 After a failed probe the previous STA config is restored automatically.
+
+## Full UI on the AP
+
+While `Geelen-Audio` is up, `http://192.168.4.1/` serves the same SPA as
+on the LAN (volume, EQ, LED, identity, Bluetooth pair/PIN, mode, test
+tone, logs). OS captive probes still get the compact Wi-Fi setup HTML
+so phones pop a sheet; that page links to `/`.
+
+The device has no route to the home LAN in this state:
+
+- Snapcast to a snapserver on home Wi-Fi
+- mDNS `*.local` (STA-only; use `192.168.4.1`)
+- DLNA from a phone that is still on home Wi-Fi
+
+Steady state is STA **or** AP, not both. `STA_GOT_IP` stops the AP. The
+only APSTA overlap is the short credential probe.

@@ -14,6 +14,7 @@
 #include "idf_cpu_sampler.h"
 #include "idf_mode_manager.h"
 #include "idf_identity.h"
+#include "idf_a2dp_sink.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -304,6 +305,21 @@ static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool ena
 // call it so a subscriber's snapshot is byte-for-byte identical to a
 // `GET /api/state` response. The caller owns the returned cJSON object.
 
+static void fill_volume_object(cJSON* vol, ConfigManager* cfg, bool legacy_scalar) {
+  uint8_t l = cfg->getVolumeL();
+  uint8_t r = cfg->getVolumeR();
+  const int live = a2dpLiveVolumePct();
+  if (live >= 0) {
+    l = r = static_cast<uint8_t>(live);
+  }
+  cJSON_AddNumberToObject(vol, "l", l);
+  cJSON_AddNumberToObject(vol, "r", r);
+  cJSON_AddBoolToObject(vol, "muted", cfg->isMuted());
+  if (legacy_scalar) {
+    cJSON_AddNumberToObject(vol, "volume", l > r ? l : r);
+  }
+}
+
 cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON* root = cJSON_CreateObject();
 
@@ -326,9 +342,7 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON_AddNumberToObject(root, "_v", (double)cfg->stateVersion());
 
   cJSON* vol = cJSON_CreateObject();
-  cJSON_AddNumberToObject(vol, "l", cfg->getVolumeL());
-  cJSON_AddNumberToObject(vol, "r", cfg->getVolumeR());
-  cJSON_AddBoolToObject(vol, "muted", cfg->isMuted());
+  fill_volume_object(vol, cfg, false);
   cJSON_AddItemToObject(root, "volume", vol);
 
   cJSON* ch = cJSON_CreateObject();
@@ -402,6 +416,12 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON_AddNumberToObject(tt, "sweep_hi_hz", cfg->getTestToneSweepHiHz());
   cJSON_AddNumberToObject(tt, "dual_f2_hz", cfg->getTestToneDualF2Hz());
   cJSON_AddItemToObject(root, "test_tone", tt);
+
+  cJSON* bt = cJSON_CreateObject();
+  cJSON_AddBoolToObject(bt, "connected", a2dpIsConnected());
+  cJSON_AddBoolToObject(bt, "discoverable", a2dpIsDiscoverable());
+  cJSON_AddNumberToObject(bt, "window_ms_left", (double)a2dpPairingWindowMsLeft());
+  cJSON_AddItemToObject(root, "bluetooth", bt);
 
   return root;
 }
@@ -630,10 +650,7 @@ static esp_err_t handle_get_volume(httpd_req_t* req) {
   }
 
   cJSON* r = cJSON_CreateObject();
-  cJSON_AddNumberToObject(r, "l", cfg->getVolumeL());
-  cJSON_AddNumberToObject(r, "r", cfg->getVolumeR());
-  cJSON_AddBoolToObject(r, "muted", cfg->isMuted());
-  cJSON_AddNumberToObject(r, "volume", cfg->getVolume());  // legacy scalar
+  fill_volume_object(r, cfg, true);
   return send_json(req, r);
 }
 
@@ -1066,6 +1083,63 @@ static esp_err_t handle_post_identity(httpd_req_t* req) {
   esp_err_t ok = send_json(req, rj);
   if (reboot) scheduleRestart(800);
   return ok;
+}
+
+// ---- /api/bluetooth -------------------------------------------------------
+
+static cJSON* bluetooth_json(ConfigManager* cfg, bool include_pin) {
+  cJSON* bt = cJSON_CreateObject();
+  if (include_pin) {
+    char pin[BT_PIN_MAX];
+    cfg->getBtPin(pin, sizeof(pin));
+    cJSON_AddStringToObject(bt, "pin", pin);
+  }
+  cJSON_AddBoolToObject(bt, "connected", a2dpIsConnected());
+  cJSON_AddBoolToObject(bt, "discoverable", a2dpIsDiscoverable());
+  cJSON_AddNumberToObject(bt, "window_ms_left", (double)a2dpPairingWindowMsLeft());
+  return bt;
+}
+
+static esp_err_t handle_get_bluetooth(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+  return send_json(req, bluetooth_json(cfg, /*include_pin=*/true));
+}
+
+static esp_err_t handle_post_bluetooth(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  const cJSON* pin_j = cJSON_GetObjectItemCaseSensitive(body, "pin");
+  if (pin_j) {
+    if (!cJSON_IsString(pin_j) || !pin_j->valuestring || !cfg->setBtPin(pin_j->valuestring)) {
+      cJSON_Delete(body);
+      return send_err_json(req, HTTPD_400_BAD_REQUEST, "pin must be exactly 4 digits");
+    }
+    a2dpApplyPin(pin_j->valuestring);
+    cfg->save();
+  }
+
+  const cJSON* disc = cJSON_GetObjectItemCaseSensitive(body, "discoverable");
+  if (disc) {
+    if (!cJSON_IsBool(disc)) {
+      cJSON_Delete(body);
+      return send_err_json(req, HTTPD_400_BAD_REQUEST, "discoverable must be a boolean");
+    }
+    if (cJSON_IsTrue(disc)) {
+      if (!a2dpIsUp()) {
+        cJSON_Delete(body);
+        return send_err_json(req, HTTPD_400_BAD_REQUEST, "bluetooth sink not started");
+      }
+      a2dpStartPairingWindow();
+    }
+  }
+
+  cJSON_Delete(body);
+  return send_json(req, bluetooth_json(cfg, /*include_pin=*/true));
 }
 
 // ---- /api/eq --------------------------------------------------------------
@@ -1693,7 +1767,8 @@ static esp_err_t handle_post_reset(httpd_req_t* req) {
   bool handled = true;
 
   if (!strcmp(scope, "wifi"))              { cfg->resetWifi(); reboot = true; }
-  else if (!strcmp(scope, "bluetooth"))    { cfg->resetBluetoothPairings(); reboot = true; }
+  else if (!strcmp(scope, "bluetooth"))    { a2dpWipeBonds();
+                                             cfg->resetBluetoothPairings(); reboot = true; }
   else if (!strcmp(scope, "snapcast"))     { cfg->resetSnapcast();
                                              if (&on_snapcast_config_changed) on_snapcast_config_changed(); }
   else if (!strcmp(scope, "dlna"))         { cfg->resetDlna(); }
@@ -1704,6 +1779,7 @@ static esp_err_t handle_post_reset(httpd_req_t* req) {
                                              if (&on_channels_changed) on_channels_changed();
                                              if (&on_led_changed) on_led_changed(); }
   else if (!strcmp(scope, "all") || !strcmp(scope, "factory")) {
+    a2dpWipeBonds();
     cfg->factoryReset(); reboot = true;
   } else {
     handled = false;
@@ -1747,6 +1823,7 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/system/tasks",       HTTP_GET,    handle_get_system_tasks);
   reg("/api/test-tone",          HTTP_GET,    handle_get_test_tone);
   reg("/api/test-tone",          HTTP_POST,   handle_post_test_tone);
+  reg("/api/volume",             HTTP_GET,    handle_get_volume);
   reg("/api/volume",             HTTP_POST,   handle_post_volume);
   reg("/api/channels",           HTTP_POST,   handle_post_channels);
   reg("/api/led",                HTTP_POST,   handle_post_led);
@@ -1757,6 +1834,8 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/device-name",        HTTP_POST,   handle_post_device_name);
   reg("/api/identity",           HTTP_GET,    handle_get_identity);
   reg("/api/identity",           HTTP_POST,   handle_post_identity);
+  reg("/api/bluetooth",          HTTP_GET,    handle_get_bluetooth);
+  reg("/api/bluetooth",          HTTP_POST,   handle_post_bluetooth);
   reg("/api/eq",                 HTTP_POST,   handle_post_eq);
   reg("/api/eq/headroom",        HTTP_POST,   handle_post_eq_headroom);
   reg("/api/eq/presets",         HTTP_GET,    handle_get_presets);

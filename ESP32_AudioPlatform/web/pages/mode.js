@@ -151,6 +151,7 @@ function DlnaSettings({ state, onSave, busy }) {
 export default function Mode({ api, toast }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [apOnly, setApOnly] = useState(false);
 
   // Push-based subscription replaces the manual `refresh()` after every
   // mutation: the firmware re-publishes the snapshot when stateVersion
@@ -159,6 +160,18 @@ export default function Mode({ api, toast }) {
   useEffect(() => {
     const stop = api.subscribeState((s) => setState(s));
     return stop;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getWifiState().then(
+      (s) => {
+        if (cancelled || !s) return;
+        setApOnly(!!(s.ap_only || (s.ap_running && !s.sta_connected)));
+      },
+      () => {},
+    );
+    return () => { cancelled = true; };
   }, []);
 
   const active = state ? (state.mode || (state.source === 0 ? "bluetooth" : "snapclient")) : null;
@@ -212,6 +225,10 @@ export default function Mode({ api, toast }) {
       Pick which source drives the amplifier. Any mode change reboots the device
       so the firmware can start or stop Bluetooth, Snapclient, DLNA, or the test generator.
     </p>
+    ${apOnly ? html`<p class="banner banner--warn" style="margin-bottom:var(--sp-4)">
+      Setup hotspot only — Snapcast to a home-LAN server and DLNA from a phone on
+      home Wi-Fi cannot reach this device until it joins that network.
+    </p>` : ""}
 
     <div class="card" style="margin-bottom: var(--sp-5); max-width: 520px;">
       <div class="card__title">Voice feedback</div>

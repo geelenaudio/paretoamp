@@ -33,6 +33,8 @@ function IdentityEditor({ api, toast, ident, onSaved }) {
   const [bt, setBt] = useState(ident.mac?.bt?.current || "");
   const [overSta, setOverSta] = useState(!!ident.mac?.sta?.overridden);
   const [overBt, setOverBt] = useState(!!ident.mac?.bt?.overridden);
+  const [pin, setPin] = useState("");
+  const [pinOrig, setPinOrig] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -43,6 +45,19 @@ function IdentityEditor({ api, toast, ident, onSaved }) {
     setOverSta(!!ident.mac?.sta?.overridden);
     setOverBt(!!ident.mac?.bt?.overridden);
   }, [ident]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getBluetooth().then(
+      (b) => {
+        if (cancelled || !b || !b.pin) return;
+        setPin(b.pin);
+        setPinOrig(b.pin);
+      },
+      () => {},
+    );
+    return () => { cancelled = true; };
+  }, []);
 
   const mdnsUrl = hostname ? `http://${hostname}.local/` : "";
 
@@ -66,7 +81,15 @@ function IdentityEditor({ api, toast, ident, onSaved }) {
       } else if (ident.mac?.bt?.overridden) {
         patch.bt_mac = null;
       }
+      const pinDirty = pin !== pinOrig;
+      if (pinDirty && !/^\d{4}$/.test(pin)) {
+        throw new Error("Bluetooth PIN must be exactly 4 digits");
+      }
       const res = await api.setIdentity(patch);
+      if (pinDirty) {
+        await api.setBluetooth({ pin });
+        setPinOrig(pin);
+      }
       if (res.reboot) {
         toast && toast("Saved — rebooting to apply MAC", "ok", 5000);
       } else {
@@ -142,6 +165,15 @@ function IdentityEditor({ api, toast, ident, onSaved }) {
               Override
             </label>
             <span>Factory ${ident.mac?.bt?.factory || "—"}</span>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field__label" for="id-pin">Bluetooth PIN</label>
+          <input id="id-pin" class="input" type="text" inputmode="numeric" pattern="[0-9]*"
+            maxlength="4" value=${pin} disabled=${busy} style="font-family:var(--font-mono)"
+            onInput=${(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+          <div class="about-ident__hint card__sub">
+            Legacy pairing only. Changing the PIN does not unpair phones.
           </div>
         </div>
       </div>

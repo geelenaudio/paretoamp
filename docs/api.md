@@ -84,6 +84,18 @@ Any of `name`, `hostname`, `sta_mac`, `bt_mac`. Name/hostname apply live.
 MAC change persists and reboots (`reboot: true`). `null` on a MAC field
 reverts to factory. 400 on invalid hostname or MAC.
 
+### GET / POST /api/bluetooth
+
+`GET` returns `{ pin, connected, discoverable, window_ms_left }`. PIN is
+the 4-digit Classic secret (default `1234`); it is not on `/api/state`.
+
+`POST` accepts optional `pin` and/or `discoverable: true` (reopens the
+180 s pairing window; 400 if the A2DP sink is not up). Changing PIN does
+not drop bonds.
+
+`GET /api/state` includes `bluetooth: { connected, discoverable, window_ms_left }`
+(no PIN). SSE uses the same snapshot.
+
 ### POST /api/device-name
 
 Friendly name only (`{ "name": "Kitchen" }`). Applied live to Bluetooth
@@ -96,7 +108,7 @@ Reset a scope of persistent config. Body: `{ "scope": "…" }`.
 | Scope | Effect | Reboot |
 | ----- | ------ | ------ |
 | `wifi` | STA credentials / power-save | yes |
-| `bluetooth` | pairing list | yes |
+| `bluetooth` | wipe Bluedroid bonded peers | yes |
 | `snapcast` | Snapcast host/port | no |
 | `dlna` | DLNA name/enabled | no |
 | `eq` | PEQ curve + preset slots | no |

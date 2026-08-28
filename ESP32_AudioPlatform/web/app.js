@@ -110,10 +110,30 @@ function App() {
   const [route, setRoute] = useState(currentRoute());
   const [Page, setPage] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [apOnly, setApOnly] = useState(false);
+  const [apSsid, setApSsid] = useState("Geelen-Audio");
 
   useEffect(() => onRouteChange(setRoute), []);
   useEffect(() => {
     startRouter();
+  }, []);
+  useEffect(() => {
+    // Keep one EventSource for the whole tab so volume (and the rest of
+    // state) stays current on every route, including pages that do not
+    // subscribe themselves.
+    return api.subscribeState(() => {});
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    api.getWifiState().then(
+      (s) => {
+        if (cancelled || !s) return;
+        setApOnly(!!(s.ap_only || (s.ap_running && !s.sta_connected)));
+        if (s.ap_ssid) setApSsid(s.ap_ssid);
+      },
+      () => {},
+    );
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -154,7 +174,16 @@ function App() {
         </div>
       </header>
       <${Nav} active=${route} />
-      <main class="shell__main">${body}</main>
+      <main class="shell__main">
+        ${apOnly ? html`<div class="banner banner--warn" style="margin-bottom:var(--sp-4)">
+          <strong>Setup hotspot.</strong>
+          This device is not on your home Wi-Fi. Use
+          <a href="/wifi" onClick=${(e) => { e.preventDefault(); navigate("/wifi"); }}>Wi-Fi</a>
+          or open <span style="font-family:var(--font-mono)">http://192.168.4.1/</span>
+          (${apSsid}). Snapcast needs home Wi-Fi.
+        </div>` : ""}
+        ${body}
+      </main>
       <${Toasts} />
     </div>
   `;
