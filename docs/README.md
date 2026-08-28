@@ -46,7 +46,7 @@ are diving into the code, start with **Architecture**.
   and is rendered at `/docs` on the device).
 - [Hardware variants](hardware/README.md) — four boards; [hardware.md](hardware.md)
   is a pointer to that index.
-- [Perf captures](perf/README.md) — baseline / streaming / final-validation.
+- [Licensing](licensing.md) — firmware licence and third-party inventory.
 
 ### Development
 

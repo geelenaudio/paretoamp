@@ -11,9 +11,11 @@ drivers, and EQ backend at compile time.
 | [Louder-ESP32-Plus (WROVER)](louder-wrover.md)    | ESP32-WROVER-N8R8      | TAS5825M | Hardware   | 15    | 12       | `louder-esp32-idf`    |
 | [Louder-ESP32-S3](louder-s3.md)                   | ESP32-S3-WROOM-N8R8    | TAS5825M | Hardware   | 15    | 21       | `louder-esp32s3-idf`  |
 
-RGB is optional WS2812B on Sonocotta `RGB OUT`. Pixel count is compile-time
-`HAL_WS2812_COUNT` (default 1). Peak brightness is `HAL_WS2812_MAX_DUTY`
-(default 50). See [`docs/hal.md`](../hal.md).
+RGB is optional WS2812B on Sonocotta `RGB OUT`. Pixel count and peak
+brightness are compile-time per board: Amped-WROVER is **12 / 10**; the
+other three headers default to **1 / 50**. Override with
+`-DHAL_WS2812_COUNT=N` / `-DHAL_WS2812_MAX_DUTY=N` (count cap 64). See
+[`docs/hal.md`](../hal.md).
 
 See [`docs/board_variants.md`](../board_variants.md) for the HAL rationale and
 [`docs/hal.md`](../hal.md) for the layering (per-board header → DAC HAL → the

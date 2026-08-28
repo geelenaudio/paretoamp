@@ -57,11 +57,12 @@ end-to-end on `/dev/ttyUSB0`.
   `app_main`, never in the bootloader.
 - Pixel count is compile-time `HAL_WS2812_COUNT` (default **12** on this
   board). A longer daisy-chain is a rebuild: `-DHAL_WS2812_COUNT=N` on
-  the PIO env, not a SPA slider. Peak brightness is compile-time
-  `HAL_WS2812_MAX_DUTY` (default **10**); `-DHAL_WS2812_MAX_DUTY=N`.
-  RMT uses the full 512-symbol ESP32 SRAM block so BT on Core 0 cannot
-  underrun a 12–50 LED frame mid-strip — see [hal.md](../hal.md)
-  (WS2812 RMT memory).
+  the PIO env, not a SPA slider. A 35-pixel strip is
+  `-DHAL_WS2812_COUNT=35` (cap 64), not a larger RMT buffer. Peak
+  brightness is compile-time `HAL_WS2812_MAX_DUTY` (default **10**);
+  `-DHAL_WS2812_MAX_DUTY=N`. RMT uses the full 512-symbol ESP32 SRAM
+  block so BT on Core 0 cannot underrun a 12–50 LED frame mid-strip —
+  see [hal.md](../hal.md) (WS2812 RMT memory).
 - Boot: slow red pulse until STA, one green breath, blue pulse while
   Bluetooth is unpaired, then user colour/brightness from Overview
   (`POST /api/led`). All peaks are capped by max duty.

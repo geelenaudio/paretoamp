@@ -23,8 +23,8 @@ The prompt manifest lives in `idf_voice_cache.cpp`:
 
 | File | Spoken text (approx) | Triggered when |
 |---|---|---|
-| `WifiConnected.mp3` | "Wi-Fi connected" | Boot, after settle, if STA has an IP |
-| `WifiDisconnected.mp3` | "Wi-Fi not connected" | Boot, after settle, if no STA IP (AP fallback) |
+| `WifiConnected.mp3` | "Wi-Fi connected" | Boot, if STA has an IP |
+| `WifiDisconnected.mp3` | "Wi-Fi not connected" | Boot, if no STA IP (AP fallback) |
 | `BluetoothMode.mp3` | "Bluetooth mode" | Boot, in BT mode, after the Wi-Fi clip |
 | `SnapcastMode.mp3` | "Snapcast mode" | Boot, in Network mode, after the Wi-Fi clip |
 | `DLNAMode.mp3` | "DLNA mode" | Boot, in DLNA mode, after the Wi-Fi clip |
@@ -41,9 +41,13 @@ Wi-Fi clip plays at boot.
 `voiceFeedbackScheduleBoot` is called from `app_main` BEFORE the audio
 producers (A2DP, Snap) are wired up:
 
-```281:285:ESP32_AudioPlatform/src/idf_main.cpp
+```402:408:ESP32_AudioPlatform/src/idf_main.cpp
   geelen_idf::mp3::streamer()->setEngine(&g_engine);
   geelen_idf::voiceFeedbackSetContext(&g_cfg, &g_wifi, &g_engine);
+  // Schedules the boot prompts and spawns the voice task. PCM comes
+  // straight from `voiceCacheInit()` — the prior 3.5 s "boot settle" wait
+  // existed only to let the Helix decoder + MP3 streamer race finish
+  // before the first prompt; with the cache there is nothing to race.
   geelen_idf::voiceFeedbackScheduleBoot();
 ```
 

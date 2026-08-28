@@ -30,12 +30,8 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
   - When switching **into or out of Bluetooth**, the device schedules a reboot (expected).
   - Values outside `0..1` are clamped.
 
-### Bluetooth (A2DP sink)
+### Identity / mDNS
 
-- **Select source**: `POST /api/source?s=0` and wait for reboot.
-- **Discoverability**: phone sees the configured device name (default
-  **“Geelen Audio”**). Rename from Overview or About; re-pair if the
-  phone keeps the old GAP name.
 - **mDNS**: from a LAN client, `http://geelen-audio.local/` (or the
   custom hostname) opens the SPA after STA has an IP. Not advertised
   on the captive AP.
@@ -43,6 +39,27 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
   reboot, confirm About shows `overridden`; revert with factory
   (`null`) and reboot again. Multicast / identical STA+BT must 400
   without reboot.
+- **Rename**: Overview or About Identity; `GET /api/identity` reflects
+  the new `device_name` / hostname. Phones may keep the old Bluetooth
+  GAP name until they re-pair.
+
+### LED (WS2812)
+
+- **Boot colours**: slow red pulse until STA, one green breath on
+  Wi-Fi up, blue pulse while Bluetooth is unpaired (peaks capped by
+  `HAL_WS2812_MAX_DUTY`).
+- **Overview**: `POST /api/led` with `{ "color": "#rrggbb", "brightness": 0-100 }`
+  takes over immediately (`phase: user`).
+- **Count**: `GET /api/state` `led.count` matches compile-time
+  `HAL_WS2812_COUNT` (12 on stock Amped-WROVER; 35 if built with
+  `-DHAL_WS2812_COUNT=35`). Not writable from the SPA.
+
+### Bluetooth (A2DP sink)
+
+- **Select source**: `POST /api/source?s=0` and wait for reboot.
+- **Discoverability**: phone sees the configured device name (default
+  **“Geelen Audio”**). Rename from Overview or About; re-pair if the
+  phone keeps the old GAP name.
 - **Connect and play**: start playback; audio is heard on I2S output.
 - **Reconnect**: disconnect/reconnect from phone and verify playback resumes.
 - **Volume**: use device Web UI volume buttons; confirm change is audible.

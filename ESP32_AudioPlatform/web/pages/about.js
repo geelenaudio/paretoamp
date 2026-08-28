@@ -219,9 +219,6 @@ export default function About({ api, toast }) {
         <${Row} k="OpenAPI spec">
           <a href="/openapi.yaml" target="_blank" rel="noopener">openapi.yaml ↗</a>
         </${Row}>
-        <${Row} k="Identity">
-          Device name, hostname, MAC — see the Identity card above.
-        </${Row}>
       </${Card}>
 
       <${Card} title="Licensing" className="about-grid__span-2">

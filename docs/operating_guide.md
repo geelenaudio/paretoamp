@@ -109,9 +109,9 @@ the spoken mode confirmation.
 - Check the amp enable line — GPIO 13 must go HIGH within ~50 ms of
   I2S init. If you are seeing audio later but not at boot, this might
   be a hardware mod issue.
-- The first prompt is delayed by 3.5 s while Bluedroid + Wi-Fi + I2S
-  settle. If you only hear silence past 10 s, look at the serial log
-  for `voice-fb` warnings.
+- Boot prompts play as soon as the PCM cache is ready (no Bluedroid
+  settle delay). If you only hear silence past 10 s, look at the serial
+  log for `voice-fb` warnings.
 
 ### "Bluetooth connects but I don't hear music"
 

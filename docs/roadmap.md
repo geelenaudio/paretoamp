@@ -3,6 +3,10 @@
 Deferred items after the 1-layer PEQ / 4-board / Wi-Fi / threading
 refactor. None of these block the current firmware.
 
+Identity (name / hostname / STA mDNS / MAC override) and the WS2812
+LED path (`POST /api/led`, Amped default 12/10, RMT 512 on ESP32)
+already shipped.
+
 ## EQ / DSP
 
 - [ ] Per-channel (L/R) EQ: expose `eq.channel_mode` and store two 15-band curves.
@@ -56,4 +60,3 @@ refactor. None of these block the current firmware.
 
 - [ ] Keep [licensing.md](licensing.md) third-party inventory current.
 - [ ] Semver policy for the firmware vs SPA now that `/api/eq` is a breaking shape.
-- [ ] Release-notes template that diffs `docs/perf/*.txt`.
