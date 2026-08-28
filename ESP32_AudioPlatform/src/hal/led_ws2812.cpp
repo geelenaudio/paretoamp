@@ -9,11 +9,25 @@
 
 #include "led_strip.h"
 #include "driver/gpio.h"
+#include "sdkconfig.h"
 
 namespace geelen_hal {
 
 static const char* TAG = "LED/ws2812";
 static led_strip_handle_t s_strip = nullptr;
+
+// ESP32 RMT SRAM is 8 blocks × 64 symbols = 512. A WS2812 bit is two
+// symbols, so 64 symbols is ~1.3 pixels of waveform — the encoder ISR must
+// refill every ~40 µs. BT Classic on Core 0 stalls that ISR (cache off);
+// a >50 µs gap is a mid-strip RESET (wrong colours, Core 0 retry storm).
+// 512 is the hardware cap: ~10 pixels of slack. Longer strips still
+// ping-pong (50 LEDs need ~2400 symbols). Do not scale past 512.
+// ESP32-S3 blocks are 48 symbols; 192 = 4 blocks. DMA is the S3 path.
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
+static constexpr size_t kRmtMemSymbols = 512;
+#else
+static constexpr size_t kRmtMemSymbols = 192;
+#endif
 
 bool ledPresent() { return true; }
 uint16_t ledPixelCount() { return (uint16_t)HAL_WS2812_COUNT; }
@@ -37,7 +51,7 @@ bool ledInit() {
   led_strip_rmt_config_t rmt_config = {
       .clk_src = RMT_CLK_SRC_DEFAULT,
       .resolution_hz = 10 * 1000 * 1000,
-      .mem_block_symbols = 64,
+      .mem_block_symbols = kRmtMemSymbols,
       .flags = {.with_dma = false},
   };
   esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip);
@@ -47,9 +61,9 @@ bool ledInit() {
     return false;
   }
   led_strip_clear(s_strip);
-  ESP_LOGI(TAG, "WS2812 GPIO %d, count %u, max_duty=%u%%",
+  ESP_LOGI(TAG, "WS2812 GPIO %d, count %u, max_duty=%u%%, rmt_mem=%u",
            (int)HAL_PIN_WS2812, (unsigned)HAL_WS2812_COUNT,
-           (unsigned)HAL_WS2812_MAX_DUTY);
+           (unsigned)HAL_WS2812_MAX_DUTY, (unsigned)kRmtMemSymbols);
   return true;
 }
 

@@ -87,6 +87,33 @@ of the firmware cap”, not full 255. Status colours (boot red, one green
 breath on STA, pairing blue) are a ~2 s sine from 0 to that cap — not
 on/off flashes.
 
+### RMT memory (do not use the IDF default of 64)
+
+WS2812 is 800 kbit/s. The RMT peripheral plays a small RAM FIFO of
+level/duration **symbols** (two symbols per bit). The CPU must refill
+that FIFO before the data pin has been idle for ~50 µs, or the strip
+treats the gap as RESET: the first pixels latch, the rest of the frame
+is eaten as a new frame (wrong colours on later LEDs). The next good
+refresh snaps them back.
+
+IDF’s default `mem_block_symbols = 64` is ~1.3 pixels of waveform
+(~40 µs of slack). Bluetooth Classic on Core 0 regularly turns the
+flash cache off; that stall misses the deadline. The encoder ISR then
+retries, coexist/BT work piles up, and Core 0 looks 70–90% busy even
+though I2S/PEQ run on Core 1.
+
+Firmware therefore takes **all ESP32 RMT SRAM: 512 symbols** (8 blocks
+× 64) in [`led_ws2812.cpp`](../ESP32_AudioPlatform/src/hal/led_ws2812.cpp)
+— about 10 pixels of slack. That is the hardware cap. A 50-LED frame
+still needs ~2400 symbols, so the driver will always ping-pong; 512
+only makes each refill rarer. Do not compute `count × 24 × 2` and
+allocate that — `rmt_new_tx_channel` will fail.
+
+ESP32-S3 RMT blocks are 48 symbols; this image uses 192 (4 blocks).
+Long S3 strips should set `with_dma` rather than asking for more SRAM.
+
+Serial log line: `WS2812 GPIO … rmt_mem=512` (or `192` on S3).
+
 `state.led.count` is read-only so the SPA can label “N pixels”; Overview
 sliders are colour and brightness only (`POST /api/led`). Max duty is not
 in the API.

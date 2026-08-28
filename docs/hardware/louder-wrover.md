@@ -60,7 +60,8 @@ the hardware PEQ path in the firmware (`HAL_HAS_HW_PEQ=1`).
   (flash-voltage strapping); idle-low is safe at reset. Firmware inits
   the strip in `app_main`. `HAL_WS2812_COUNT` default 1;
   `-DHAL_WS2812_COUNT=N` for a daisy-chain. `HAL_WS2812_MAX_DUTY` default
-  50; `-DHAL_WS2812_MAX_DUTY=N`.
+  50; `-DHAL_WS2812_MAX_DUTY=N`. RMT takes the full 512-symbol ESP32
+  SRAM block; see [hal.md](../hal.md) (WS2812 RMT memory).
 
 ## Thermal / power notes
 
