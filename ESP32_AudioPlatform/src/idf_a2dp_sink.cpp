@@ -44,6 +44,7 @@ static uint32_t s_pos_q16 = 0;
 static uint32_t s_step_adj_q16 = 0;  // multiplicative adjustment (Q16.16), around 1.0
 static StreamBufferHandle_t s_pcm_sb = nullptr;
 static std::atomic<bool> s_a2dp_playing{false};
+static bool s_a2dp_up = false;
 
 bool a2dpPlaybackActive() {
   return s_a2dp_playing.load(std::memory_order_relaxed);
@@ -158,7 +159,23 @@ bool A2dpSink::begin(const char* device_name) {
       heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   ESP_LOGI(TAG, "A2DP sink started as '%s' (post-init int8=%u B free, %u B largest)",
            device_name, (unsigned)free_after, (unsigned)lblk_after);
+  s_a2dp_up = true;
   return true;
+}
+
+void A2dpSink::setAdvertisedName(const char* device_name) {
+  a2dpSetAdvertisedName(device_name);
+}
+
+void a2dpSetAdvertisedName(const char* name) {
+  if (!s_a2dp_up || !name || !name[0]) return;
+  esp_err_t err = esp_bt_gap_set_device_name(name);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_bt_gap_set_device_name(%s) failed: %s", name,
+             esp_err_to_name(err));
+    return;
+  }
+  ESP_LOGI(TAG, "GAP name %s", name);
 }
 
 void A2dpSink::a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {

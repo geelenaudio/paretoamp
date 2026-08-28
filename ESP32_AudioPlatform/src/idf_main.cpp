@@ -35,6 +35,8 @@
 #include "idf_state_stream.h"
 #include "idf_mode_manager.h"
 #include "idf_led.h"
+#include "idf_identity.h"
+#include "idf_mdns.h"
 #include "hal/hal_board.h"
 #include "hal/dac.h"
 
@@ -236,6 +238,12 @@ static constexpr int kBtDeferPollMs = 500;
 // 120 * 500 ms = 60 s max wait while still in captive AP-only mode.
 static constexpr int kBtDeferMaxPolls = 120;
 
+static const char* a2dp_name_from_cfg() {
+  static char name[geelen_idf::DEV_NAME_MAX];
+  g_cfg.getDeviceName(name, sizeof(name));
+  return name[0] ? name : "Geelen Audio";
+}
+
 static void deferred_a2dp_start_task(void*) {
   for (int i = 0; i < kBtDeferMaxPolls && g_wifi.isApOnly(); ++i) {
     vTaskDelay(pdMS_TO_TICKS(kBtDeferPollMs));
@@ -249,7 +257,7 @@ static void deferred_a2dp_start_task(void*) {
         "(pair for audio without fixing Wi-Fi)",
         (unsigned)((kBtDeferMaxPolls * kBtDeferPollMs) / 1000));
   }
-  g_a2dp.begin("Geelen Audio");
+  g_a2dp.begin(a2dp_name_from_cfg());
   vTaskDelete(nullptr);
 }
 #endif  // CONFIG_BT_ENABLED
@@ -334,6 +342,7 @@ extern "C" void app_main(void) {
   // still drive the firmware.
   geelen_idf::supervisorBegin();
   g_cfg.begin();
+  geelen_idf::identityInit(&g_cfg);
   // Bring up the Mode Manager once the config is loaded so its log line
   // shows the persisted source. No producers are wired through it yet
   // (Phase 3 ships the FSM scaffold; later phases plug in concrete
@@ -349,7 +358,9 @@ extern "C" void app_main(void) {
   // Start the CPU sampler early so its calibration baseline has seconds of
   // mostly-idle time to settle before WiFi/BT/audio kick in.
   geelen_idf::cpuSamplerStart();
+  geelen_idf::mdnsBegin(&g_cfg);
   g_wifi.begin(&g_cfg);
+  geelen_idf::identitySetWifi(&g_wifi);
   // Bring up the SSE broadcaster before httpd so the URI handler installed
   // by `g_http.begin` sees an initialized broadcaster and never has to
   // 503 a connecting SPA tab during the boot window.
@@ -427,7 +438,7 @@ extern "C" void app_main(void) {
 #if CONFIG_BT_ENABLED
   if (src == geelen_idf::AudioSource::Bluetooth) {
     if (!g_wifi.isApOnly()) {
-      g_a2dp.begin("Geelen Audio");
+      g_a2dp.begin(a2dp_name_from_cfg());
     } else {
       ESP_LOGW("geelen",
                "AP-only Wi-Fi onboarding: deferring Bluetooth ~%u s (or until STA "

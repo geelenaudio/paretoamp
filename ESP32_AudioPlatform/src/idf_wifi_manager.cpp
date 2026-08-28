@@ -22,7 +22,6 @@
 namespace geelen_idf {
 
 static const char* TAG = "WiFi";
-static const char* HOSTNAME = "Geelen-Audio";
 static const char* AP_SSID = "Geelen-Audio";
 static const char* AP_PASS = "geelen123";
 
@@ -98,9 +97,12 @@ bool WifiManager::begin(ConfigManager* cfg) {
   sta_netif_ = esp_netif_create_default_wifi_sta();
   ap_netif_ = esp_netif_create_default_wifi_ap();
 
-  // Hostname for STA interface (what your router often shows)
-  if (sta_netif_) {
-    esp_netif_set_hostname((esp_netif_t*)sta_netif_, HOSTNAME);
+  if (sta_netif_ && cfg_) {
+    char host[HOSTNAME_MAX];
+    cfg_->getHostname(host, sizeof(host));
+    if (host[0]) {
+      esp_netif_set_hostname((esp_netif_t*)sta_netif_, host);
+    }
   }
 
   wifi_init_config_t cfg_wifi = WIFI_INIT_CONFIG_DEFAULT();
@@ -578,6 +580,17 @@ bool WifiManager::commitValidated() {
   cfg_->save();
   ESP_LOGI(TAG, "commit validated ssid='%s'", probe_ssid_);
   return true;
+}
+
+void WifiManager::setStaHostname(const char* hostname) {
+  if (!sta_netif_ || !hostname || !hostname[0]) return;
+  esp_err_t err = esp_netif_set_hostname((esp_netif_t*)sta_netif_, hostname);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_netif_set_hostname(%s) failed: %s", hostname,
+             esp_err_to_name(err));
+    return;
+  }
+  ESP_LOGI(TAG, "STA hostname %s", hostname);
 }
 
 }  // namespace geelen_idf

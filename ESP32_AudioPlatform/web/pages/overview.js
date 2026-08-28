@@ -85,6 +85,9 @@ export default function Overview({ api, navigate, toast }) {
   const [ledColor, setLedColor] = useState("#ffffff");
   const [ledBri, setLedBri] = useState(0);
   const ledSeeded = useRef(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [nameBusy, setNameBusy] = useState(false);
+  const nameSeeded = useRef(false);
 
   // Push-based config subscription. The first frame arrives within one
   // RTT of mount (the broadcaster sends an initial snapshot before
@@ -97,6 +100,10 @@ export default function Overview({ api, navigate, toast }) {
         ledSeeded.current = true;
         if (s.led.color) setLedColor(s.led.color);
         if (typeof s.led.brightness === "number") setLedBri(s.led.brightness);
+      }
+      if (!nameSeeded.current && s.device_name) {
+        nameSeeded.current = true;
+        setNameDraft(s.device_name);
       }
     });
     return stop;
@@ -162,6 +169,22 @@ export default function Overview({ api, navigate, toast }) {
   const c0 = sys && sys.cpu ? sys.cpu.core0_pct : 0;
   const c1 = sys && sys.cpu ? sys.cpu.core1_pct : 0;
 
+  const nameDirty = nameDraft !== (state.device_name || "");
+
+  async function saveName() {
+    const n = (nameDraft || "").trim();
+    if (!n) return;
+    setNameBusy(true);
+    try {
+      await api.setDeviceName(n);
+      toast && toast("Device renamed", "ok");
+    } catch (e) {
+      toast && toast(String(e), "err");
+    } finally {
+      setNameBusy(false);
+    }
+  }
+
   return html`
     <h1 class="page__title">Overview</h1>
     <p class="page__subtitle">Live status for ${state.device_name || "this device"}.</p>
@@ -185,8 +208,24 @@ export default function Overview({ api, navigate, toast }) {
     <div class="grid">
       <div class="card card--metric">
         <div class="card__title">Device</div>
-        <div class="card__value">${state.device_name || "Geelen Audio"}</div>
-        <div class="card__sub">Firmware ${state.firmware || "dev"} · up ${fmtUptime(sys?.uptime_s)}</div>
+        <div class="field" style="margin-top:6px">
+          <input
+            class="input"
+            type="text"
+            maxlength="31"
+            value=${nameDraft}
+            placeholder="Geelen Audio"
+            aria-label="Device name"
+            onInput=${(e) => setNameDraft(e.target.value)}
+            onKeyDown=${(e) => { if (e.key === "Enter" && nameDirty) saveName(); }}
+            disabled=${nameBusy}
+          />
+        </div>
+        <div class="card__sub" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <span>Firmware ${state.firmware || "dev"} · up ${fmtUptime(sys?.uptime_s)}</span>
+          ${nameDirty ? html`<button type="button" class="btn btn--primary" style="padding:4px 10px"
+              disabled=${nameBusy} onClick=${saveName}>Save name</button>` : ""}
+        </div>
       </div>
 
       <div class="card card--metric">

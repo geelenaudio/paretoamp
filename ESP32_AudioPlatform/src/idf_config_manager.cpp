@@ -4,6 +4,7 @@
 // ESP-IDF ConfigManager implementation (NVS + esp_littlefs).
 
 #include "idf_config_manager.h"
+#include "idf_identity.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -69,6 +70,9 @@ static const char* NVS_KEY_LEGACY_EQ_PREF_NB    = "eq_pref_nb";
 static const char* NVS_KEY_EQ_HR_MODE    = "eq_hr_mode";
 static const char* NVS_KEY_EQ_HR_MANUAL  = "eq_hr_man";
 static const char* NVS_KEY_DEV_NAME      = "dev_name";
+static const char* NVS_KEY_HOSTNAME      = "hostname";
+static const char* NVS_KEY_STA_MAC       = "sta_mac";
+static const char* NVS_KEY_BT_MAC        = "bt_mac";
 static const char* NVS_KEY_DLNA_ON       = "dlna_on";
 static const char* NVS_KEY_VOICE_FB     = "voice_fb";
 static const char* NVS_KEY_WIFI_PS      = "wifi_ps";
@@ -220,6 +224,11 @@ void ConfigManager::loadDefaults() {
   config_.eq_hr_manual_db = 0.0f;
   strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
+  hostname_[0] = '\0';
+  sta_mac_set_ = false;
+  bt_mac_set_ = false;
+  memset(sta_mac_, 0, sizeof(sta_mac_));
+  memset(bt_mac_, 0, sizeof(bt_mac_));
   config_.dlna_on = false;
   config_.voice_feedback = true;
   config_.wifi_ps = WifiPsMode::None;
@@ -464,6 +473,31 @@ bool ConfigManager::load() {
     config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   }
 
+  {
+    size_t hl = HOSTNAME_MAX;
+    if (nvs_get_str(h, NVS_KEY_HOSTNAME, hostname_, &hl) != ESP_OK) {
+      hostname_[0] = '\0';
+    } else if (hostname_[0] && !identityHostnameValid(hostname_)) {
+      ESP_LOGW(TAG, "ignoring invalid stored hostname");
+      hostname_[0] = '\0';
+    }
+  }
+  {
+    size_t ml = 6;
+    uint8_t blob[6] = {};
+    if (nvs_get_blob(h, NVS_KEY_STA_MAC, blob, &ml) == ESP_OK && ml == 6 &&
+        identitySanitizeCustomMac(blob)) {
+      memcpy(sta_mac_, blob, 6);
+      sta_mac_set_ = true;
+    }
+    ml = 6;
+    if (nvs_get_blob(h, NVS_KEY_BT_MAC, blob, &ml) == ESP_OK && ml == 6 &&
+        identitySanitizeCustomMac(blob)) {
+      memcpy(bt_mac_, blob, 6);
+      bt_mac_set_ = true;
+    }
+  }
+
   config_.dlna_on = nvsGetBool(h, NVS_KEY_DLNA_ON, false);
   config_.voice_feedback = nvsGetBool(h, NVS_KEY_VOICE_FB, true);
   if (nvs_get_u8(h, NVS_KEY_WIFI_PS, &tmp8) == ESP_OK && tmp8 <= 2u) {
@@ -592,6 +626,21 @@ bool ConfigManager::save() {
       nvs_set_u8(h, NVS_KEY_WIFI_EVER, wifi_ever_ok_ ? 1 : 0);
     }
     nvs_set_str(h, NVS_KEY_DEV_NAME, config_.dev_name);
+    if (hostname_[0]) {
+      nvs_set_str(h, NVS_KEY_HOSTNAME, hostname_);
+    } else {
+      nvs_erase_key(h, NVS_KEY_HOSTNAME);
+    }
+    if (sta_mac_set_) {
+      nvs_set_blob(h, NVS_KEY_STA_MAC, sta_mac_, 6);
+    } else {
+      nvs_erase_key(h, NVS_KEY_STA_MAC);
+    }
+    if (bt_mac_set_) {
+      nvs_set_blob(h, NVS_KEY_BT_MAC, bt_mac_, 6);
+    } else {
+      nvs_erase_key(h, NVS_KEY_BT_MAC);
+    }
     nvs_set_u8(h, NVS_KEY_DLNA_ON, config_.dlna_on ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_VOICE_FB, config_.voice_feedback ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_WIFI_PS, (uint8_t)config_.wifi_ps);
@@ -878,6 +927,76 @@ void ConfigManager::setDeviceName(const char* name) {
   if (!name) return;
   strncpy(config_.dev_name, name, DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
+  markDirtyNet();
+}
+
+bool ConfigManager::getHostname(char* out, size_t max_len) const {
+  if (!out || max_len == 0) return false;
+  if (hostname_[0]) {
+    strncpy(out, hostname_, max_len - 1);
+    out[max_len - 1] = '\0';
+    return true;
+  }
+  return identitySlugHostname(config_.dev_name, out, max_len);
+}
+
+bool ConfigManager::setHostname(const char* hostname) {
+  if (!hostname || !hostname[0]) {
+    hostname_[0] = '\0';
+    markDirtyNet();
+    return true;
+  }
+  char norm[HOSTNAME_MAX];
+  if (!identityNormalizeHostname(hostname, norm, sizeof(norm))) return false;
+  strncpy(hostname_, norm, HOSTNAME_MAX - 1);
+  hostname_[HOSTNAME_MAX - 1] = '\0';
+  markDirtyNet();
+  return true;
+}
+
+bool ConfigManager::getStaMacOverride(uint8_t out[6]) const {
+  if (!sta_mac_set_ || !out) return false;
+  memcpy(out, sta_mac_, 6);
+  return true;
+}
+
+bool ConfigManager::getBtMacOverride(uint8_t out[6]) const {
+  if (!bt_mac_set_ || !out) return false;
+  memcpy(out, bt_mac_, 6);
+  return true;
+}
+
+bool ConfigManager::setStaMacOverride(const uint8_t mac[6]) {
+  if (!mac) return false;
+  uint8_t tmp[6];
+  memcpy(tmp, mac, 6);
+  if (!identitySanitizeCustomMac(tmp)) return false;
+  memcpy(sta_mac_, tmp, 6);
+  sta_mac_set_ = true;
+  markDirtyNet();
+  return true;
+}
+
+bool ConfigManager::setBtMacOverride(const uint8_t mac[6]) {
+  if (!mac) return false;
+  uint8_t tmp[6];
+  memcpy(tmp, mac, 6);
+  if (!identitySanitizeCustomMac(tmp)) return false;
+  memcpy(bt_mac_, tmp, 6);
+  bt_mac_set_ = true;
+  markDirtyNet();
+  return true;
+}
+
+void ConfigManager::clearStaMacOverride() {
+  sta_mac_set_ = false;
+  memset(sta_mac_, 0, sizeof(sta_mac_));
+  markDirtyNet();
+}
+
+void ConfigManager::clearBtMacOverride() {
+  bt_mac_set_ = false;
+  memset(bt_mac_, 0, sizeof(bt_mac_));
   markDirtyNet();
 }
 

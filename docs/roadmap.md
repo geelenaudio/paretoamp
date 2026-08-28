@@ -24,7 +24,8 @@ refactor. None of these block the current firmware.
 
 - [ ] STA-mode `/api/wifi/validate` drops the HTTP client (STA must leave the AP to probe). Return 202 + poll `/api/wifi/state`. After a probe, large `/api/state` bodies can stall until reboot; small endpoints keep working.
 - [ ] Finer WPA3-SAE reason codes (today they collapse to `AUTH_FAIL`).
-- [ ] Concurrent captive DNS + mDNS on the AP.
+- [ ] Concurrent captive DNS + mDNS on the AP. STA mDNS (`_http._tcp`
+  after got-IP) shipped; AP remains DNS-captive only.
 
 ## Multithreading / perf
 

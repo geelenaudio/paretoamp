@@ -139,6 +139,15 @@ export const api = {
     return await j("POST", "/api/device-name", { name });
   },
 
+  async getIdentity() {
+    try { return await j("GET", "/api/identity"); }
+    catch (_) { return { _unimplemented: true }; }
+  },
+
+  async setIdentity(patch) {
+    return await j("POST", "/api/identity", patch);
+  },
+
   // Single-layer PEQ. The server accepts { enabled, band_count, bands }
   // and clamps `band_count` to the per-board runtime cap
   // (`state.eq.max_bands`).

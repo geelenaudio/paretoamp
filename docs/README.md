@@ -35,6 +35,7 @@ are diving into the code, start with **Architecture**.
   fallback, reconnect ladder, captive HTML, `/wifi` SPA page.
 - [EQ](eq.md) — single-layer PEQ, software vs TAS5825M hardware backends.
 - [HAL](hal.md) — compile-time board selector and DAC interface.
+- [Identity](identity.md) — device name, hostname, mDNS, MAC override.
 - [Board variants](board_variants.md) — which PIO env to build.
 - [Roadmap](roadmap.md) — deferred follow-ups.
 

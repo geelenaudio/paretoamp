@@ -1,6 +1,6 @@
 // Phase 1 API handlers: /api/state, /api/system, /api/volume, /api/channels,
 // /api/mode, /api/dlna, /api/eq, /api/eq/headroom, /api/eq/presets/…,
-// /api/reset, /api/device-name, /api/led.
+// /api/reset, /api/device-name, /api/identity, /api/led.
 //
 // SSE endpoints (/api/logs/stream) are wired from Phase 7 in a separate
 // module because they need the log-ring backpressure logic.

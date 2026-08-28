@@ -23,6 +23,8 @@ idf_component_register(
     "idf_state_stream.cpp"
     "idf_mode_manager.cpp"
     "idf_led.cpp"
+    "idf_identity.cpp"
+    "idf_mdns.cpp"
     # Hardware Abstraction Layer sources. Both DAC backends are always compiled;
     # each one is empty when `HAL_HAS_I2C_DAC` doesn't match the board (the
     # `#if` gates inside the .cpp collapse the file to nothing on the wrong

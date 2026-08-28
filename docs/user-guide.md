@@ -25,8 +25,16 @@
 ## Bluetooth
 
 - Default source is **Bluetooth** (ESP32-WROVER builds). The device
-  advertises as **Geelen Audio**. Pair from your phone; audio goes through
-  the single PEQ curve (software on Amped, TAS5825M hardware on Louder).
+  advertises as **Geelen Audio** (or the name you set on Overview / About).
+  Pair from your phone; audio goes through the single PEQ curve (software
+  on Amped, TAS5825M hardware on Louder). Renaming applies live; some
+  phones keep the old GAP name until you re-pair.
+
+## Identity / mDNS
+
+- **Overview** has a device-name field. **About → Identity** also edits
+  hostname (`http://<hostname>.local/`) and optional STA/BT MAC overrides.
+  MAC changes reboot the device. Details: [identity.md](identity.md).
 
 ## Spotify / audio via WiFi (Network source)
 

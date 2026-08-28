@@ -11,6 +11,8 @@
 #include "snapcast_protocol.h"
 #include "audio_engine.h"
 #include "idf_voice_feedback.h"
+#include "idf_identity.h"
+#include "idf_config_manager.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -94,11 +96,16 @@ bool Snapclient::sendHello() {
                 "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2],
                 mac[3], mac[4], mac[5]);
 
+  char hostname[geelen_idf::HOSTNAME_MAX];
+  if (!geelen_idf::identityCopyHostname(hostname, sizeof(hostname)) || !hostname[0]) {
+    std::snprintf(hostname, sizeof(hostname), "geelen-audio");
+  }
+
   uint8_t frame[384];
   const size_t n = geelen::buildSnapcastHelloFrame(
       frame, sizeof(frame),
       mac_str,
-      "geelen-amp",  // HostName (also used as the display name in snapweb)
+      hostname,      // HostName (snapweb display + identity)
       "Snapclient",  // ClientName (snapweb filters controls per client name)
       "0.1.0",       // Version
       "ESP-IDF",     // OS

@@ -49,6 +49,9 @@ class WifiManager {
   /** True while the device is running the captive AP and STA has no IP yet. */
   bool isApOnly() const { return status_.ap_running && !status_.sta_connected; }
 
+  /** DHCP hostname on the STA netif. No-op if STA netif is not up yet. */
+  void setStaHostname(const char* hostname);
+
   WifiProbeState probeState() const { return probe_state_; }
   const char* probeStateName() const;
 

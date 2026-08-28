@@ -52,13 +52,14 @@
 
 // ---- WS2812B (optional RGB, Sonocotta "RGB OUT") -------------------------
 // GPIO 12 is MTDI (strapping). Idle-low is safe at reset; init in app_main.
+// Strip is 5 V + GND + data; firmware only drives the data pin.
 #define HAL_HAS_WS2812  1
 #define HAL_PIN_WS2812  GPIO_NUM_12
 #ifndef HAL_WS2812_COUNT
-#define HAL_WS2812_COUNT 1
+#define HAL_WS2812_COUNT 12
 #endif
 #ifndef HAL_WS2812_MAX_DUTY
-#define HAL_WS2812_MAX_DUTY 50
+#define HAL_WS2812_MAX_DUTY 10
 #endif
 
 // ---- EQ cap ---------------------------------------------------------------
