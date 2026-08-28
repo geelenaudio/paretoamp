@@ -356,6 +356,51 @@ h1, h2 { font-family: var(--font-display); font-weight: 600; }
 }
 .grid > .card { height: 100%; }
 
+/* About: Identity full-width, then a 3-column row. Licensing spans two
+   columns so it is twice as wide as Firmware / Chip / Network / Docs. */
+.about-grid {
+  display: grid;
+  gap: var(--sp-4);
+  align-items: stretch;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.about-grid > .card { height: 100%; }
+.about-grid__span-all { grid-column: 1 / -1; }
+.about-grid__span-2 { grid-column: span 2; }
+.about-ident {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+  align-items: start;
+}
+.about-ident .field { margin-bottom: 0; }
+.about-ident__hint {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  align-items: center;
+  min-height: 28px;
+  margin-top: 6px;
+}
+.about-ident__hint label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+@media (max-width: 900px) {
+  .about-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .about-grid__span-2 { grid-column: 1 / -1; }
+}
+@media (max-width: 640px) {
+  .about-grid { grid-template-columns: 1fr; }
+  .about-grid__span-all,
+  .about-grid__span-2 { grid-column: auto; }
+  .about-ident { grid-template-columns: 1fr; }
+}
+
 .page__title {
   margin: 0 0 var(--sp-2);
   font-family: var(--font-display);

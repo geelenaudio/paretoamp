@@ -59,6 +59,9 @@ constexpr size_t SNAPCAST_HOST_MAX = 64;
 constexpr size_t WIFI_SSID_MAX = 32;
 constexpr size_t WIFI_PASS_MAX = 64;
 constexpr size_t DEV_NAME_MAX = 32;
+// DHCP / mDNS LDH label (null included). Empty stored value means "slug
+// from device_name".
+constexpr size_t HOSTNAME_MAX = 32;
 // Snapcast STREAM port. 1704 is the Snapcast audio stream; 1705 is the
 // JSON-RPC control channel used by snapweb / CLI clients, and connecting a
 // Snapclient there yields silence (server waits for Hello which never
@@ -204,9 +207,26 @@ class ConfigManager {
   bool wifiEverConnectedFlagPresent() const { return wifi_ever_flag_present_; }
   void setWifiEverConnectedOk(bool ok);
 
-  // ---- Device name / DLNA -----------------------------------------------
+  // ---- Device name / hostname / MAC / DLNA ------------------------------
   bool getDeviceName(char* out, size_t max_len) const;
   void setDeviceName(const char* name);
+  // Effective hostname (custom, or slug of device_name, or "geelen-audio").
+  bool getHostname(char* out, size_t max_len) const;
+  bool hostnameIsCustom() const { return hostname_[0] != '\0'; }
+  // Empty / null clears the override (slug from device name). Returns false
+  // if `hostname` is non-empty and not a valid LDH label.
+  bool setHostname(const char* hostname);
+
+  bool hasStaMacOverride() const { return sta_mac_set_; }
+  bool hasBtMacOverride() const { return bt_mac_set_; }
+  bool getStaMacOverride(uint8_t out[6]) const;
+  bool getBtMacOverride(uint8_t out[6]) const;
+  // Copies 6 bytes, forces locally-administered unicast. False if invalid.
+  bool setStaMacOverride(const uint8_t mac[6]);
+  bool setBtMacOverride(const uint8_t mac[6]);
+  void clearStaMacOverride();
+  void clearBtMacOverride();
+
   bool getDlnaEnabled() const { return config_.dlna_on; }
   void setDlnaEnabled(bool on);
 
@@ -285,6 +305,11 @@ class ConfigManager {
   char wifi_pass_[WIFI_PASS_MAX]{};
   bool wifi_ever_ok_{false};
   bool wifi_ever_flag_present_{false};
+  char hostname_[HOSTNAME_MAX]{};
+  uint8_t sta_mac_[6]{};
+  uint8_t bt_mac_[6]{};
+  bool sta_mac_set_{false};
+  bool bt_mac_set_{false};
 };
 
 /** Background NVS writer; call once after ConfigManager::begin(). */

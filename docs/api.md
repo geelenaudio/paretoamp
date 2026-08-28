@@ -71,6 +71,24 @@ WS2812 colour and brightness. Takes over from the boot/pairing animation.
 
 Also exposed on `GET /api/state` as `led`.
 
+### GET /api/identity
+
+Friendly name, DHCP/mDNS hostname, mDNS URL, and STA/AP/BT MACs
+(`current`, `factory`, `overridden`). Canonical schema:
+[`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml).
+See [identity.md](identity.md).
+
+### POST /api/identity
+
+Any of `name`, `hostname`, `sta_mac`, `bt_mac`. Name/hostname apply live.
+MAC change persists and reboots (`reboot: true`). `null` on a MAC field
+reverts to factory. 400 on invalid hostname or MAC.
+
+### POST /api/device-name
+
+Friendly name only (`{ "name": "Kitchen" }`). Applied live to Bluetooth
+GAP, DLNA, and mDNS instance.
+
 ### POST /api/factory_reset
 
 Reset all config to defaults and restart the device.

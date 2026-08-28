@@ -184,4 +184,14 @@ CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # audio + httpd. Documented in docs/architecture.md.
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
 
+# mDNS responder: one _http._tcp service, STA only, PSRAM task/heap so we
+# do not steal internal DRAM from A2DP + httpd. See docs/identity.md.
+CONFIG_MDNS_MAX_SERVICES=2
+# CONFIG_MDNS_PREDEF_NETIF_ETH is not set
+# CONFIG_MDNS_ENABLE_CONSOLE_CLI is not set
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
+# CONFIG_MDNS_TASK_CREATE_FROM_INTERNAL is not set
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+# CONFIG_MDNS_MEMORY_ALLOC_INTERNAL is not set
+
 

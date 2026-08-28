@@ -33,7 +33,16 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
 ### Bluetooth (A2DP sink)
 
 - **Select source**: `POST /api/source?s=0` and wait for reboot.
-- **Discoverability**: phone sees device name **“Geelen Audio”**.
+- **Discoverability**: phone sees the configured device name (default
+  **“Geelen Audio”**). Rename from Overview or About; re-pair if the
+  phone keeps the old GAP name.
+- **mDNS**: from a LAN client, `http://geelen-audio.local/` (or the
+  custom hostname) opens the SPA after STA has an IP. Not advertised
+  on the captive AP.
+- **MAC override** (About → Identity): set a custom STA and BT MAC,
+  reboot, confirm About shows `overridden`; revert with factory
+  (`null`) and reboot again. Multicast / identical STA+BT must 400
+  without reboot.
 - **Connect and play**: start playback; audio is heard on I2S output.
 - **Reconnect**: disconnect/reconnect from phone and verify playback resumes.
 - **Volume**: use device Web UI volume buttons; confirm change is audible.

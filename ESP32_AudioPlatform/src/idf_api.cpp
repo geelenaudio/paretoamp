@@ -13,6 +13,7 @@
 #include "idf_led.h"
 #include "idf_cpu_sampler.h"
 #include "idf_mode_manager.h"
+#include "idf_identity.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -310,6 +311,10 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cfg->getDeviceName(dev_name, sizeof(dev_name));
   cJSON_AddStringToObject(root, "device_name", dev_name);
 
+  cJSON* ident = cJSON_CreateObject();
+  identityAddJson(ident, cfg, /*include_macs=*/false);
+  cJSON_AddItemToObject(root, "identity", ident);
+
   const esp_app_desc_t* desc = esp_app_get_description();
   cJSON_AddStringToObject(root, "firmware", desc ? desc->version : "dev");
 
@@ -481,7 +486,7 @@ static void appendSystemMetrics(cJSON* root, bool include_audio = true) {
   cJSON_AddItemToObject(root, "audio", audio);
 }
 
-static void appendSystemIdentity(cJSON* root) {
+static void appendSystemIdentity(cJSON* root, ConfigManager* cfg) {
   esp_chip_info_t chip{};
   esp_chip_info(&chip);
   cJSON* c = cJSON_CreateObject();
@@ -515,18 +520,15 @@ static void appendSystemIdentity(cJSON* root) {
   uint8_t mac[6] = {0};
   char mac_buf[18];
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
-    snprintf(mac_buf, sizeof(mac_buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    identityFormatMac(mac, mac_buf);
     cJSON_AddStringToObject(net, "sta_mac", mac_buf);
   }
   if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) == ESP_OK) {
-    snprintf(mac_buf, sizeof(mac_buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    identityFormatMac(mac, mac_buf);
     cJSON_AddStringToObject(net, "ap_mac", mac_buf);
   }
   if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
-    snprintf(mac_buf, sizeof(mac_buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    identityFormatMac(mac, mac_buf);
     cJSON_AddStringToObject(net, "bt_mac", mac_buf);
   }
   esp_netif_t* nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -537,12 +539,19 @@ static void appendSystemIdentity(cJSON* root) {
     }
   }
   cJSON_AddItemToObject(root, "net", net);
+
+  if (cfg) {
+    cJSON* ident = cJSON_CreateObject();
+    identityAddJson(ident, cfg, /*include_macs=*/true);
+    cJSON_AddItemToObject(root, "identity", ident);
+  }
 }
 
 static esp_err_t handle_get_system(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
   cJSON* root = cJSON_CreateObject();
   appendSystemMetrics(root);
-  appendSystemIdentity(root);
+  appendSystemIdentity(root, cfg);
   return send_json(req, root);
 }
 
@@ -553,8 +562,9 @@ static esp_err_t handle_get_system_metrics(httpd_req_t* req) {
 }
 
 static esp_err_t handle_get_system_identity(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
   cJSON* root = cJSON_CreateObject();
-  appendSystemIdentity(root);
+  appendSystemIdentity(root, cfg);
   return send_json(req, root);
 }
 
@@ -829,6 +839,8 @@ static esp_err_t handle_post_dlna(httpd_req_t* req) {
   cfg->setDlnaEnabled(enabled);
   if (name && *name) cfg->setDeviceName(name);
   cJSON_Delete(body);
+  cfg->save();
+  if (name && *name) identityApplyLive();
 
   cJSON* rj = cJSON_CreateObject();
   cJSON_AddBoolToObject(rj, "enabled", enabled);
@@ -917,11 +929,143 @@ static esp_err_t handle_post_device_name(httpd_req_t* req) {
   if (!n || !*n) { cJSON_Delete(body); return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required"); }
   cfg->setDeviceName(n);
   cJSON_Delete(body);
+  cfg->save();
+  identityApplyLive();
 
   cJSON* rj = cJSON_CreateObject();
   char dn[DEV_NAME_MAX]; cfg->getDeviceName(dn, sizeof(dn));
   cJSON_AddStringToObject(rj, "name", dn);
   return send_json(req, rj);
+}
+
+static void fill_effective_mac_(ConfigManager* cfg, bool sta, uint8_t out[6]) {
+  if (sta) {
+    if (cfg->getStaMacOverride(out)) return;
+    identityFactoryMac((int)ESP_MAC_WIFI_STA, out);
+  } else {
+    if (cfg->getBtMacOverride(out)) return;
+    identityFactoryMac((int)ESP_MAC_BT, out);
+  }
+}
+
+// Parse a MAC JSON field: missing = no change; null = factory; string = set.
+// Returns false on malformed string (caller 400).
+static bool parse_mac_field_(const cJSON* body, const char* key, bool* present,
+                             bool* clear, uint8_t mac[6], const char** err) {
+  *present = false;
+  *clear = false;
+  const cJSON* v = cJSON_GetObjectItemCaseSensitive(body, key);
+  if (!v) return true;
+  *present = true;
+  if (cJSON_IsNull(v)) {
+    *clear = true;
+    return true;
+  }
+  if (!cJSON_IsString(v) || !v->valuestring) {
+    *err = "MAC must be a string or null";
+    return false;
+  }
+  if (!identityParseMac(v->valuestring, mac)) {
+    *err = "MAC must be aa:bb:cc:dd:ee:ff";
+    return false;
+  }
+  if (!identitySanitizeCustomMac(mac)) {
+    *err = "MAC must be unicast (not multicast/zero/broadcast)";
+    return false;
+  }
+  return true;
+}
+
+static esp_err_t handle_get_identity(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+  cJSON* root = cJSON_CreateObject();
+  identityAddJson(root, cfg, /*include_macs=*/true);
+  return send_json(req, root);
+}
+
+static esp_err_t handle_post_identity(httpd_req_t* req) {
+  auto* cfg = (ConfigManager*)req->user_ctx;
+  if (!cfg) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no cfg");
+
+  cJSON* body = parse_body(req);
+  if (!body) return ESP_FAIL;
+
+  const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(body, "name");
+  if (name_j) {
+    if (!cJSON_IsString(name_j) || !name_j->valuestring || !name_j->valuestring[0]) {
+      cJSON_Delete(body);
+      return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required");
+    }
+  }
+  const cJSON* host_j = cJSON_GetObjectItemCaseSensitive(body, "hostname");
+  char host_norm[HOSTNAME_MAX];
+  bool host_clear = false;
+  if (host_j) {
+    if (cJSON_IsNull(host_j) || (cJSON_IsString(host_j) && host_j->valuestring &&
+                                 !host_j->valuestring[0])) {
+      host_clear = true;
+    } else if (cJSON_IsString(host_j) && host_j->valuestring) {
+      if (!identityNormalizeHostname(host_j->valuestring, host_norm, sizeof(host_norm))) {
+        cJSON_Delete(body);
+        return send_err_json(req, HTTPD_400_BAD_REQUEST,
+                             "hostname must be 1-31 chars [a-z0-9-], no leading/trailing hyphen");
+      }
+    } else {
+      cJSON_Delete(body);
+      return send_err_json(req, HTTPD_400_BAD_REQUEST, "hostname must be a string or null");
+    }
+  }
+
+  bool sta_present = false, sta_clear = false, bt_present = false, bt_clear = false;
+  uint8_t sta_mac[6] = {};
+  uint8_t bt_mac[6] = {};
+  const char* mac_err = nullptr;
+  if (!parse_mac_field_(body, "sta_mac", &sta_present, &sta_clear, sta_mac, &mac_err) ||
+      !parse_mac_field_(body, "bt_mac", &bt_present, &bt_clear, bt_mac, &mac_err)) {
+    cJSON_Delete(body);
+    return send_err_json(req, HTTPD_400_BAD_REQUEST, mac_err ? mac_err : "bad MAC");
+  }
+
+  uint8_t eff_sta[6] = {};
+  uint8_t eff_bt[6] = {};
+  fill_effective_mac_(cfg, true, eff_sta);
+  fill_effective_mac_(cfg, false, eff_bt);
+  if (sta_present) {
+    if (sta_clear) identityFactoryMac((int)ESP_MAC_WIFI_STA, eff_sta);
+    else memcpy(eff_sta, sta_mac, 6);
+  }
+  if (bt_present) {
+    if (bt_clear) identityFactoryMac((int)ESP_MAC_BT, eff_bt);
+    else memcpy(eff_bt, bt_mac, 6);
+  }
+  if ((sta_present || bt_present) && identityMacEqual(eff_sta, eff_bt)) {
+    cJSON_Delete(body);
+    return send_err_json(req, HTTPD_400_BAD_REQUEST, "STA and BT MACs must differ");
+  }
+
+  if (name_j) cfg->setDeviceName(name_j->valuestring);
+  if (host_j) cfg->setHostname(host_clear ? "" : host_norm);
+  if (sta_present) {
+    if (sta_clear) cfg->clearStaMacOverride();
+    else cfg->setStaMacOverride(sta_mac);
+  }
+  if (bt_present) {
+    if (bt_clear) cfg->clearBtMacOverride();
+    else cfg->setBtMacOverride(bt_mac);
+  }
+  cJSON_Delete(body);
+
+  const bool reboot = sta_present || bt_present;
+  cfg->save();
+  if (!reboot) identityApplyLive();
+
+  cJSON* rj = cJSON_CreateObject();
+  identityAddJson(rj, cfg, /*include_macs=*/true);
+  cJSON_AddBoolToObject(rj, "reboot", reboot);
+  esp_err_t ok = send_json(req, rj);
+  if (reboot) scheduleRestart(800);
+  return ok;
 }
 
 // ---- /api/eq --------------------------------------------------------------
@@ -1611,6 +1755,8 @@ void registerApiHandlers(void* server_handle, ConfigManager* cfg) {
   reg("/api/dlna",               HTTP_POST,   handle_post_dlna);
   reg("/api/voice-feedback",     HTTP_POST,   handle_post_voice_feedback);
   reg("/api/device-name",        HTTP_POST,   handle_post_device_name);
+  reg("/api/identity",           HTTP_GET,    handle_get_identity);
+  reg("/api/identity",           HTTP_POST,   handle_post_identity);
   reg("/api/eq",                 HTTP_POST,   handle_post_eq);
   reg("/api/eq/headroom",        HTTP_POST,   handle_post_eq_headroom);
   reg("/api/eq/presets",         HTTP_GET,    handle_get_presets);

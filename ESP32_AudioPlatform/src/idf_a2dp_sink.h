@@ -44,6 +44,8 @@ class A2dpSink {
   A2dpSink() = default;
   void setEngine(geelen::AudioEngine* eng) { engine_ = eng; }
   bool begin(const char* device_name);
+  /** Update GAP advertised name if the sink is already up. */
+  void setAdvertisedName(const char* device_name);
 
  private:
   static void a2dpCb_(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param);
@@ -57,3 +59,13 @@ class A2dpSink {
 }  // namespace geelen_idf
 
 #endif  // CONFIG_BT_ENABLED
+
+#if CONFIG_BT_ENABLED
+namespace geelen_idf {
+void a2dpSetAdvertisedName(const char* name);
+}
+#else
+namespace geelen_idf {
+inline void a2dpSetAdvertisedName(const char*) {}
+}
+#endif

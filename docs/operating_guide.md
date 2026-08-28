@@ -33,7 +33,10 @@ If you turn voice feedback off in the Web UI, the device starts silent.
 5. The device restarts (~500 ms). On the next boot you should hear
    "Wi-Fi connected" + the mode clip, and the device is reachable on
    your home network at the IP address your router assigned. mDNS
-   hostname is `Geelen-Audio.local` if your client supports it.
+   hostname defaults to `geelen-audio.local` (slug of the friendly name
+   **Geelen Audio**). Open `http://geelen-audio.local/` if your client
+   supports multicast DNS, or use the DHCP IP. Rename hostname on
+   **About → Identity** — see [identity.md](identity.md).
 
 If the new credentials are wrong, the device will fall back to the AP
 again on the next boot and you can retry.

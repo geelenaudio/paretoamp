@@ -49,7 +49,7 @@ tags:
       when available, otherwise falls back to the software cascade),
       shared preset store (10 slots), and headroom control.
   - name: Admin
-    description: Device name, granular reset.
+    description: Device name, hostname, MAC override, granular reset.
   - name: WiFi
     description: |
       Wi-Fi onboarding and status. `POST /api/wifi` (form-encoded) is the
@@ -68,7 +68,7 @@ paths:
         Single round-trip snapshot of everything the SPA needs to render:
         current mode, volume, channel config, Snapcast host, DLNA settings,
         the EQ curve + backend + per-board `max_bands`, headroom settings,
-        device name, firmware version.
+        device name, hostname (mDNS), firmware version.
 
         SPA fetches this once per page mount; live metrics (CPU / heap /
         WiFi RSSI) live on `GET /api/system` and should be polled
@@ -346,8 +346,10 @@ paths:
       tags: [Admin]
       summary: Rename the device
       description: |
-        User-visible name shown in Snapweb, DLNA announcements, and BT
-        advertising. Max 32 bytes UTF-8 (truncated without warning).
+        User-visible friendly name (max 32 bytes UTF-8). Applied live to
+        Bluetooth GAP advertising, DLNA, mDNS instance, and the SPA.
+        Does not change the DHCP/mDNS hostname — use `POST /api/identity`
+        for that. Phones may keep the old BT name until they re-pair.
       operationId: setDeviceName
       requestBody:
         required: true
@@ -366,6 +368,55 @@ paths:
               schema:
                 type: object
                 properties: { name: { type: string } }
+
+  /api/identity:
+    get:
+      tags: [Admin]
+      summary: Device identity
+      description: |
+        Friendly name, DHCP/mDNS hostname, mDNS URL, and Wi-Fi STA / AP /
+        Bluetooth MACs (current, factory, overridden).
+      operationId: getIdentity
+      responses:
+        "200":
+          description: Current identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+    post:
+      tags: [Admin]
+      summary: Update device identity
+      description: |
+        Any of `name`, `hostname`, `sta_mac`, `bt_mac`. Omitted fields stay
+        unchanged. `hostname` empty or `null` reverts to a slug of the
+        friendly name. `sta_mac` / `bt_mac` as `null` revert to factory.
+        Custom MACs must be unicast; the firmware sets the locally
+        administered bit. STA and BT must differ.
+
+        Name and hostname apply live (DHCP hostname, mDNS, BT GAP). A MAC
+        change is persisted and the device reboots (`reboot: true`) because
+        the radios bind MAC at init. Changing the BT MAC or name requires
+        re-pairing. Changing the STA MAC may get a new DHCP lease.
+      operationId: setIdentity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IdentityUpdate" }
+            example: { name: "Kitchen", hostname: "kitchen-amp" }
+      responses:
+        "200":
+          description: New identity. `reboot` is true when a MAC changed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Identity"
+                  - type: object
+                    properties:
+                      reboot: { type: boolean }
+        "400":
+          description: Invalid hostname or MAC.
 
   /api/eq:
     post:
@@ -980,6 +1031,10 @@ components:
       type: object
       properties:
         device_name: { type: string }
+        identity:
+          description: Name/hostname/mDNS without MAC fields (MACs live on GET /api/identity).
+          allOf:
+            - $ref: "#/components/schemas/IdentityPublic"
         firmware:    { type: string }
         mode:        { $ref: "#/components/schemas/Mode" }
         volume:      { $ref: "#/components/schemas/VolumeSetting" }
@@ -1076,6 +1131,56 @@ components:
             sta_mac:  { type: string, example: "aa:bb:cc:11:22:33" }
             ap_mac:   { type: string }
             bt_mac:   { type: string }
+        identity: { $ref: "#/components/schemas/Identity" }
+
+    IdentityPublic:
+      type: object
+      properties:
+        device_name: { type: string }
+        hostname: { type: string, description: "DHCP / mDNS LDH label." }
+        hostname_custom: { type: boolean, description: "True when hostname is stored independently of the friendly-name slug." }
+        mdns:
+          type: object
+          properties:
+            hostname: { type: string }
+            instance: { type: string }
+            url: { type: string, example: "http://geelen-audio.local/" }
+
+    IdentityMac:
+      type: object
+      properties:
+        current: { type: string, example: "aa:bb:cc:dd:ee:ff" }
+        factory: { type: string }
+        overridden: { type: boolean }
+
+    Identity:
+      allOf:
+        - $ref: "#/components/schemas/IdentityPublic"
+        - type: object
+          properties:
+            mac:
+              type: object
+              properties:
+                sta: { $ref: "#/components/schemas/IdentityMac" }
+                ap: { $ref: "#/components/schemas/IdentityMac" }
+                bt: { $ref: "#/components/schemas/IdentityMac" }
+
+    IdentityUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 32 }
+        hostname:
+          oneOf:
+            - { type: string, maxLength: 31, pattern: "^[a-z0-9]([a-z0-9-]{0,29}[a-z0-9])?$" }
+            - { type: "null" }
+        sta_mac:
+          oneOf:
+            - { type: string }
+            - { type: "null" }
+        bt_mac:
+          oneOf:
+            - { type: string }
+            - { type: "null" }
 
     LogEntry:
       description: |
