@@ -10,8 +10,9 @@
 //                        `false` (the caller keeps the software PEQ path).
 //   - dac_tas5825m.cpp — used on Louder boards. Wraps the vendored sonocotta
 //                        driver at `components/tas5805m/` and implements
-//                        hardware PEQ by uploading Q1.31 biquad coefficients
-//                        into the TAS5825M's 15 native BQ slots per channel.
+//                        hardware volume (TAS 0x4C) plus hardware PEQ by
+//                        uploading Q5.27 biquad coefficients into 15 native
+//                        BQ slots per channel (Book 0xAA).
 //
 // The right implementation is picked at build time by the src `build_src_filter`
 // in `platformio.ini`. Callers never need to know which one they got — the
@@ -44,13 +45,20 @@ bool dacInit();
 // before calling this.
 void dacAmpEnable(bool on);
 
-// Optional analog volume set on DACs that expose it (TAS5825M has a 0..255
-// digital volume register). On Amped this is a no-op (`AudioEngine` still
-// applies software attenuation). Percentages are 0..100.
+// Optional analog volume set on DACs that expose it (TAS58xx 0x4C, 0.5 dB
+// steps). On Amped this is a no-op (`AudioEngine` still applies software
+// attenuation). Percentages are 0..100; mapping is amplitude-style dB, not
+// linear half-dB-per-percent. Mute (0) writes 0xFF.
 void dacSetVolume(uint8_t vol_percent);
 
-// Does the DAC have on-chip PEQ we should be pushing coefficients into?
-// True on Louder, false on Amped. Read once at boot to pick the EQ backend.
+// True on Louder after the TAS is initialised. Callers keep engine gain at
+// unity and let `dacSetVolume` own the fader so PCM is not faded twice.
+bool dacHasHwVolume();
+
+/** Dump TAS clock / PLAY / automute / volume (no-op on Amped). */
+void dacLogStatus();
+
+// True on Louder once the chip has reached PLAY and host BQ RAM is in use.
 bool dacSupportsHwPeq();
 
 // Push `count` PEQ bands (as high-level user descriptors) to the hardware.
@@ -60,15 +68,23 @@ bool dacSupportsHwPeq();
 //   - `count` is in 1..HAL_EQ_MAX_BANDS_ACTIVE. Extra bands are ignored.
 //   - Implementation runs `geelen::eqBuildStageList` internally to expand
 //     each band into 0-2 biquad stages, converts each stage's float
-//     coefficients to Q1.31, and writes them to the DAC.
-//   - Left / right channels are ganged for now — per-channel EQ is
-//     tracked in `docs/roadmap.md`.
+//     coefficients to Q5.27 (negated textbook a1/a2), and writes them.
 //   - Returns false on any HW error (I2C NAK, page-switch mismatch, over-
 //     count). Caller falls back to the software PEQ backend and surfaces
 //     `state.eq.backend = "software (fallback)"` for the SPA.
 //
+// `dacApplyPeqBands` gangs L=R. `dacApplyPeqBandsLR` writes independent
+// Book 0xAA banks and sets TAS5825M gang=0 when `ganged` is false.
+//
 // On boards without hardware PEQ this is a no-op that returns false so the
 // AudioEngine's software path stays authoritative.
 bool dacApplyPeqBands(const geelen::EqBand* bands, uint8_t count);
+bool dacApplyPeqBandsLR(const geelen::EqBand* left, uint8_t nL,
+                        const geelen::EqBand* right, uint8_t nR, bool ganged);
+
+// Enable or bypass the on-chip PEQ. On Amped this is a no-op that returns
+// false. On Louder, `on=false` writes TAS5825M bypass so disabling EQ in the
+// SPA actually restores dry analog (coefficients stay loaded).
+bool dacSetHwPeqEnabled(bool on);
 
 }  // namespace geelen_hal

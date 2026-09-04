@@ -330,4 +330,21 @@ float eqLinearMagProduct(const EqStage* stages, size_t stage_count, float f_hz, 
   return prod;
 }
 
+float eqPeakGainDb(float sample_rate, const EqBand* bands, uint8_t active_band_count) {
+  EqStage stages[EQ_MAX_STAGES_PER_LAYER];
+  const size_t n = eqBuildStageList(sample_rate, bands, active_band_count, stages);
+  constexpr int kN = 384;
+  const float f_lo = 20.f;
+  const float f_hi = 20000.f;
+  const float log_lo = logf(f_lo);
+  const float log_hi = logf(f_hi);
+  float peak = 1e-12f;
+  for (int i = 0; i < kN; ++i) {
+    const float f = expf(log_lo + (log_hi - log_lo) * (float)i / (float)(kN - 1));
+    const float mag = (n > 0) ? eqLinearMagProduct(stages, n, f, sample_rate) : 1.f;
+    if (mag > peak) peak = mag;
+  }
+  return 20.f * log10f(peak) + EQ_INTERSAMPLE_HEADROOM_DB;
+}
+
 }  // namespace geelen

@@ -18,8 +18,8 @@ GPIO or via a TAS5825M state machine — are captured in the
 +----------------------------------------------+
 |  geelen_hal::* (src/hal/dac.h, src/hal/led.h) |
 |  - dacInit / dacAmpEnable / dacSetVolume     |
-|  - dacSupportsHwPeq / dacApplyPeqBands       |
-|  - ledInit / ledSetRgb (WS2812, compile-time count) |
+|  - dacHasHwVolume / dacSupportsHwPeq / dacApplyPeqBands / dacApplyPeqBandsLR |
+|  - ledInit / ledSetRgb / ledSetPixel / ledRefresh |
 +----------------------------------------------+
                     |
         picked at build time
@@ -45,15 +45,28 @@ GPIO or via a TAS5825M state machine — are captured in the
 | `HAL_BOARD_NAME`             | Human-readable string used in `/api/system/identity`. |
 | `HAL_PIN_I2S_{BCK,WS,DATA}`  | I2S output pins for the DAC.                     |
 | `HAL_HAS_AMP_EN`, `HAL_PIN_AMP_EN`, `HAL_I2S_STABLE_MS` | Amp-enable GPIO + settle time. |
-| `HAL_HAS_I2C_DAC`            | Whether a `dac_tas5825m` implementation is present. |
 | `HAL_HAS_HW_PEQ`             | Whether the DAC has on-chip PEQ we should push to. |
+| `HAL_HAS_I2C_DAC`            | Whether a `dac_tas5825m` implementation is present. |
 | `HAL_EQ_MAX_BANDS_ACTIVE`    | Runtime cap for the EQ (10 on Amped, up to 15 on Louder). |
 | `HAL_HAS_WS2812`             | 1 if this board has an optional WS2812B data pin. |
 | `HAL_PIN_WS2812`             | Data GPIO (see table below). Initialise in `app_main`, not the bootloader. |
 | `HAL_WS2812_COUNT`           | Compile-time pixel count (1–64). Per-board header default (see table); override with `-DHAL_WS2812_COUNT=N`. Not NVS, not `POST /api/led`. |
-| `HAL_WS2812_MAX_DUTY`        | Peak electrical brightness (1–100%). Per-board header default (see table); override with `-DHAL_WS2812_MAX_DUTY=N`. Applied in `ledSetRgb`; not NVS, not API. |
+| `HAL_WS2812_MAX_DUTY`        | Peak electrical brightness (1–100%). Per-board header default (see table); override with `-DHAL_WS2812_MAX_DUTY=N`. Applied in `ledSetRgb` / `ledSetPixel`; not NVS, not API. |
+| `HAL_HAS_ENCODER`            | 1 if this board has a front-panel rotary encoder. Default 0. |
+| `HAL_PIN_ENC_{A,B,SW}`       | Encoder GPIOs when `HAL_HAS_ENCODER=1`. Input, no internal pulls, active-LOW. |
 | `HAL_PIN_I2C_{SDA,SCL}`, `HAL_I2C_FREQ_HZ` (Louder only) | I2C bus for DAC control. |
 | `HAL_TAS5825M_I2C_ADDR` (Louder only) | 7-bit DAC address. |
+
+Amped (`HAL_HAS_I2C_DAC=0`) keeps software volume and software PEQ.
+`dacHasHwVolume()` / `dacSupportsHwPeq()` are always false. Louder uses the
+TAS58xx as amp + fader + EQ: engine gain stays at unity, `dacSetVolume`
+writes register `0x4C` with an amplitude-style dB map, and PEQ is Q5.27 in
+Book 0xAA (independent left and right tables). `dacApplyPeqBandsLR` writes
+those banks and sets TAS5825M Book 0x8C **gang=1** when ganged, **gang=0**
+when split. TAS5805M `DSP_MISC` is unchanged (RAM is already per-channel).
+Runtime `DIE_ID` (`0x95` = TAS5825M, otherwise TAS5805M) picks
+the biquad page map so one WROVER image covers Louder-ESP32 and
+Louder-ESP32-Plus when the pins match.
 
 ## WS2812B status LED
 
@@ -64,7 +77,7 @@ RMT writes go nowhere.
 | Board            | `HAL_PIN_WS2812` | Default `HAL_WS2812_COUNT` | Default `HAL_WS2812_MAX_DUTY` |
 | ---------------- | ---------------- | -------------------------- | ----------------------------- |
 | Amped-WROVER     | GPIO 12          | 12                         | 10                            |
-| Louder-WROVER    | GPIO 12          | 1                          | 50                            |
+| Louder-WROVER    | GPIO 12          | 8                          | 50                            |
 | Amped-S3         | GPIO 9           | 1                          | 50                            |
 | Louder-S3        | GPIO 21          | 1                          | 50                            |
 
@@ -87,7 +100,8 @@ if count is outside 1..64 or max duty is outside 1..100.
 `ledSetRgb` scales every channel by max duty, so Overview 100% is “100%
 of the firmware cap”, not full 255. Status colours (boot red, one green
 breath on STA, pairing blue) are a ~2 s sine from 0 to that cap — not
-on/off flashes.
+on/off flashes. Volume/mute paints a white per-pixel bar for ~2 s
+(`ledSetPixel` + `ledRefresh`), then the current phase resumes.
 
 ### RMT memory (do not use the IDF default of 64)
 
@@ -119,6 +133,25 @@ Serial log line: `WS2812 GPIO … rmt_mem=512` (or `192` on S3).
 `state.led.count` is read-only so the SPA can label “N pixels”; Overview
 sliders are colour and brightness only (`POST /api/led`). Max duty is not
 in the API.
+
+## Rotary encoder
+
+Compile-gated per board. Only **Louder-WROVER** ships with pins:
+
+| Board            | `HAL_HAS_ENCODER` | A     | B     | SW    |
+| ---------------- | ----------------- | ----- | ----- | ----- |
+| Louder-WROVER    | 1                 | GPIO 35 (input-only) | GPIO 14 | GPIO 13 |
+| Amped-WROVER     | 0                 | —     | —     | GPIO 13 is `HAL_PIN_AMP_EN` |
+| Amped-S3         | 0                 | —     | —     | until a pinout exists |
+| Louder-S3        | 0                 | —     | —     | until a pinout exists |
+
+External 10k pull-ups to 3.3V and 0.1µF to GND on A, B, and SW. Firmware
+uses `GPIO_MODE_INPUT` with **no** internal pull-up/down. Do not enable
+the encoder on Amped-WROVER without moving the switch off GPIO 13.
+
+One detent is ±1% ganged volume. Switch release under 1 s toggles mute;
+hold ≥ 1 s disconnects A2DP if needed and opens the 180 s pairing window
+without wiping bonds.
 
 ## Why compile-time and not runtime?
 

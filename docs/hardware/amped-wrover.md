@@ -25,10 +25,17 @@ end-to-end on `/dev/ttyUSB0`.
   avoid the power-on pop the amp otherwise emits (see
   `amp_enable_after_i2s_stable` in `src/idf_main.cpp` and
   `HAL_I2S_STABLE_MS` in `src/hal/boards/amped_wrover.h`).
+- There is **no rotary encoder** on this image (`HAL_HAS_ENCODER=0`). GPIO 13
+  cannot be the encoder switch. A front-panel encoder on Amped needs a
+  different switch GPIO before the feature can be enabled — see Louder-WROVER
+  (PDN on GPIO 33, encoder switch on GPIO 13).
 
 ## EQ backend
 
-- **Software** parametric EQ, 10 bands (see the SPA `/dsp` page).
+- **Software** parametric EQ, 10 bands (see the SPA `/dsp` page), and
+  **software volume** in `AudioEngine`. Amped Plus PCM5122 6-band DSP is
+  not programmed by this firmware — flashing an Amped env always stays
+  on the software path.
 - Cascade lives in `AudioEngine::processSamples` (biquads + first-order
   LP/HP). Preset storage is 15 bands so a preset created on Louder round-
   trips through Amped without losing metadata; only the first 10 are pushed

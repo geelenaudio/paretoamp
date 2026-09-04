@@ -20,8 +20,7 @@ If you turn voice feedback off in the Web UI, the device starts silent.
 
 1. **Power on.** No Wi-Fi credentials are saved on a fresh device, so it
    immediately starts the captive hotspot:
-   - SSID: `Geelen-Audio`
-   - Password: `geelen123`
+   - SSID: `Geelen-Audio` (open, no password)
 2. You should hear "Wi-Fi not connected" + the mode clip a few seconds
    in.
 3. **Connect your phone or laptop** to `Geelen-Audio`. Most operating
@@ -84,9 +83,10 @@ reconnect; nobody new will see it in a scan.
 3. On successful connect, you will hear "Bluetooth connected". The LED
    pairing pulse stops; the device drops out of scan lists.
 4. Phone volume keys (AVRCP Target absolute volume) move the amp's
-   ganged L/R level and persist like the Web UI. Play/pause stays on
-   the phone (A2DP audio-state); this firmware does not handle
-   transport keys.
+   ganged 0–100% level and persist like the Web UI. On Amped that is
+   software gain; on Louder it is the TAS digital fader — the phone icon
+   still tracks the same percent. Play/pause stays on the phone (A2DP
+   audio-state); this firmware does not handle transport keys.
 5. Music plays only AFTER the connect prompt finishes — that is by
    design so you don't lose the first second of a song.
 

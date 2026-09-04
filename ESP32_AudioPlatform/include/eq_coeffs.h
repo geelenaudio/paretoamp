@@ -44,6 +44,16 @@ size_t eqBuildStageList(float sample_rate, const EqBand* bands, uint8_t active_b
 /** Product of |H(f)| for all stages at frequency f_hz (linear magnitude). */
 float eqLinearMagProduct(const EqStage* stages, size_t stage_count, float f_hz, float sample_rate);
 
+// Extra pad in auto-headroom so inter-sample peaks stay under 0 dBFS.
+constexpr float EQ_INTERSAMPLE_HEADROOM_DB = 1.5f;
+
+/**
+ * Peak |H(f)| of `bands` in dB (20 Hz–20 kHz log sweep) plus
+ * `EQ_INTERSAMPLE_HEADROOM_DB`. Used for auto headroom when the software
+ * cascade is off (Louder hardware PEQ) so split L/R boosts still pad PCM.
+ */
+float eqPeakGainDb(float sample_rate, const EqBand* bands, uint8_t active_band_count);
+
 }  // namespace geelen
 
 #endif

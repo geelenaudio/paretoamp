@@ -18,8 +18,7 @@ Expected:
 
 ## Network / UI
 - If STA credentials are not configured, device should start AP:
-  - SSID: `Geelen-Audio`
-  - Pass: `geelen123`
+  - SSID: `Geelen-Audio` (open, no password)
   - IP: `192.168.4.1`
 - Visit `/` and `/api/status` in a browser.
 

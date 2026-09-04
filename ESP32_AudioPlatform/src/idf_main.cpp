@@ -35,6 +35,7 @@
 #include "idf_state_stream.h"
 #include "idf_mode_manager.h"
 #include "idf_led.h"
+#include "idf_encoder.h"
 #include "idf_identity.h"
 #include "idf_mdns.h"
 #include "hal/hal_board.h"
@@ -84,20 +85,56 @@ namespace geelen_idf { void scheduleRestart(unsigned delay_ms); }
 // also called from app_main at boot so the engine starts with the saved
 // values rather than its 100/100 constructor default.
 static void apply_volume_from_cfg() {
-  g_engine.setVolumeLR(g_cfg.getVolumeL(), g_cfg.getVolumeR());
-  g_engine.setMuted(g_cfg.isMuted());
+  const bool muted = g_cfg.isMuted();
+  const int live = geelen_idf::a2dpLiveVolumePct();
+  const uint8_t pct = live >= 0 ? (uint8_t)live
+                                : (g_cfg.getVolumeL() > g_cfg.getVolumeR() ? g_cfg.getVolumeL()
+                                                                          : g_cfg.getVolumeR());
+  if (geelen_hal::dacHasHwVolume()) {
+    // Louder: TAS 0x4C is the fader. Engine stays at unity so PCM is not
+    // faded twice. Mute is TAS 0xFF plus engine mute.
+    g_engine.setVolumeLR(100, 100);
+    g_engine.setMuted(muted);
+    geelen_hal::dacSetVolume(muted ? 0 : pct);
+  } else {
+    g_engine.setVolumeLR(g_cfg.getVolumeL(), g_cfg.getVolumeR());
+    g_engine.setMuted(muted);
+    geelen_hal::dacSetVolume(100);
+  }
   geelen_idf::a2dpNotifyLocalVolume();
+  geelen_idf::ledShowVolume(pct, muted);
+  ESP_LOGI("geelen", "volume L=%u R=%u muted=%d pct=%u hw_vol=%d live=%d",
+           (unsigned)g_cfg.getVolumeL(), (unsigned)g_cfg.getVolumeR(),
+           (int)muted, (unsigned)pct, (int)geelen_hal::dacHasHwVolume(), live);
 }
 static void apply_channels_from_cfg() {
   g_engine.setChannels(
       g_cfg.getChannelLOn(),
       g_cfg.getChannelROn(),
       g_cfg.getStereoMode() == geelen_idf::StereoMode::Mono);
+  ESP_LOGI("geelen", "channels L=%d R=%d mono=%d",
+           (int)g_cfg.getChannelLOn(), (int)g_cfg.getChannelROn(),
+           (int)(g_cfg.getStereoMode() == geelen_idf::StereoMode::Mono));
+  if (!g_cfg.getChannelLOn() || !g_cfg.getChannelROn()) {
+    ESP_LOGW("geelen", "a speaker channel is off — Audio page L/R enables");
+  }
 }
 
 extern "C" void on_volume_changed()   { apply_volume_from_cfg(); }
 extern "C" void on_channels_changed() { apply_channels_from_cfg(); }
 extern "C" void on_led_changed()      { geelen_idf::ledTakeoverUser(); }
+extern "C" void on_encoder_volume_live(uint8_t pct, bool muted) {
+  if (geelen_hal::dacHasHwVolume()) {
+    g_engine.setVolumeLR(100, 100);
+    g_engine.setMuted(muted);
+    geelen_hal::dacSetVolume(muted ? 0 : pct);
+  } else {
+    g_engine.setVolumeLR(pct, pct);
+    g_engine.setMuted(muted);
+  }
+  geelen_idf::ledShowVolume(pct, muted);
+  geelen_idf::a2dpNotifyLocalVolume();
+}
 
 /** Called from `idf_api.cpp` appendSystemMetrics — forwards to `g_engine`. */
 extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl, float* rr) {
@@ -109,51 +146,74 @@ extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl
   if (rr) *rr = d;
 }
 
-// Push both EQ cascades from NVS into the engine, then apply headroom.
-// EQ backend selection: on Louder, try to push the biquads into the TAS5825M
-// via `geelen_hal::dacApplyPeqBands`. If that succeeds, the software cascade
-// is disabled so the AudioEngine only handles headroom / limiter. If it
-// fails (I2C NAK, DAC not ready, etc.), we fall back to software cascades
-// and label the backend "software (fallback)" so the SPA can surface it.
+// Push EQ from NVS into the engine / TAS, then apply headroom.
+// Louder: hardware PEQ (independent L/R banks when split). If I2C fails,
+// software fallback stays ganged on the left curve — do not run two
+// software cascades. Amped: one software cascade on the left/ganged curve.
 extern "C" void geelen_eq_set_backend(const char* label);
 
-// In Auto mode the headroom dB equals -peak gain of the enabled cascade so
-// the post-EQ signal tops out at ≤ 0 dBFS regardless of input. Manual mode
-// applies the user's cap verbatim. Either way we call setHeadroomDb *after*
-// the curve is in place so the peak computation reflects the new bands.
+static float peak_from_cfg() {
+  if (!g_cfg.getEqEnabled()) return 0.f;
+  geelen_idf::ParametricBand left[geelen_idf::PARAMETRIC_BANDS];
+  geelen_idf::ParametricBand right[geelen_idf::PARAMETRIC_BANDS];
+  g_cfg.getEqBands(left);
+  g_cfg.getEqBandsR(right);
+  const uint8_t n = g_cfg.getEqActiveBands();
+  const auto* l = reinterpret_cast<const geelen::EqBand*>(left);
+  const auto* r = reinterpret_cast<const geelen::EqBand*>(right);
+  const float pL = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, l, n);
+  float pR = pL;
+  if (g_cfg.getEqChannelMode() == geelen_idf::EqChannelMode::Split) {
+    pR = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, r, n);
+  }
+  return pL > pR ? pL : pR;
+}
+
+// In Auto mode the headroom dB equals -peak gain of the louder of L/R so
+// the post-EQ signal tops out at ≤ 0 dBFS. Peak is taken from the band
+// lists (not the software cascade cache) so Louder HW PEQ still pads PCM
+// when the engine cascade is disabled. Manual mode applies the user's cap.
 static void apply_eq_from_cfg() {
-  geelen_idf::ParametricBand bands[geelen_idf::PARAMETRIC_BANDS];
-  g_cfg.getEqBands(bands);
+  geelen_idf::ParametricBand left[geelen_idf::PARAMETRIC_BANDS];
+  geelen_idf::ParametricBand right[geelen_idf::PARAMETRIC_BANDS];
+  g_cfg.getEqBands(left);
+  g_cfg.getEqBandsR(right);
   const uint8_t band_count = g_cfg.getEqActiveBands();
   const bool enabled = g_cfg.getEqEnabled();
-  const auto* eq_bands = reinterpret_cast<const geelen::EqBand*>(bands);
+  const bool split = (g_cfg.getEqChannelMode() == geelen_idf::EqChannelMode::Split);
+  const auto* eq_l = reinterpret_cast<const geelen::EqBand*>(left);
+  const auto* eq_r = reinterpret_cast<const geelen::EqBand*>(right);
 
   bool hw_ok = false;
-  if (enabled && geelen_hal::dacSupportsHwPeq()) {
-    hw_ok = geelen_hal::dacApplyPeqBands(eq_bands, band_count);
-    if (!hw_ok) {
-      ESP_LOGW("geelen",
-               "HW PEQ upload failed; falling back to software cascade");
+  if (geelen_hal::dacSupportsHwPeq()) {
+    if (enabled) {
+      hw_ok = geelen_hal::dacApplyPeqBandsLR(eq_l, band_count, eq_r, band_count, !split);
+      if (!hw_ok) {
+        ESP_LOGW("geelen",
+                 "HW PEQ upload failed; falling back to software cascade (ganged L)");
+        geelen_hal::dacSetHwPeqEnabled(false);
+      }
+    } else {
+      geelen_hal::dacSetHwPeqEnabled(false);
     }
   }
   if (hw_ok) {
-    // Hardware did the biquads; software cascade stays out of the way.
-    g_engine.setEqCurve(eq_bands, band_count, /*enabled*/ false);
+    g_engine.setEqCurve(eq_l, band_count, /*enabled*/ false);
     g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Hardware);
     geelen_eq_set_backend("hardware");
   } else if (geelen_hal::dacSupportsHwPeq() && enabled) {
-    g_engine.setEqCurve(eq_bands, band_count, /*enabled*/ true);
+    g_engine.setEqCurve(eq_l, band_count, /*enabled*/ true);
     g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
     geelen_eq_set_backend("software (fallback)");
   } else {
-    g_engine.setEqCurve(eq_bands, band_count, enabled);
+    g_engine.setEqCurve(eq_l, band_count, enabled);
     g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
     geelen_eq_set_backend("software");
   }
 
   float db = g_cfg.getHeadroomManualDb();
   if (g_cfg.getHeadroomMode() == geelen_idf::HeadroomMode::Auto) {
-    const float peak = g_engine.computeEqPeakGainDb();
+    const float peak = peak_from_cfg();
     db = peak > 0.f ? -peak : 0.f;
   }
   g_engine.setHeadroomDb(db);
@@ -161,9 +221,7 @@ static void apply_eq_from_cfg() {
 
 extern "C" void on_eq_changed() { apply_eq_from_cfg(); }
 
-// Query hook used by idf_api to put auto_db on the response. We return the
-// raw peak dB of the enabled cascades; the API layer flips the sign.
-extern "C" float compute_eq_peak_db() { return g_engine.computeEqPeakGainDb(); }
+extern "C" float compute_eq_peak_db() { return peak_from_cfg(); }
 
 static bool init_i2s() {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -352,6 +410,7 @@ extern "C" void app_main(void) {
   // `IProducer` implementations for snap / test-tone / DLNA-stream).
   geelen_idf::modeManager().begin(&g_cfg);
   geelen_idf::ledBegin(&g_cfg);
+  geelen_idf::encoderBegin(&g_cfg);
   // SPIFFS is mounted by `g_cfg.begin()` — decode every voice prompt into
   // PSRAM right after, before any subsystem can ask for one. This replaces
   // the per-prompt Helix decode + streamer-singleton borrow with a small
@@ -401,6 +460,11 @@ extern "C" void app_main(void) {
   apply_channels_from_cfg();
   apply_eq_from_cfg();
   amp_enable_after_i2s_stable();
+  // Chip is in PLAY with host BQ RAM. Re-apply volume onto TAS 0x4C and
+  // move EQ onto hardware when the DAC reports it is ready.
+  apply_volume_from_cfg();
+  apply_eq_from_cfg();
+  geelen_hal::dacLogStatus();
 
   geelen_idf::mp3::streamer()->setEngine(&g_engine);
   geelen_idf::voiceFeedbackSetContext(&g_cfg, &g_wifi, &g_engine);

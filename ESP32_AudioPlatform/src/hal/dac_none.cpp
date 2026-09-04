@@ -47,6 +47,10 @@ void dacSetVolume(uint8_t /*vol_percent*/) {
   // No-op: AudioEngine already applies volume in software.
 }
 
+bool dacHasHwVolume() { return false; }
+
+void dacLogStatus() {}
+
 bool dacSupportsHwPeq() { return false; }
 
 bool dacApplyPeqBands(const geelen::EqBand* /*bands*/, uint8_t /*count*/) {
@@ -54,6 +58,13 @@ bool dacApplyPeqBands(const geelen::EqBand* /*bands*/, uint8_t /*count*/) {
   // its software-cascade branch so the AudioEngine picks up the new bands.
   return false;
 }
+
+bool dacApplyPeqBandsLR(const geelen::EqBand* /*left*/, uint8_t /*nL*/,
+                        const geelen::EqBand* /*right*/, uint8_t /*nR*/, bool /*ganged*/) {
+  return false;
+}
+
+bool dacSetHwPeqEnabled(bool /*on*/) { return false; }
 
 }  // namespace geelen_hal
 

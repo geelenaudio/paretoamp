@@ -63,7 +63,9 @@ Helpful flags:
 - `src/idf_mp3_streamer.{h,cpp}` — Helix-based MP3 decoder for HTTP +
   SPIFFS clips.
 - `src/idf_led.{h,cpp}` — WS2812 boot/pairing/user animator (Core 0,
-  prio 3, PSRAM stack).
+  prio 3, PSRAM stack) plus a 2 s white volume bar overlay.
+- `src/idf_encoder.{h,cpp}` — Louder-WROVER rotary encoder (volume,
+  mute, long-press pairing). No-op when `HAL_HAS_ENCODER=0`.
 - `src/idf_identity.{h,cpp}` — device name, hostname slug, MAC
   override helpers.
 - `src/idf_mdns.{h,cpp}` — STA `_http._tcp` responder after got-IP.

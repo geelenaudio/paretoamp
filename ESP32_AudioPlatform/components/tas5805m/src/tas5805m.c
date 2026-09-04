@@ -41,6 +41,7 @@
 #include "tas5805m.h"
 
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -55,49 +56,97 @@ static const char* TAG = "tas5805m";
 // Values match the datasheet Table 6-2 and the upstream `tas5805m_cfg.h`.
 #define REG_PAGE_SET       0x00
 #define REG_BOOK_SET       0x7F
+#define REG_RESET_CTRL     0x01
+#define REG_DEVICE_CTRL_1  0x02
 #define REG_DEVICE_CTRL_2  0x03
+#define REG_SAP_CTRL1      0x33
+#define REG_CLOCK_DET_CTRL 0x29
+#define REG_FS_MON         0x37
+#define REG_BCK_MON        0x38
+#define REG_CLKDET_STATUS  0x39
 #define REG_DIG_VOL_CTRL   0x4C
+#define REG_DSP_CTRL       0x46
+#define REG_ANA_CTRL       0x53
+#define REG_AGAIN          0x54
+#define REG_PVDD_ADC       0x5E
 #define REG_DSP_MISC       0x66
 #define REG_DIE_ID         0x67
+#define REG_POWER_STATE    0x68
+#define REG_AUTOMUTE       0x69
+#define REG_CHAN_FAULT     0x70
+#define REG_GLOBAL_FAULT1  0x71
+#define REG_GLOBAL_FAULT2  0x72
+#define REG_FAULT_CLEAR    0x78
 
 // Book/page numbers used by the coefficient upload path.
+// TAS5825M 15-band PEQ: Book 0xAA. Layout from ESPHome tas58xx
+// (TAS5805M starts at page 0x24 / 0x18 — do not use that map here).
 #define BOOK_CONTROL       0x00
 #define BOOK_EQ            0xAA
+#define BOOK_EQ_CTRL       0x8C
 #define PAGE_ZERO          0x00
+#define PAGE_EQ_MODE       0x0B
+#define REG_GANG_EQ        0x28  // 32-bit LE; 1 = L/R ganged
 
-// Per-band base offsets (book 0xAA). One BQ = 20 bytes: b0/b1/b2/a1/a2, each
-// Q1.31 big-endian. Derived empirically from the upstream preset table
-// (see eq/tas5805m_eq.h): each BQ occupies 20 contiguous "usable" bytes
-// starting at (page, offset). Bytes 0x00..0x07 of every page are reserved
-// for control (page / book switch), so a BQ that starts at offset 0x7C on
-// page N wraps into offset 0x08..0x17 of page N+1.
-//
-// Layout for a single channel (5 BQs per page-run of 0x18..0x7B, then one
-// straddling BQ, repeat). The right channel begins where the left channel
-// finished, on page 0x26 offset 0x54. This gives us 30 BQ slots per
-// TAS5825M frame, but only 15 per channel are actually addressable via the
-// datasheet's DSP page — the rest live in reserved memory.
+// TAS5825M DIE_ID reset (SLASEH7H). Other IDs on this address = TAS5805M.
+#define DIE_ID_TAS5825M    0x95
+// DSP_CTRL 0x46: bits[4:3] rate (01 = 48 kHz), bit0 USE_DEFAULT_COEFFS.
+#define DSP_CTRL_48K_ZROM  0x09
+#define DSP_CTRL_48K_RAM   0x08
+// TAS5805M DSP_MISC 0x66 (ESPHome tas58xx): off=0b0111, 15-band=0b0110.
+#define DSP_MISC_EQ_OFF    0x07
+#define DSP_MISC_EQ_15     0x06
+#define Q5_27_ONE          0x08000000
+
 typedef struct {
   uint8_t page;
   uint8_t offset;
 } bq_slot_t;
 
-static const bq_slot_t kBqLeft[15] = {
+// TAS5825M Book 0xAA (ESPHome tas58xx / process-flow dumps).
+static const bq_slot_t kBqLeft5825[15] = {
+  { 0x01, 0x30 }, { 0x01, 0x44 }, { 0x01, 0x58 }, { 0x01, 0x6C }, { 0x02, 0x08 },
+  { 0x02, 0x1C }, { 0x02, 0x30 }, { 0x02, 0x44 }, { 0x02, 0x58 }, { 0x02, 0x6C },
+  { 0x03, 0x08 }, { 0x03, 0x1C }, { 0x03, 0x30 }, { 0x03, 0x44 }, { 0x03, 0x58 },
+};
+
+static const bq_slot_t kBqRight5825[15] = {
+  { 0x03, 0x6C }, { 0x04, 0x08 }, { 0x04, 0x1C }, { 0x04, 0x30 }, { 0x04, 0x44 },
+  { 0x04, 0x58 }, { 0x04, 0x6C }, { 0x05, 0x08 }, { 0x05, 0x1C }, { 0x05, 0x30 },
+  { 0x05, 0x44 }, { 0x05, 0x58 }, { 0x05, 0x6C }, { 0x06, 0x08 }, { 0x06, 0x1C },
+};
+
+// TAS5805M Book 0xAA (ESPHome tas58xx_eq_common.h).
+static const bq_slot_t kBqLeft5805[15] = {
   { 0x24, 0x18 }, { 0x24, 0x2C }, { 0x24, 0x40 }, { 0x24, 0x54 }, { 0x24, 0x68 },
   { 0x24, 0x7C }, { 0x25, 0x18 }, { 0x25, 0x2C }, { 0x25, 0x40 }, { 0x25, 0x54 },
   { 0x25, 0x68 }, { 0x25, 0x7C }, { 0x26, 0x18 }, { 0x26, 0x2C }, { 0x26, 0x40 },
 };
 
-static const bq_slot_t kBqRight[15] = {
+static const bq_slot_t kBqRight5805[15] = {
   { 0x26, 0x54 }, { 0x26, 0x68 }, { 0x26, 0x7C }, { 0x27, 0x18 }, { 0x27, 0x2C },
   { 0x27, 0x40 }, { 0x27, 0x54 }, { 0x27, 0x68 }, { 0x27, 0x7C }, { 0x28, 0x18 },
   { 0x28, 0x2C }, { 0x28, 0x40 }, { 0x28, 0x54 }, { 0x28, 0x68 }, { 0x28, 0x7C },
 };
 
-// Runtime state. Only one TAS5825M per device is supported.
+// Runtime state. Only one TAS58xx per device is supported.
 static i2c_master_dev_handle_t s_dev = NULL;
 static uint8_t s_current_book = 0xFF;
 static uint8_t s_current_page = 0xFF;
+static tas5805m_model_t s_model = TAS5805M_MODEL_UNKNOWN;
+static bool s_eq_ganged = true;
+
+static const bq_slot_t* bq_slot(uint8_t band, TAS5805M_EQ_CHANNELS ch) {
+  const bq_slot_t* table;
+  if (s_model == TAS5805M_MODEL_5805) {
+    table = (ch == TAS5805M_CH_LEFT) ? kBqLeft5805 : kBqRight5805;
+  } else {
+    table = (ch == TAS5805M_CH_LEFT) ? kBqLeft5825 : kBqRight5825;
+  }
+  return &table[band];
+}
+
+static esp_err_t write_identity_all(void);
 
 static esp_err_t reg_write_byte(uint8_t reg, uint8_t val) {
   if (!s_dev) return ESP_ERR_INVALID_STATE;
@@ -126,10 +175,11 @@ static esp_err_t select_book_page(uint8_t book, uint8_t page) {
   // register lives at page 0x00 of any book. Always land on page 0x00
   // first, then bump the book, then move to the target page.
   if (s_current_book == book && s_current_page == page) return ESP_OK;
-  esp_err_t err = ESP_OK;
-  err |= reg_write_byte(REG_PAGE_SET, PAGE_ZERO);
-  err |= reg_write_byte(REG_BOOK_SET, book);
-  err |= reg_write_byte(REG_PAGE_SET, page);
+  esp_err_t err = reg_write_byte(REG_PAGE_SET, PAGE_ZERO);
+  if (err != ESP_OK) return err;
+  err = reg_write_byte(REG_BOOK_SET, book);
+  if (err != ESP_OK) return err;
+  err = reg_write_byte(REG_PAGE_SET, page);
   if (err == ESP_OK) {
     s_current_book = book;
     s_current_page = page;
@@ -173,10 +223,8 @@ esp_err_t tas5805m_init(const tas5805m_config_t* cfg) {
     return err;
   }
 
-  // Read the die ID as a presence check. TAS5825M's DIE_ID register
-  // returns a non-zero value once the DAC is powered and clocked; we
-  // don't check the exact value because we support both TAS5825M and
-  // TAS5825MC-Q1 variants which report different IDs.
+  // DIE_ID: TAS5825M reset is 0x95. Louder-ESP32 (TAS5805M) reports a
+  // different value; one WROVER image covers both when the pins match.
   uint8_t die_id = 0;
   err = reg_read_byte(REG_DIE_ID, &die_id);
   if (err != ESP_OK) {
@@ -184,15 +232,133 @@ esp_err_t tas5805m_init(const tas5805m_config_t* cfg) {
              (unsigned)cfg->i2c_addr, esp_err_to_name(err));
     return err;
   }
-  ESP_LOGI(TAG, "TAS5825M detected (DIE_ID=0x%02x) at 0x%02x",
+  s_model = (die_id == DIE_ID_TAS5825M) ? TAS5805M_MODEL_5825 : TAS5805M_MODEL_5805;
+  ESP_LOGI(TAG, "%s detected (DIE_ID=0x%02x) at 0x%02x",
+           s_model == TAS5805M_MODEL_5825 ? "TAS5825M" : "TAS5805M",
            (unsigned)die_id, (unsigned)cfg->i2c_addr);
 
-  // Boot into HI-Z. The wrapper calls set_state(PLAY) after I2S clocks
-  // are stable — matches the datasheet section 6.5.1 sequence.
+  // Boot into HI-Z. PLAY (and analog config) waits until I2S is clocking.
   err = tas5805m_set_state(TAS5805M_CTRL_HIZ);
   if (err != ESP_OK) return err;
   vTaskDelay(pdMS_TO_TICKS(5));
   return ESP_OK;
+}
+
+void tas5805m_log_status(void) {
+  if (!s_dev) return;
+  if (select_book_page(BOOK_CONTROL, PAGE_ZERO) != ESP_OK) return;
+  uint8_t ctrl2 = 0, fs = 0, bck = 0, clk = 0, pvdd = 0, pwr = 0;
+  uint8_t mute = 0, chf = 0, gf1 = 0, gf2 = 0, vol = 0, again = 0;
+  (void)reg_read_byte(REG_DEVICE_CTRL_2, &ctrl2);
+  (void)reg_read_byte(REG_FS_MON, &fs);
+  (void)reg_read_byte(REG_BCK_MON, &bck);
+  (void)reg_read_byte(REG_CLKDET_STATUS, &clk);
+  (void)reg_read_byte(REG_PVDD_ADC, &pvdd);
+  (void)reg_read_byte(REG_POWER_STATE, &pwr);
+  (void)reg_read_byte(REG_AUTOMUTE, &mute);
+  (void)reg_read_byte(REG_CHAN_FAULT, &chf);
+  (void)reg_read_byte(REG_GLOBAL_FAULT1, &gf1);
+  (void)reg_read_byte(REG_GLOBAL_FAULT2, &gf2);
+  uint8_t sap = 0, dsp = 0;
+  (void)reg_read_byte(REG_DIG_VOL_CTRL, &vol);
+  (void)reg_read_byte(REG_AGAIN, &again);
+  (void)reg_read_byte(REG_SAP_CTRL1, &sap);
+  (void)reg_read_byte(REG_DSP_CTRL, &dsp);
+  ESP_LOGI(TAG,
+           "status CTRL2=0x%02x FS=0x%02x BCK=0x%02x CLKDET=0x%02x PVDD_ADC=0x%02x "
+           "PWR=0x%02x AUTOMUTE=0x%02x CHAN_FAULT=0x%02x GF1=0x%02x GF2=0x%02x "
+           "VOL=0x%02x AGAIN=0x%02x SAP=0x%02x DSP_CTRL=0x%02x",
+           ctrl2, fs, bck, clk, pvdd, pwr, mute, chf, gf1, gf2, vol, again, sap, dsp);
+  if (pvdd == 0) {
+    ESP_LOGW(TAG, "PVDD_ADC=0 — speaker rail is off; USB does not power the Class-D");
+  }
+}
+
+esp_err_t tas5805m_enter_play(void) {
+  if (!s_dev) return ESP_ERR_INVALID_STATE;
+  s_current_book = 0xFF;
+  s_current_page = 0xFF;
+
+  ESP_LOGI(TAG, "pre-seq");
+  tas5805m_log_status();
+
+  // 16-bit Philips I2S (32-FS). SAP_CTRL1=0x00 is I2S + 16-bit words
+  // (reset default is 24-bit). DSP_CTRL 0x46=0x09 is 48 kHz processing +
+  // ZROM until host RAM is loaded. Skip ESPHome's 96 kHz GPIO/hidden
+  // regs (0x61/0x60/0x7D/0x7E/page1) — those are SLAA847 SPI mux, not
+  // our I2C boot, and they left this chip in Sleep with CHAN_FAULT.
+  // TAS5825M §9.5.3: I2S stable → Hi-Z + DSP enable → ≥5 ms → init
+  // coefficients → PLAY. Load identity in Hi-Z, then 0x46=0x08 (host
+  // RAM, USE_DEFAULT_COEFFS=0) before PLAY.
+  enum { kDelay = 0xFE };
+  static const uint8_t kSeq[][2] = {
+      {0x00, 0x00}, {0x7F, 0x00},
+      {0x03, 0x02}, {0x01, 0x11}, {0x03, 0x02},
+      {kDelay, 10},
+      {0x03, 0x00},
+      {0x46, DSP_CTRL_48K_ZROM},
+      {0x03, 0x02},
+      {kDelay, 5},
+      {0x02, 0x00},
+      {0x33, 0x00},
+      {0x4C, 0x30}, {0x53, 0x00}, {0x54, 0x00},
+      {0x29, 0x7C},
+  };
+
+  for (size_t i = 0; i < sizeof(kSeq) / sizeof(kSeq[0]); ++i) {
+    if (kSeq[i][0] == kDelay) {
+      vTaskDelay(pdMS_TO_TICKS(kSeq[i][1]));
+      continue;
+    }
+    esp_err_t err = reg_write_byte(kSeq[i][0], kSeq[i][1]);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "enter_play write 0x%02x=0x%02x failed: %s",
+               kSeq[i][0], kSeq[i][1], esp_err_to_name(err));
+      return err;
+    }
+  }
+  s_current_book = 0xFF;
+  s_current_page = 0xFF;
+
+  esp_err_t id_err = write_identity_all();
+  if (id_err != ESP_OK) {
+    ESP_LOGE(TAG, "identity BQ load failed: %s", esp_err_to_name(id_err));
+    return id_err;
+  }
+
+  s_current_book = 0xFF;
+  s_current_page = 0xFF;
+  esp_err_t err = select_book_page(BOOK_CONTROL, PAGE_ZERO);
+  if (err != ESP_OK) return err;
+  err = reg_write_byte(REG_DSP_CTRL, DSP_CTRL_48K_RAM);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "DSP_CTRL host-RAM write failed: %s", esp_err_to_name(err));
+    return err;
+  }
+  err = reg_write_byte(REG_DEVICE_CTRL_2, TAS5805M_CTRL_PLAY);
+  if (err != ESP_OK) return err;
+  err = reg_write_byte(REG_FAULT_CLEAR, 0x80);
+  if (err != ESP_OK) return err;
+  vTaskDelay(pdMS_TO_TICKS(50));
+  ESP_LOGI(TAG, "post-seq");
+  tas5805m_log_status();
+
+  uint8_t pwr = 0;
+  if (select_book_page(BOOK_CONTROL, PAGE_ZERO) == ESP_OK &&
+      reg_read_byte(REG_POWER_STATE, &pwr) == ESP_OK && pwr != 0x03) {
+    ESP_LOGW(TAG, "analog still PWR=0x%02x after PLAY; retry via Sleep", pwr);
+    (void)reg_write_byte(REG_DEVICE_CTRL_2, TAS5805M_CTRL_SLEEP);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    (void)reg_write_byte(REG_DEVICE_CTRL_2, TAS5805M_CTRL_PLAY);
+    (void)reg_write_byte(REG_FAULT_CLEAR, 0x80);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    tas5805m_log_status();
+  }
+  return ESP_OK;
+}
+
+tas5805m_model_t tas5805m_probed_model(void) {
+  return s_model;
 }
 
 esp_err_t tas5805m_set_state(tas5805m_state_t s) {
@@ -205,28 +371,29 @@ esp_err_t tas5805m_set_volume_pct(uint8_t pct) {
   if (pct > 100) pct = 100;
   esp_err_t err = select_book_page(BOOK_CONTROL, PAGE_ZERO);
   if (err != ESP_OK) return err;
-  // TAS5825M digital volume: 0x00 = +24 dB, 0x30 = 0 dB, 0xFE = -103 dB,
-  // 0xFF = mute (datasheet section 7.1.5). Map 0..100 % linearly to
-  // -60 dB..0 dB, i.e. 0 → 0xFF (mute), 100 → 0x30.
+  // Keep in sync with geelen::eqVolumePctToTasDigVol (eq_q131.h).
   uint8_t reg;
   if (pct == 0) {
     reg = 0xFF;
+  } else if (pct >= 100) {
+    reg = 0x30;
   } else {
-    // 0 dB @ pct=100 → 0x30; -60 dB @ pct=1 → 0x30 + 60*2 = 0x30 + 120 = 0xA8.
-    // (Register step is 0.5 dB below 0 dB.)
-    int step = (100 - pct) * 2;  // 0.5 dB per step
-    int val = 0x30 + step;
+    double db = 20.0 * log10((double)pct / 100.0);
+    long steps = lround(-db / 0.5);
+    if (steps < 0) steps = 0;
+    long val = 0x30L + steps;
     if (val > 0xFE) val = 0xFE;
     reg = (uint8_t)val;
   }
+  ESP_LOGI(TAG, "digital vol pct=%u reg=0x%02x", (unsigned)pct, (unsigned)reg);
   return reg_write_byte(REG_DIG_VOL_CTRL, reg);
 }
 
 // Raw BQ coefficient upload path.
 //
-// We take the 5 Q1.31 coefficients, pack them big-endian into a 20-byte
+// We take the 5 Q5.27 coefficients, pack them big-endian into a 20-byte
 // blob, and stream them to the right (book, page, offset) using an
-// auto-page-wrapping helper. The BQ page bank cache (`kBqLeft`/`kBqRight`)
+// auto-page-wrapping helper. The BQ page bank cache (`bq_slot`)
 // tells us where each of the 15 slots starts.
 //
 // The TAS5825M won't apply new coefficients until we cross-write a "commit"
@@ -279,35 +446,73 @@ esp_err_t tas5805m_set_bq_coeffs(uint8_t band,
   q1_31_to_be(a1, blob + 12);
   q1_31_to_be(a2, blob + 16);
 
-  const bq_slot_t* slot = (ch == TAS5805M_CH_LEFT) ? &kBqLeft[band] : &kBqRight[band];
+  const bq_slot_t* slot = bq_slot(band, ch);
   return bq_write_slot(BOOK_EQ, slot->page, slot->offset, blob);
 }
 
-esp_err_t tas5805m_commit_eq_page(void) {
-  // Datasheet section 8.5: after streaming new BQ coefficients into the EQ
-  // book, land back on the control page and flip the DSP_MISC "EQ enable"
-  // bit off/on. This is what the sonocotta upstream calls "commit" — it
-  // forces the coefficient bank swap without dropping audio.
-  esp_err_t err = select_book_page(BOOK_CONTROL, PAGE_ZERO);
-  if (err != ESP_OK) return err;
-
-  uint8_t misc = 0;
-  err = reg_read_byte(REG_DSP_MISC, &misc);
-  if (err != ESP_OK) return err;
-  // Toggle bit 0 (EQ_OFF): 1 → 0 (enable) or 0 → 1 → 0 to force reload.
-  uint8_t off = misc | 0x01;
-  uint8_t on  = misc & ~0x01;
-  err |= reg_write_byte(REG_DSP_MISC, off);
-  vTaskDelay(1);
-  err |= reg_write_byte(REG_DSP_MISC, on);
-  return err;
+static esp_err_t write_identity_all(void) {
+  for (uint8_t i = 0; i < 15; ++i) {
+    esp_err_t err = tas5805m_set_bq_coeffs(i, TAS5805M_CH_LEFT,
+                                           Q5_27_ONE, 0, 0, 0, 0);
+    if (err != ESP_OK) return err;
+    err = tas5805m_set_bq_coeffs(i, TAS5805M_CH_RIGHT,
+                                 Q5_27_ONE, 0, 0, 0, 0);
+    if (err != ESP_OK) return err;
+  }
+  ESP_LOGI(TAG, "identity BQ loaded (15+15 Q5.27 slots, model=%s)",
+           s_model == TAS5805M_MODEL_5805 ? "TAS5805M" : "TAS5825M");
+  return ESP_OK;
 }
 
-int32_t tas5805m_float_to_q1_31(float v) {
+esp_err_t tas5805m_set_eq_enabled(bool on) {
+  if (!s_dev) return ESP_ERR_INVALID_STATE;
+  s_current_book = 0xFF;
+  s_current_page = 0xFF;
+
+  esp_err_t err;
+  if (s_model == TAS5805M_MODEL_5805) {
+    err = select_book_page(BOOK_CONTROL, PAGE_ZERO);
+    if (err != ESP_OK) return err;
+    err = reg_write_byte(REG_DSP_MISC, on ? DSP_MISC_EQ_15 : DSP_MISC_EQ_OFF);
+  } else {
+    // Little-endian u32 pair: gang_eq @ 0x28, bypass_eq @ 0x2C (ESPHome tas58xx).
+    uint8_t gang_bypass[8] = {0};
+    gang_bypass[0] = s_eq_ganged ? 0x01 : 0x00;
+    gang_bypass[4] = on ? 0x00 : 0x01;  // bypass when EQ is off
+    err = select_book_page(BOOK_EQ_CTRL, PAGE_EQ_MODE);
+    if (err != ESP_OK) return err;
+    err = reg_write_bytes(REG_GANG_EQ, gang_bypass, sizeof(gang_bypass));
+    s_current_book = 0xFF;
+    s_current_page = 0xFF;
+  }
+  if (err != ESP_OK) return err;
+
+  err = select_book_page(BOOK_CONTROL, PAGE_ZERO);
+  if (err != ESP_OK) return err;
+  uint8_t pwr = 0;
+  (void)reg_read_byte(REG_POWER_STATE, &pwr);
+  if (pwr != TAS5805M_CTRL_PLAY) {
+    ESP_LOGW(TAG, "EQ mode change left PWR=0x%02x; restoring PLAY", pwr);
+    (void)reg_write_byte(REG_DEVICE_CTRL_2, TAS5805M_CTRL_PLAY);
+    (void)reg_write_byte(REG_FAULT_CLEAR, 0x80);
+  }
+  tas5805m_log_status();
+  return ESP_OK;
+}
+
+esp_err_t tas5805m_commit_eq_page(void) {
+  return tas5805m_set_eq_enabled(true);
+}
+
+void tas5805m_set_eq_ganged(bool ganged) {
+  s_eq_ganged = ganged;
+}
+
+int32_t tas5805m_float_to_q5_27(float v) {
   if (isnan(v) || isinf(v)) return 0;
-  if (v <= -1.0f) return INT32_MIN;
-  if (v >= 1.0f) return INT32_MAX;
-  double x = (double)v * 2147483648.0;
+  if (v >= 16.0f) return INT32_MAX;
+  if (v <= -16.0f) return INT32_MIN;
+  double x = (double)v * 134217728.0;
   if (x >= 2147483647.0) return INT32_MAX;
   if (x <= -2147483648.0) return INT32_MIN;
   return (int32_t)(x >= 0 ? x + 0.5 : x - 0.5);

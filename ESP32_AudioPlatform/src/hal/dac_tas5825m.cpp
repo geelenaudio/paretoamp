@@ -13,17 +13,14 @@
 // datasheet Chapter 8):
 //
 //   1. Expand each user band into 0-2 `EqStage`s using `eqBuildStageList`.
-//   2. Convert each stage's `b0/b1/b2/a1/a2` from `float` to signed Q1.31.
-//      Values are clamped to [-1, 1) — the biquads emitted by `eq_coeffs.cpp`
-//      never exceed that range for the frequencies / gains we accept.
-//   3. Write left-channel band `n` to Book 0x8C, page 0x2C + n. Right channel
-//      is page 0x38 + n. Each band is 20 bytes: 5 int32 coefficients, big-endian,
-//      packed contiguously.
-//   4. Unused bands (up to 15) are zeroed with the identity biquad
-//      `{b0=1.0, b1=b2=a1=a2=0}` so the DSP passes signal through.
-//   5. Commit the page bank via the driver's `commit_eq_page` helper — which
-//      does the `0x7F=0x00 (page reset), 0x00=0x00, 0x7F=0x00, ...` dance the
-//      datasheet requires between EQ updates.
+//   2. Convert each stage's `b0/b1/b2/a1/a2` from `float` to signed Q5.27
+//      (1.0 = 0x08000000). TAS5825M DSP range is [-16, 16). Hardware
+//      feedback adds a1/a2, so textbook (software) a1/a2 are negated.
+//   3. Write left/right slots in Book 0xAA (left starts page 0x01 offset
+//      0x30). Unused slots get the identity biquad `{b0=1, b1=b2=a1=a2=0}`.
+//   4. Enable 15-band EQ via Book 0x8C page 0x0B (gang from channel mode,
+//      bypass off). TAS5805M uses DSP_MISC; independent Book 0xAA RAM.
+//      Disabling EQ writes bypass on so analog returns to dry.
 //
 // If ANY step returns a non-OK code, this function returns `false` and the
 // caller falls back to the software PEQ path (see `on_eq_changed` in
@@ -34,6 +31,7 @@
 #if HAL_HAS_I2C_DAC
 
 #include "hal/hal_board.h"
+#include "audio_engine.h"
 #include "eq_coeffs.h"
 #include "eq_q131.h"
 
@@ -41,9 +39,8 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_check.h"
-
-#include <cmath>
-#include <cstring>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // The sonocotta driver headers are only present when the tas5805m component
 // is enabled (Louder builds; see components/tas5805m/CMakeLists.txt gate).
@@ -64,42 +61,44 @@ namespace {
 
 i2c_master_bus_handle_t s_i2c_bus = nullptr;
 bool s_hw_ready = false;
+bool s_play_ok = false;
 
-// Convert a floating-point biquad coefficient to signed Q1.31.
-// Range is [-1.0, +1.0); we clamp so a rogue value (e.g. NaN from a bad
-// user input we somehow missed) never wraps to a huge negative int.
-int32_t floatToQ1_31(float v) {
-  return geelen::eqFloatToQ1_31(v);
+#if HAL_HAS_TAS5805M_DRIVER
+static void tas_status_later(void*) {
+  vTaskDelay(pdMS_TO_TICKS(2500));
+  if (s_hw_ready) tas5805m_log_status();
+  vTaskDelete(nullptr);
 }
-
-// Convert one EqStage into 5 Q1.31 coefficients in the DAC's expected order:
-// b0, b1, b2, a1, a2. First-order (one-pole) stages get zero'd b2/a2 so they
-// still fit the biquad slot format.
-void stageToQ1_31(const geelen::EqStage& st, int32_t out[5]) {
-  out[0] = floatToQ1_31(st.b0);
-  out[1] = floatToQ1_31(st.b1);
-  out[2] = floatToQ1_31(st.b2);
-  out[3] = floatToQ1_31(st.a1);
-  out[4] = floatToQ1_31(st.a2);
-}
-
-// Identity biquad: passthrough with unity gain. Q1.31 for 1.0 is INT32_MAX
-// (the maximum representable positive value in Q1.31 saturates at ~ +1.0).
-void identityBiquadQ1_31(int32_t out[5]) {
-  out[0] = INT32_MAX;
-  out[1] = 0;
-  out[2] = 0;
-  out[3] = 0;
-  out[4] = 0;
-}
+#endif
 
 }  // namespace
+
+#if HAL_HAS_TAS5805M_DRIVER
+static bool try_chip_init() {
+  if (s_hw_ready) return true;
+  if (!s_i2c_bus) return false;
+  tas5805m_config_t cfg{};
+  cfg.i2c_bus = s_i2c_bus;
+  cfg.i2c_addr = HAL_TAS5825M_I2C_ADDR;
+  if (tas5805m_init(&cfg) != ESP_OK) {
+    ESP_LOGE(TAG, "tas5805m_init failed at 0x%02x", (unsigned)HAL_TAS5825M_I2C_ADDR);
+    return false;
+  }
+  s_hw_ready = true;
+  ESP_LOGI(TAG, "TAS58xx initialised at 0x%02x model=%s",
+           (unsigned)HAL_TAS5825M_I2C_ADDR,
+           tas5805m_probed_model() == TAS5805M_MODEL_5805 ? "TAS5805M" : "TAS5825M");
+  return true;
+}
+#endif
 
 bool dacInit() {
   ESP_LOGI(TAG, "DAC (%s) init — hardware PEQ backend", HAL_BOARD_NAME);
 
-  // PDN line: keep the DAC in shutdown while we bring up I2C.
+  // PDN must be HIGH before I2C: shutdown kills the slave, and IDF 5.5
+  // reports a stuck/NACK transaction as ESP_ERR_INVALID_STATE.
 #if HAL_HAS_AMP_EN
+  gpio_reset_pin(HAL_PIN_AMP_EN);
   gpio_config_t io{};
   io.intr_type = GPIO_INTR_DISABLE;
   io.mode = GPIO_MODE_OUTPUT;
@@ -107,8 +106,12 @@ bool dacInit() {
   io.pull_down_en = GPIO_PULLDOWN_DISABLE;
   io.pull_up_en = GPIO_PULLUP_DISABLE;
   gpio_config(&io);
-  gpio_set_level(HAL_PIN_AMP_EN, 0);
+  gpio_set_level(HAL_PIN_AMP_EN, 1);
+  vTaskDelay(pdMS_TO_TICKS(10));
 #endif
+
+  gpio_reset_pin(HAL_PIN_I2C_SDA);
+  gpio_reset_pin(HAL_PIN_I2C_SCL);
 
   i2c_master_bus_config_t bus_cfg{};
   bus_cfg.i2c_port = I2C_NUM_0;
@@ -123,38 +126,34 @@ bool dacInit() {
     return false;
   }
 
-#if HAL_HAS_TAS5805M_DRIVER
-  // Sonocotta driver bring-up. Details of the actual call signature are
-  // whatever the vendored component exposes; see components/tas5805m/README.md
-  // for the shape we require.
-  tas5805m_config_t cfg{};
-  cfg.i2c_bus = s_i2c_bus;
-  cfg.i2c_addr = HAL_TAS5825M_I2C_ADDR;
-  if (tas5805m_init(&cfg) != ESP_OK) {
-    ESP_LOGE(TAG, "tas5805m_init failed at 0x%02x", (unsigned)HAL_TAS5825M_I2C_ADDR);
-    return false;
-  }
-  s_hw_ready = true;
-  ESP_LOGI(TAG, "TAS5825M initialised at 0x%02x", (unsigned)HAL_TAS5825M_I2C_ADDR);
+  ESP_LOGI(TAG, "I2C bus up SDA=%d SCL=%d (chip init waits for I2S clocks)",
+           (int)HAL_PIN_I2C_SDA, (int)HAL_PIN_I2C_SCL);
   return true;
-#else
-  ESP_LOGW(TAG,
-           "TAS5825M driver header not found. This Louder build was compiled "
-           "without the vendored sonocotta component; add "
-           "`components/tas5805m/` to your idf_component.yml or drop the "
-           "sonocotta source into `components/tas5805m/`. Falling back to "
-           "software PEQ.");
-  s_hw_ready = false;
-  return false;
-#endif
 }
 
 void dacAmpEnable(bool on) {
 #if HAL_HAS_TAS5805M_DRIVER
-  if (s_hw_ready) {
-    // HI-Z → PLAY on enable, PLAY → HI-Z on disable. sonocotta exposes the
-    // full 4-state machine but we only use these two transitions.
-    tas5805m_set_state(on ? TAS5805M_CTRL_PLAY : TAS5805M_CTRL_HIZ);
+  if (on) {
+#if HAL_HAS_AMP_EN
+    // Full analog reset: a latched DC/OC fault survives I2C PLAY.
+    gpio_set_level(HAL_PIN_AMP_EN, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    gpio_set_level(HAL_PIN_AMP_EN, 1);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    s_hw_ready = false;
+    s_play_ok = false;
+#endif
+    try_chip_init();
+    if (s_hw_ready) {
+      if (tas5805m_enter_play() != ESP_OK) {
+        ESP_LOGE(TAG, "tas5805m_enter_play failed");
+      } else {
+        s_play_ok = true;
+        xTaskCreate(tas_status_later, "tas_stat", 3072, nullptr, 1, nullptr);
+      }
+    }
+  } else if (s_hw_ready) {
+    tas5805m_set_state(TAS5805M_CTRL_HIZ);
   }
 #endif
 #if HAL_HAS_AMP_EN
@@ -166,74 +165,114 @@ void dacAmpEnable(bool on) {
 void dacSetVolume(uint8_t vol_percent) {
   if (vol_percent > 100) vol_percent = 100;
 #if HAL_HAS_TAS5805M_DRIVER
-  if (s_hw_ready) {
+  if (s_play_ok) {
     tas5805m_set_volume_pct(vol_percent);
   }
 #endif
   (void)vol_percent;
 }
 
-bool dacSupportsHwPeq() {
+bool dacHasHwVolume() {
 #if HAL_HAS_TAS5805M_DRIVER
-  return s_hw_ready;
+  return s_play_ok;
 #else
   return false;
 #endif
 }
 
-bool dacApplyPeqBands(const geelen::EqBand* bands, uint8_t count) {
-#if !HAL_HAS_TAS5805M_DRIVER
-  (void)bands; (void)count;
-  return false;
+void dacLogStatus() {
+#if HAL_HAS_TAS5805M_DRIVER
+  if (s_hw_ready) tas5805m_log_status();
+#endif
+}
+
+bool dacSupportsHwPeq() {
+#if HAL_HAS_TAS5805M_DRIVER
+  return s_play_ok;
 #else
-  if (!s_hw_ready) return false;
-  if (!bands || count == 0) return false;
+  return false;
+#endif
+}
 
-  // TAS5825M has exactly 15 BQ slots per channel. If the stage-expansion
-  // exceeds 15 (a 24 dB/oct shelf produces 2 stages, so a user who fills
-  // all 15 bands with 24 dB/oct filters would hit 30) we prioritise the
-  // first-N-stages and log a WARN so the SPA can surface a "truncated"
-  // notice on the next `/api/state` snapshot.
-  constexpr uint8_t kMaxHwBands = 15;
-  if (count > kMaxHwBands) count = kMaxHwBands;
+bool dacApplyPeqBandsLR(const geelen::EqBand* left, uint8_t nL,
+                        const geelen::EqBand* right, uint8_t nR, bool ganged) {
+#if HAL_HAS_TAS5805M_DRIVER
+  if (!s_play_ok || !left || nL == 0) return false;
+  if (!ganged && (!right || nR == 0)) return false;
 
-  geelen::EqStage stages[geelen::EQ_MAX_STAGES_PER_LAYER];
-  const size_t stage_count = geelen::eqBuildStageList(44100.0f, bands, count, stages);
-  if (stage_count > kMaxHwBands) {
-    ESP_LOGW(TAG,
-             "EQ expansion produced %u stages > %u HW bands. Truncating; "
-             "consider reducing 24 dB/oct filters or lowering the band count.",
-             (unsigned)stage_count, (unsigned)kMaxHwBands);
+  geelen::EqStage stagesL[geelen::EQ_MAX_STAGES_PER_LAYER];
+  geelen::EqStage stagesR[geelen::EQ_MAX_STAGES_PER_LAYER];
+  const size_t nStagesL =
+      geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, left, nL, stagesL);
+  const geelen::EqStage* rightStages = stagesL;
+  size_t nStagesR = nStagesL;
+  if (!ganged) {
+    nStagesR = geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, right, nR, stagesR);
+    rightStages = stagesR;
   }
-  const uint8_t used = (uint8_t)((stage_count > kMaxHwBands) ? kMaxHwBands : stage_count);
-
-  for (uint8_t band = 0; band < kMaxHwBands; ++band) {
-    int32_t coeffs[5];
-    if (band < used) {
-      stageToQ1_31(stages[band], coeffs);
-    } else {
-      identityBiquadQ1_31(coeffs);
-    }
-    // Left AND right (ganged). Per-channel EQ is on the Phase-10 roadmap.
-    if (tas5805m_set_bq_coeffs(band, TAS5805M_CH_LEFT,
-                               coeffs[0], coeffs[1], coeffs[2],
-                               coeffs[3], coeffs[4]) != ESP_OK) {
-      ESP_LOGE(TAG, "BQ upload L band %u failed", (unsigned)band);
-      return false;
-    }
-    if (tas5805m_set_bq_coeffs(band, TAS5805M_CH_RIGHT,
-                               coeffs[0], coeffs[1], coeffs[2],
-                               coeffs[3], coeffs[4]) != ESP_OK) {
-      ESP_LOGE(TAG, "BQ upload R band %u failed", (unsigned)band);
-      return false;
-    }
+  if (nStagesL > 15 || nStagesR > 15) {
+    ESP_LOGW(TAG, "PEQ expansion L=%u R=%u stages, using first 15 TAS slots",
+             (unsigned)nStagesL, (unsigned)nStagesR);
   }
-  if (tas5805m_commit_eq_page() != ESP_OK) {
-    ESP_LOGE(TAG, "tas5805m_commit_eq_page failed");
+
+  tas5805m_set_eq_ganged(ganged);
+  if (tas5805m_set_eq_enabled(false) != ESP_OK) return false;
+
+  auto fail_bypass = []() {
+    (void)tas5805m_set_eq_enabled(false);
     return false;
-  }
-  ESP_LOGI(TAG, "PEQ upload OK: %u user bands → %u HW slots", (unsigned)count, (unsigned)used);
+  };
+
+  auto write_bank = [&](const geelen::EqStage* stages, size_t n, TAS5805M_EQ_CHANNELS ch) {
+    const size_t slots = (n > 15) ? 15 : n;
+    for (uint8_t i = 0; i < 15; ++i) {
+      int32_t hw[5];
+      if (i < slots) {
+        geelen::eqStageToTas5825mQ5_27(stages[i].b0, stages[i].b1, stages[i].b2,
+                                       stages[i].a1, stages[i].a2, hw);
+      } else {
+        hw[0] = 0x08000000;
+        hw[1] = hw[2] = hw[3] = hw[4] = 0;
+      }
+      if (tas5805m_set_bq_coeffs(i, ch, hw[0], hw[1], hw[2], hw[3], hw[4]) != ESP_OK) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (!write_bank(stagesL, nStagesL, TAS5805M_CH_LEFT)) return fail_bypass();
+  if (!write_bank(rightStages, nStagesR, TAS5805M_CH_RIGHT)) return fail_bypass();
+
+  if (tas5805m_set_eq_enabled(true) != ESP_OK) return false;
+  ESP_LOGI(TAG, "HW PEQ uploaded (L=%u R=%u stages, %s)",
+           (unsigned)((nStagesL > 15) ? 15 : nStagesL),
+           (unsigned)((nStagesR > 15) ? 15 : nStagesR),
+           ganged ? "ganged" : "split");
   return true;
+#else
+  (void)left;
+  (void)nL;
+  (void)right;
+  (void)nR;
+  (void)ganged;
+  return false;
+#endif
+}
+
+bool dacApplyPeqBands(const geelen::EqBand* bands, uint8_t count) {
+  return dacApplyPeqBandsLR(bands, count, bands, count, true);
+}
+
+bool dacSetHwPeqEnabled(bool on) {
+#if HAL_HAS_TAS5805M_DRIVER
+  if (!s_play_ok) return false;
+  if (tas5805m_set_eq_enabled(on) != ESP_OK) return false;
+  ESP_LOGI(TAG, "HW PEQ %s", on ? "enabled" : "bypassed");
+  return true;
+#else
+  (void)on;
+  return false;
 #endif
 }
 

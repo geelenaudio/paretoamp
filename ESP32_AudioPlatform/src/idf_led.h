@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #ifdef ESP_PLATFORM
 
 namespace geelen_idf {
@@ -15,6 +17,8 @@ class ConfigManager;
 void ledBegin(ConfigManager* cfg);
 const char* ledPhaseName();
 void ledTakeoverUser();
+/** White volume bar for ~2 s, then the current phase (user colour / pairing). */
+void ledShowVolume(uint8_t pct, bool muted);
 
 }  // namespace geelen_idf
 

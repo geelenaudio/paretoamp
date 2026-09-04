@@ -78,6 +78,8 @@ enum class AudioSource : uint8_t {
 
 enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };
 enum class StereoMode : uint8_t { Stereo = 0, Mono = 1 };
+/** Louder TAS only. Amped is always Ganged (one software cascade). */
+enum class EqChannelMode : uint8_t { Ganged = 0, Split = 1 };
 
 // Phase 5 — Wi-Fi power-save selector. Default `None` matches pre-Phase-5
 // behaviour (best for streaming, highest power draw). Users that operate
@@ -120,6 +122,8 @@ struct Config {
   // is the user-visible count in 1..HAL_EQ_MAX_BANDS_ACTIVE and is clamped on
   // set. Preset slot 0..9 or 0xFF ("modified / unsaved").
   ParametricBand eq_bands[PARAMETRIC_BANDS];
+  ParametricBand eq_bands_r[PARAMETRIC_BANDS];
+  EqChannelMode eq_ch_mode;
   uint8_t eq_active_bands;
   bool eq_on;
   uint8_t eq_active_slot;
@@ -176,6 +180,10 @@ class ConfigManager {
   // last-known/default values and are ignored by the DSP.
   void getEqBands(ParametricBand out[PARAMETRIC_BANDS]) const;
   void setEqBands(const ParametricBand bands[PARAMETRIC_BANDS]);
+  void getEqBandsR(ParametricBand out[PARAMETRIC_BANDS]) const;
+  void setEqBandsR(const ParametricBand bands[PARAMETRIC_BANDS]);
+  EqChannelMode getEqChannelMode() const { return config_.eq_ch_mode; }
+  void setEqChannelMode(EqChannelMode m);
   uint8_t getEqActiveBands() const { return config_.eq_active_bands; }
   void setEqActiveBands(uint8_t n);
   bool getEqEnabled() const { return config_.eq_on; }

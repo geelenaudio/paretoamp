@@ -5,6 +5,7 @@
 
 #include "idf_config_manager.h"
 #include "idf_identity.h"
+#include "hal/hal_board.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -56,6 +57,8 @@ static const char* NVS_KEY_LED_USER      = "led_user";
 // are read on load and migrated into `eq_bands`; the writer only touches
 // the new key set below.
 static const char* NVS_KEY_EQ_BANDS      = "eq_bands";
+static const char* NVS_KEY_EQ_BANDS_R    = "eq_bands_r";
+static const char* NVS_KEY_EQ_CH_MODE    = "eq_ch_mode";
 static const char* NVS_KEY_EQ_ON         = "eq_on";
 static const char* NVS_KEY_EQ_NB         = "eq_nb";
 static const char* NVS_KEY_EQ_SLOT       = "eq_slot";
@@ -219,6 +222,8 @@ void ConfigManager::loadDefaults() {
   config_.preset_id = 0;
   for (size_t i = 0; i < EQ_BANDS; i++) config_.eq_gains[i] = FIXED_PRESET_EQ[0][i];
   loadDefaultEqBands(config_.eq_bands);
+  memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+  config_.eq_ch_mode = EqChannelMode::Ganged;
   config_.eq_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_on = false;
   config_.eq_active_slot = 0xFF;  // "unsaved / modified"
@@ -405,6 +410,30 @@ bool ConfigManager::load() {
       }
       if (migrated) markDirtyEq();
     }
+  }
+
+  // Right curve: missing blob (older firmware) copies L. Amped never splits.
+  {
+    uint8_t eq_blob[sizeof(config_.eq_bands_r)];
+    size_t rlen = sizeof(eq_blob);
+    constexpr size_t kBands15 = PARAMETRIC_BANDS * sizeof(ParametricBand);
+    if (nvs_get_blob(h, NVS_KEY_EQ_BANDS_R, eq_blob, &rlen) == ESP_OK && rlen == kBands15) {
+      memcpy(config_.eq_bands_r, eq_blob, kBands15);
+    } else {
+      memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+    }
+  }
+  if (nvs_get_u8(h, NVS_KEY_EQ_CH_MODE, &tmp8) == ESP_OK && tmp8 == 1) {
+    config_.eq_ch_mode = EqChannelMode::Split;
+  } else {
+    config_.eq_ch_mode = EqChannelMode::Ganged;
+  }
+#if !HAL_HAS_HW_PEQ
+  config_.eq_ch_mode = EqChannelMode::Ganged;
+  memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+#endif
+  if (config_.eq_ch_mode == EqChannelMode::Ganged) {
+    memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
   }
 
   // Enable flag: prefer the new key, fall back to whichever legacy layer was
@@ -617,6 +646,8 @@ bool ConfigManager::save() {
     // NOT rewritten so a downgrade to old firmware falls back cleanly to its
     // defaults (better than partially-mangled state).
     nvs_set_blob(h, NVS_KEY_EQ_BANDS, config_.eq_bands, sizeof(config_.eq_bands));
+    nvs_set_blob(h, NVS_KEY_EQ_BANDS_R, config_.eq_bands_r, sizeof(config_.eq_bands_r));
+    nvs_set_u8(h, NVS_KEY_EQ_CH_MODE, config_.eq_ch_mode == EqChannelMode::Split ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_EQ_ON, config_.eq_on ? 1 : 0);
     nvs_set_u8(h, NVS_KEY_EQ_NB, config_.eq_active_bands);
     nvs_set_u8(h, NVS_KEY_EQ_SLOT, config_.eq_active_slot);
@@ -849,9 +880,34 @@ void ConfigManager::setEqBands(const ParametricBand bands[PARAMETRIC_BANDS]) {
     config_.eq_bands[i] = bands[i];
     clampBand(config_.eq_bands[i]);
   }
-  // Any live edit marks the slot "modified"; the preset-load handler re-sets
-  // this to the slot index after assigning.
+  if (config_.eq_ch_mode == EqChannelMode::Ganged) {
+    memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+  }
   config_.eq_active_slot = 0xFF;
+  markDirtyEq();
+}
+void ConfigManager::getEqBandsR(ParametricBand out[PARAMETRIC_BANDS]) const {
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) out[i] = config_.eq_bands_r[i];
+}
+void ConfigManager::setEqBandsR(const ParametricBand bands[PARAMETRIC_BANDS]) {
+  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
+    config_.eq_bands_r[i] = bands[i];
+    clampBand(config_.eq_bands_r[i]);
+  }
+  if (config_.eq_ch_mode == EqChannelMode::Ganged) {
+    memcpy(config_.eq_bands, config_.eq_bands_r, sizeof(config_.eq_bands));
+  }
+  config_.eq_active_slot = 0xFF;
+  markDirtyEq();
+}
+void ConfigManager::setEqChannelMode(EqChannelMode m) {
+#if !HAL_HAS_HW_PEQ
+  m = EqChannelMode::Ganged;
+#endif
+  if (m == EqChannelMode::Ganged) {
+    memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+  }
+  config_.eq_ch_mode = m;
   markDirtyEq();
 }
 void ConfigManager::setEqEnabled(bool on) {
@@ -1128,6 +1184,8 @@ void ConfigManager::resetDlna() {
 
 void ConfigManager::resetEq() {
   loadDefaultEqBands(config_.eq_bands);
+  memcpy(config_.eq_bands_r, config_.eq_bands, sizeof(config_.eq_bands_r));
+  config_.eq_ch_mode = EqChannelMode::Ganged;
   config_.eq_active_bands = (uint8_t)PARAMETRIC_BANDS;
   config_.eq_on = false;
   config_.eq_active_slot = 0xFF;
@@ -1136,6 +1194,8 @@ void ConfigManager::resetEq() {
   for (size_t i = 0; i < EQ_BANDS; i++) config_.eq_gains[i] = 0;
 
   nvsErase(NVS_KEY_EQ_BANDS);
+  nvsErase(NVS_KEY_EQ_BANDS_R);
+  nvsErase(NVS_KEY_EQ_CH_MODE);
   nvsErase(NVS_KEY_EQ_ON);
   nvsErase(NVS_KEY_EQ_NB);
   nvsErase(NVS_KEY_EQ_SLOT);

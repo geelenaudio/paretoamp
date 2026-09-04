@@ -62,6 +62,10 @@
 #define HAL_WS2812_MAX_DUTY 10
 #endif
 
+// Encoder is not on this board: GPIO 13 is TPA3128 amp-enable. A front-panel
+// encoder needs a different switch GPIO before HAL_HAS_ENCODER can be 1.
+#define HAL_HAS_ENCODER 0
+
 // ---- EQ cap ---------------------------------------------------------------
 // Requested by the product: 10-band parametric EQ on Amped. Storage capacity
 // (`EQ_MAX_BANDS`) is higher so a preset saved on Louder round-trips through
