@@ -24,11 +24,12 @@
 #include <cmath>
 #include <cstring>
 
+#include "eq_coeffs.h"
+
 namespace geelen {
 
 namespace {
 
-constexpr float kIntersampleHeadroomDb = 1.5f;
 /** 128 frames @ 44.1 kHz ≈ 2902 µs; log if processing exceeds 70% of that. */
 constexpr uint64_t kProcessBudgetUs = (uint64_t)((128.0 * 1e6 / 44100.0) * 0.7);
 
@@ -264,7 +265,7 @@ float AudioEngine::computeEqPeakGainDbUnlocked() const {
     float mag = active ? eqLinearMagProduct(c.stages, c.stage_count, f, sr) : 1.f;
     if (mag > peak) peak = mag;
   }
-  return 20.f * log10f(peak) + kIntersampleHeadroomDb;
+  return 20.f * log10f(peak) + EQ_INTERSAMPLE_HEADROOM_DB;
 }
 
 float AudioEngine::computeEqPeakGainDb() const {

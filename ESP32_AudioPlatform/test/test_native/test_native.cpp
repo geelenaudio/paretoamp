@@ -195,6 +195,22 @@ void test_eqLinearMagProduct_bell_boost_at_centre(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.02f * expected, expected, lin);
 }
 
+void test_eqPeakGainDb_max_of_l_and_r(void) {
+  /* Auto headroom on Louder split uses max(peak(L), peak(R)) from the band
+   * lists even when the software cascade is off. */
+  geelen::EqBand left[geelen::EQ_MAX_BANDS]{};
+  geelen::EqBand right[geelen::EQ_MAX_BANDS]{};
+  left[0] = makeBand(1000.f, 3.f, 1.f, geelen::EqFilterType::Bell, 12);
+  right[0] = makeBand(1000.f, 6.f, 1.f, geelen::EqFilterType::Bell, 12);
+  const float pL = geelen::eqPeakGainDb(44100.f, left, 1);
+  const float pR = geelen::eqPeakGainDb(44100.f, right, 1);
+  const float peak = pL > pR ? pL : pR;
+  TEST_ASSERT_TRUE(pR > pL);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, pR, peak);
+  TEST_ASSERT_FLOAT_WITHIN(0.4f, 6.f + geelen::EQ_INTERSAMPLE_HEADROOM_DB, pR);
+  TEST_ASSERT_FLOAT_WITHIN(0.4f, 3.f + geelen::EQ_INTERSAMPLE_HEADROOM_DB, pL);
+}
+
 /* --- Phase 0: event taxonomy stability ------------------------------------
  *
  * These checks exist so the native build catches accidental enum reorderings
@@ -212,6 +228,12 @@ void test_q131_neg_half(void);
 void test_q131_nan_is_zero(void);
 void test_q131_roundtrip_quarter(void);
 void test_q131_identity_biquad_b0(void);
+void test_q5_27_identity_biquad_b0(void);
+void test_tas5825m_feedback_a1_a2_negated(void);
+void test_volume_pct_to_tas_mute(void);
+void test_volume_pct_to_tas_unity(void);
+void test_volume_pct_to_tas_31_is_about_minus_10db(void);
+void test_volume_pct_to_tas_50_is_about_minus_6db(void);
 
 void test_event_ids_are_stable(void) {
   /* Adding a new event at the end of the enum is fine. Reordering or
@@ -353,6 +375,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_eqBuildStageList_lowpass_24_two_biquads);
   RUN_TEST(test_eqBuildStageList_lowpass_6_one_pole);
   RUN_TEST(test_eqLinearMagProduct_bell_boost_at_centre);
+  RUN_TEST(test_eqPeakGainDb_max_of_l_and_r);
   RUN_TEST(test_event_ids_are_stable);
   RUN_TEST(test_event_payloads_are_pod);
   RUN_TEST(test_event_payload_sizes);
@@ -368,5 +391,11 @@ int main(int argc, char** argv) {
   RUN_TEST(test_q131_nan_is_zero);
   RUN_TEST(test_q131_roundtrip_quarter);
   RUN_TEST(test_q131_identity_biquad_b0);
+  RUN_TEST(test_q5_27_identity_biquad_b0);
+  RUN_TEST(test_tas5825m_feedback_a1_a2_negated);
+  RUN_TEST(test_volume_pct_to_tas_mute);
+  RUN_TEST(test_volume_pct_to_tas_unity);
+  RUN_TEST(test_volume_pct_to_tas_31_is_about_minus_10db);
+  RUN_TEST(test_volume_pct_to_tas_50_is_about_minus_6db);
   return UNITY_END();
 }

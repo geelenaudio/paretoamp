@@ -82,6 +82,17 @@ void ledSetRgb(uint8_t r, uint8_t g, uint8_t b) {
   led_strip_refresh(s_strip);
 }
 
+void ledSetPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
+  if (!s_strip) return;
+  if (i >= (uint16_t)HAL_WS2812_COUNT) return;
+  led_strip_set_pixel(s_strip, i, scale_duty(r), scale_duty(g), scale_duty(b));
+}
+
+void ledRefresh() {
+  if (!s_strip) return;
+  led_strip_refresh(s_strip);
+}
+
 void ledClear() {
   if (!s_strip) return;
   led_strip_clear(s_strip);
@@ -97,6 +108,8 @@ bool ledPresent() { return false; }
 uint16_t ledPixelCount() { return 0; }
 bool ledInit() { return false; }
 void ledSetRgb(uint8_t, uint8_t, uint8_t) {}
+void ledSetPixel(uint16_t, uint8_t, uint8_t, uint8_t) {}
+void ledRefresh() {}
 void ledClear() {}
 
 }  // namespace geelen_hal

@@ -28,7 +28,7 @@ The Geelen Audio Amp is a networked I2S audio solution with:
 
 - **Bluetooth A2DP Sink** – stream from phone/tablet (Classic BT on ESP32-WROVER)
 - **Network (Snapclient)** – Snapcast client; pair with `snapserver` + `librespot`
-- **Parametric EQ** – one curve; 10-band software PEQ on Amped, 15-band hardware PEQ on Louder (TAS5825M)
+- **Parametric EQ** – 10-band software PEQ + software volume on Amped (always ganged); 15-band TAS hardware PEQ + hardware volume on Louder (optional unlinked L/R)
 - **Web control panel** – volume, source, EQ, WiFi setup, factory reset
 - **WiFi** – validate-then-commit onboarding, STA with AP fallback, captive portal at 192.168.4.1
 

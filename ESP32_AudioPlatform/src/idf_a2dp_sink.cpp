@@ -13,8 +13,10 @@
 #include "audio_engine.h"
 #include "idf_config_manager.h"
 #include "idf_events.h"
+#include "idf_led.h"
 #include "idf_state_stream.h"
 #include "idf_voice_feedback.h"
+#include "hal/dac.h"
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -223,6 +225,23 @@ static bool open_pairing_window() {
 
 bool a2dpStartPairingWindow() { return open_pairing_window(); }
 
+bool a2dpForcePairingWindow() {
+  if (!s_a2dp_up) return false;
+  if (s_connected.load(std::memory_order_relaxed) && s_peer_valid) {
+    esp_bd_addr_t bda{};
+    memcpy(bda, s_peer_bda, sizeof(bda));
+    ESP_LOGI(TAG, "force pairing: disconnect ACL then 180 s window");
+    esp_err_t err = esp_a2d_sink_disconnect(bda);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "esp_a2d_sink_disconnect failed: %s", esp_err_to_name(err));
+      return false;
+    }
+    // DISCONNECTED handler calls open_pairing_window().
+    return true;
+  }
+  return open_pairing_window();
+}
+
 uint32_t a2dpPairingWindowMsLeft() {
   if (!s_discoverable.load(std::memory_order_relaxed)) return 0;
   const int64_t left = s_window_deadline_us - esp_timer_get_time();
@@ -328,7 +347,15 @@ static void drain_pcm_sb_() {
 static void apply_deferred_volume_(geelen::AudioEngine* engine) {
   const int v = s_phone_vol_pct.exchange(-1, std::memory_order_relaxed);
   if (v >= 0 && engine) {
-    engine->setVolumeLR(static_cast<uint8_t>(v), static_cast<uint8_t>(v));
+    const bool muted = s_cfg && s_cfg->isMuted();
+    if (geelen_hal::dacHasHwVolume()) {
+      engine->setVolumeLR(100, 100);
+      engine->setMuted(muted);
+      geelen_hal::dacSetVolume(muted ? 0 : static_cast<uint8_t>(v));
+    } else {
+      engine->setVolumeLR(static_cast<uint8_t>(v), static_cast<uint8_t>(v));
+    }
+    ledShowVolume(static_cast<uint8_t>(v), muted);
     s_vol_persist.store(v, std::memory_order_relaxed);
     s_vol_persist_deadline_us.store(esp_timer_get_time() + kVolPersistUs,
                                     std::memory_order_relaxed);

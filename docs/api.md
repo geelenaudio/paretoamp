@@ -29,10 +29,22 @@ Set audio source.
 
 ### GET /api/eq
 
-Get the active PEQ curve. Band count is clamped to `max_bands` (10 on
-Amped software PEQ, 15 on Louder TAS5825M hardware PEQ).
+EQ lives on `GET /api/state` (`eq` object) and `POST /api/eq`. There is no
+separate GET for the curve.
 
-**Response:** `{ enabled, band_count, max_bands, backend, bands[], headroom, active_slot }`
+**`eq` fields:** `{ enabled, band_count, max_bands, backend, supports_split,
+channel_mode, bands[], bands_r?, headroom, active_slot }`.
+
+- `max_bands`: 10 on Amped software PEQ, 15 on Louder TAS hardware PEQ.
+- `backend`: `"software"`, `"hardware"`, or `"software (fallback)"`.
+- `supports_split`: true only on Louder (`HAL_HAS_HW_PEQ`). Amped is always
+  `"ganged"` and omits `bands_r`.
+- `channel_mode`: `"ganged"` or `"split"`. `POST /api/eq` accepts optional
+  `channel_mode` and `bands_r`. Amped coerces split to ganged (does not 400)
+  so a Louder preset still applies using the left curve.
+- Presets are V4 (`EGP4`) with both curves; V3 loads as ganged (R=L).
+
+Canonical schema: [`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml).
 
 ### GET /api/snapcast
 

@@ -54,3 +54,5 @@
 
 // ---- EQ cap ---------------------------------------------------------------
 #define HAL_EQ_MAX_BANDS_ACTIVE 10
+
+#define HAL_HAS_ENCODER 0

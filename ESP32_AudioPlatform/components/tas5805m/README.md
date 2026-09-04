@@ -14,10 +14,13 @@ whole-firmware licensing implications.
 - `include/tas5805m.h` — public API used by the HAL wrapper
   (`src/hal/dac_tas5825m.cpp`). Adds two functions on top of the
   upstream shape:
-  - `tas5805m_set_bq_coeffs(band, ch, b0, b1, b2, a1, a2)` — raw Q1.31
-    biquad upload for a single slot of the on-chip 15-band PEQ.
-  - `tas5805m_commit_eq_page()` — page-bank swap so the DSP picks up the
-    newly-uploaded coefficients without an audio pop.
+  - `tas5805m_set_bq_coeffs(band, ch, b0, b1, b2, a1, a2)` — raw Q5.27
+    biquad upload for a single slot of the on-chip 15-band PEQ (TI-form
+    a1/a2, Book 0xAA).
+  - `tas5805m_commit_eq_page()` — enable 15-band EQ (TAS5825M Book 0x8C
+    bypass + gang bit, or TAS5805M `DSP_MISC`) so the DSP picks up host RAM.
+  - `tas5805m_set_eq_ganged(bool)` — TAS5825M gang_eq (1 = L/R share left
+    RAM, 0 = independent banks). Applied on the next enable.
 - `src/tas5805m.c` — the actual driver, rewritten against the modern
   ESP-IDF `driver/i2c_master.h` bus API. Register addresses, book/page
   layout, and startup semantics come from the upstream and the TAS5825M

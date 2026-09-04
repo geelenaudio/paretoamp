@@ -50,6 +50,14 @@
 #if !defined(HAL_HAS_WS2812)
 #  error "Board header did not define HAL_HAS_WS2812"
 #endif
+#if !defined(HAL_HAS_ENCODER)
+#  define HAL_HAS_ENCODER 0
+#endif
+#if HAL_HAS_ENCODER
+#  if !defined(HAL_PIN_ENC_A) || !defined(HAL_PIN_ENC_B) || !defined(HAL_PIN_ENC_SW)
+#    error "HAL_HAS_ENCODER=1 requires HAL_PIN_ENC_A, HAL_PIN_ENC_B, HAL_PIN_ENC_SW"
+#  endif
+#endif
 #if HAL_HAS_WS2812
 #  if !defined(HAL_PIN_WS2812)
 #    error "HAL_HAS_WS2812=1 requires HAL_PIN_WS2812"

@@ -9,7 +9,7 @@ already shipped.
 
 ## EQ / DSP
 
-- [ ] Per-channel (L/R) EQ: expose `eq.channel_mode` and store two 15-band curves.
+- [x] Per-channel (L/R) EQ: expose `eq.channel_mode` and store two 15-band curves (Louder HW only; Amped stays ganged).
 - [ ] TAS5825M DRC: `GET/POST /api/drc` wrapping sonocotta DRC registers.
 - [ ] ISO 226 loudness contour toggle on top of the user PEQ.
 - [ ] Hardware EQ magnitude readback so the SPA shows the as-applied curve.
@@ -52,7 +52,7 @@ already shipped.
 ## SPA / UX
 
 - [ ] Undo/redo for EQ edits.
-- [ ] Copy-to-other-channel once per-channel EQ exists.
+- [x] Copy-to-other-channel once per-channel EQ exists.
 - [ ] Global on-device preset library (not only NVS slot + localStorage).
 - [ ] Keyboard / screen-reader pass on the SVG curve.
 

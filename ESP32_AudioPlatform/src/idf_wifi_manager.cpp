@@ -23,7 +23,7 @@ namespace geelen_idf {
 
 static const char* TAG = "WiFi";
 static const char* AP_SSID = "Geelen-Audio";
-static const char* AP_PASS = "geelen123";
+static const char* AP_PASS = "";  // open — phones can join and pop the captive sheet
 
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr int WIFI_GOT_IP_BIT = BIT1;
@@ -291,7 +291,7 @@ void WifiManager::startApFallback_() {
   status_.sta_connected = false;
   status_.sta_ip = 0;
 
-  ESP_LOGI(TAG, "AP started: %s / %s (IP is usually 192.168.4.1)", AP_SSID, AP_PASS);
+  ESP_LOGI(TAG, "AP started: %s (open, IP is usually 192.168.4.1)", AP_SSID);
 
   // Phase 1: notify the supervisor (and any future Mode Manager / DLNA
   // SSDP gating) that we are now AP-only. Posted from both the cold-boot

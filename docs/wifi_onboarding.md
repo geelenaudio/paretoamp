@@ -2,7 +2,8 @@
 
 The device wants to be on the user's home Wi-Fi (STA mode). Credentials are
 **validated before they are saved**. Wrong passwords never reboot and never
-tear down the captive AP.
+tear down the captive AP. The setup hotspot `Geelen-Audio` is **open** (no
+password) so phones can join and pop a captive sheet.
 
 ## States
 

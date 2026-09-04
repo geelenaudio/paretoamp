@@ -1,7 +1,8 @@
 # Hardware — Louder-ESP32-S3 (WROOM-N8R8)
 
-TAS5825M on the ESP32-S3 SoC. Same DAC control path as Louder-WROVER;
-different SoC pinout.
+Louder-ESP-Pro: ESP32-S3 + TAS5825M DAC path (`louder-esp32s3-idf`). Same
+hardware volume + 15-band PEQ as Louder-WROVER; different SoC pinout.
+IR / mic / TFT stay out of scope.
 
 > **Build-validated only.** Pin map is the S3-DevKitC-1 default; verify
 > against the actual Louder-S3 revision before flashing.
@@ -13,7 +14,8 @@ different SoC pinout.
 
 ## I2S / DAC
 
-- **TAS5825M**, same silicon as Louder-WROVER.
+- **TAS5825M**, same silicon family as Louder-WROVER Plus. Datasheet:
+  [tas5825m.pdf](tas5825m.pdf).
 - Pinout (S3-DevKitC-1 defaults; see `src/hal/boards/louder_s3.h`):
   - **BCK** — GPIO 15
   - **WS**  — GPIO 16
@@ -27,9 +29,12 @@ different SoC pinout.
 - `HAL_WS2812_COUNT` default 1; override with `-DHAL_WS2812_COUNT=N`.
 - `HAL_WS2812_MAX_DUTY` default 50; override with `-DHAL_WS2812_MAX_DUTY=N`.
 
-## EQ backend
+## Volume / EQ backend
 
-- **Hardware** parametric EQ, 15 bands via the vendored sonocotta driver.
+- TAS digital volume `0x4C` is the user fader (engine gain unity). Phone
+  AVRCP still tracks 0–100%.
+- **Hardware** parametric EQ, 15 bands, Q5.27 Book 0xAA. See
+  [`docs/eq.md`](../eq.md) and [louder-wrover.md](louder-wrover.md).
 
 ## Flashing
 

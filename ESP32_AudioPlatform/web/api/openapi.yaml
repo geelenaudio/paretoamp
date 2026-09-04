@@ -111,6 +111,8 @@ paths:
                   band_count: 6
                   max_bands: 10
                   backend: "software"
+                  supports_split: false
+                  channel_mode: "ganged"
                   bands:
                     - { freq: 60,   gain_db:  3.0, q: 1.00, type: "bell" }
                     - { freq: 200,  gain_db: -1.5, q: 1.20, type: "bell" }
@@ -584,7 +586,11 @@ paths:
       tags: [EQ]
       summary: Update the parametric EQ curve
       description: |
-        Writes the single parametric curve and/or toggles the EQ enable.
+        Writes the parametric curve and/or toggles EQ enable. Optional
+        `channel_mode` (`ganged` / `split`) and `bands_r` apply on Louder
+        only (`supports_split`). Amped ignores split and applies `bands`
+        as a single ganged software cascade (does not 400).
+
         The device always stores **15** band slots (matches the widest
         supported board); `band_count` selects how many are **active** in
         the DSP. The active count is clamped to `state.eq.max_bands`
@@ -593,18 +599,20 @@ paths:
 
         `bands` may be a partial array; entries are merged by index with the
         current curve so the client can send a single edited band.
+        Ganged writes persist R=L so a later unlink starts from the audible
+        curve.
 
         Each band has a `type` (`bell`, `low_shelf`, `high_shelf`, `notch`,
         `low_pass`, `high_pass`) and optional `slope_db_oct` (**6**, **12**, or
         **24**) for low-pass / high-pass only.
 
         The firmware clamps frequencies, gains, and Q before storage. On
-        Louder boards the coefficients are pushed to the TAS5825M's on-chip
-        DSP; the response's `backend` field reports the actual applied
-        backend ("hardware", "software", or "software (fallback)" when the
-        HW upload failed and the software cascade took over). The response
-        also includes `headroom` (auto attenuation may change when the EQ
-        chain changes).
+        Louder boards the coefficients are pushed to independent Book 0xAA
+        banks; TAS5825M gang=0 when split. The response's `backend` field
+        reports the actual applied backend ("hardware", "software", or
+        "software (fallback)" when the HW upload failed — fallback stays
+        ganged on the left curve). The response also includes `headroom`
+        (auto attenuation is max of L and R peaks).
       operationId: setEqCurve
       requestBody:
         required: true
@@ -1142,8 +1150,25 @@ components:
           description: |
             Always 15 entries (fits the widest supported board). Only the
             first `band_count` are active in DSP; the remainder are stored
-            for round-tripping preset files across boards.
+            for round-tripping preset files across boards. Left / ganged curve.
           items: { $ref: "#/components/schemas/EqBand" }
+        bands_r:
+          type: array
+          minItems: 15
+          maxItems: 15
+          description: |
+            Right curve. Always present on Louder. Amped omits this field.
+            Ignored when `channel_mode` is ganged (firmware mirrors `bands`).
+          items: { $ref: "#/components/schemas/EqBand" }
+        supports_split:
+          type: boolean
+          description: True on Louder (`HAL_HAS_HW_PEQ`). Amped is always false.
+        channel_mode:
+          type: string
+          enum: [ganged, split]
+          description: |
+            Ganged = one curve on both channels. Split = independent L/R
+            (Louder hardware only). Amped always reports ganged.
 
     EqCurveUpdate:
       type: object
@@ -1151,6 +1176,7 @@ components:
         Partial update payload accepted by `POST /api/eq`. All fields are
         optional; the firmware merges into the current live curve. `bands`
         is index-merged, so the client can send a single edited band.
+        Amped coerces `channel_mode=split` to ganged.
       properties:
         enabled: { type: boolean }
         band_count:
@@ -1158,7 +1184,13 @@ components:
           minimum: 1
           maximum: 15
           description: Active logical bands; clamped to `state.eq.max_bands`.
+        channel_mode:
+          type: string
+          enum: [ganged, split]
         bands:
+          type: array
+          items: { $ref: "#/components/schemas/EqBand" }
+        bands_r:
           type: array
           items: { $ref: "#/components/schemas/EqBand" }
 
@@ -1273,6 +1305,14 @@ components:
                 active_slot:
                   type: integer
                   description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
+                supports_split:
+                  type: boolean
+                channel_mode:
+                  type: string
+                  enum: [ganged, split]
+                bands_r:
+                  type: array
+                  items: { $ref: "#/components/schemas/EqBand" }
 
     WifiSetting:
       type: object

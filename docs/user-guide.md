@@ -3,7 +3,7 @@
 ## First-time setup
 
 1. Power the device. If no Wi-Fi is configured (or credentials were never
-   verified), it starts an AP **Geelen-Audio** (password: **geelen123**).
+   verified), it starts an AP **Geelen-Audio** (open, no password).
 2. Connect your phone/PC to **Geelen-Audio**.
 3. Open a browser; you may be redirected to the setup page, or go to
    **http://192.168.4.1**.
@@ -26,9 +26,10 @@
 
 - Default source is **Bluetooth** (ESP32-WROVER builds). The device
   advertises as **Geelen Audio** (or the name you set on Overview / About).
-  Pair from your phone; audio goes through the single PEQ curve (software
-  on Amped, TAS5825M hardware on Louder). Renaming applies live; some
-  phones keep the old GAP name until you re-pair.
+  Pair from your phone; audio goes through the PEQ (software on Amped,
+  TAS58xx on-chip on Louder; Louder can unlink L/R). Volume is software on Amped and
+  the TAS fader on Louder; the phone rocker still matches 0–100%. Renaming
+  applies live; some phones keep the old GAP name until you re-pair.
 
 ## Identity / mDNS
 
@@ -47,15 +48,19 @@ On-device Spotify Connect is not supported. Use Snapcast instead:
 
 ## Web UI
 
-- **Dashboard:** Volume, source, meters. Optional WS2812 colour and
+- **Dashboard:** Volume, source, meters. On Louder the knob and sliders
+  move the TAS fader; Amped uses software gain. Optional WS2812 colour and
   brightness live on Overview (`POST /api/led`); pixel count is firmware
   compile-time, not a slider.
-- **EQ:** One parametric curve. Amped caps at 10 bands; Louder at 15. See
-  [eq.md](eq.md).
+- **EQ:** Parametric curve. Amped caps at 10 bands (software, always
+  ganged). Louder caps at 15 on-chip; default is one shared L/R curve.
+  On Louder, **Unlink L/R** edits channels separately, with **Copy L→R /
+  R→L** and **Relink** (uses Left). See [eq.md](eq.md).
 - **Wi-Fi:** Validate then commit (same flow as the captive portal).
 - **Reset:** Scoped reset via `/api/reset`.
 
 ## EQ presets
 
-Presets apply to the single curve. A 15-band Louder preset loaded on Amped
-keeps all bands in storage; only the first 10 are applied.
+Presets apply to the live curve (both L/R on Louder when unlinked). A
+15-band Louder preset loaded on Amped keeps all bands in storage; only
+the first 10 of the **left** curve are applied.

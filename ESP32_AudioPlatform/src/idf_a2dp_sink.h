@@ -16,10 +16,12 @@
 // applies engine gain after PCM and debounces NVS/SSE so volume rocker
 // spam cannot preempt the stream.
 //
-// Discoverability is a 180 s pairing window (begin, A2DP disconnect, or
+// Discoverability is a 180 s pairing window (begin, A2DP disconnect,
+// encoder long-press via a2dpForcePairingWindow, or
 // POST /api/bluetooth {discoverable:true}). While connected the sink is
 // connectable but not inquiry-visible (ACL=1). Quiet mode after the window
-// still lets the last bonded phone reconnect.
+// still lets the last bonded phone reconnect. Long-press disconnects the
+// ACL first if needed; it does not wipe NVS bonds.
 
 #pragma once
 
@@ -39,6 +41,8 @@ bool a2dpIsConnected();
 bool a2dpIsDiscoverable();
 uint32_t a2dpPairingWindowMsLeft();
 bool a2dpStartPairingWindow();
+/** Disconnect the ACL if needed, then open the 180 s pairing window. Does not wipe bonds. */
+bool a2dpForcePairingWindow();
 bool a2dpApplyPin(const char* pin);
 void a2dpWipeBonds();
 void a2dpNotifyLocalVolume();
@@ -53,6 +57,7 @@ inline bool a2dpIsConnected() { return false; }
 inline bool a2dpIsDiscoverable() { return false; }
 inline uint32_t a2dpPairingWindowMsLeft() { return 0; }
 inline bool a2dpStartPairingWindow() { return false; }
+inline bool a2dpForcePairingWindow() { return false; }
 inline bool a2dpApplyPin(const char*) { return false; }
 inline void a2dpWipeBonds() {}
 inline void a2dpNotifyLocalVolume() {}

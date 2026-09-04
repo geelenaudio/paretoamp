@@ -286,16 +286,37 @@ extern "C" void geelen_eq_set_backend(const char* label) {
   if (label && *label) g_eq_backend = label;
 }
 
-static cJSON* curveToJson(const ParametricBand bands[PARAMETRIC_BANDS], bool enabled, uint8_t band_count) {
-  cJSON* o = cJSON_CreateObject();
-  cJSON_AddBoolToObject(o, "enabled", enabled);
-  if (band_count < 1) band_count = 1;
-  if (band_count > (uint8_t)PARAMETRIC_BANDS) band_count = (uint8_t)PARAMETRIC_BANDS;
-  cJSON_AddNumberToObject(o, "band_count", band_count);
+static cJSON* bandsToJsonArray(const ParametricBand bands[PARAMETRIC_BANDS]) {
   cJSON* arr = cJSON_CreateArray();
   for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) cJSON_AddItemToArray(arr, bandToJson(bands[i]));
-  cJSON_AddItemToObject(o, "bands", arr);
-  return o;
+  return arr;
+}
+
+static void fill_eq_object(cJSON* eq, ConfigManager* cfg) {
+  ParametricBand left[PARAMETRIC_BANDS];
+  ParametricBand right[PARAMETRIC_BANDS];
+  cfg->getEqBands(left);
+  cfg->getEqBandsR(right);
+  const uint8_t band_count = cfg->getEqActiveBands();
+  cJSON_AddBoolToObject(eq, "enabled", cfg->getEqEnabled());
+  cJSON_AddNumberToObject(eq, "band_count", band_count);
+  cJSON_AddNumberToObject(eq, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
+  cJSON_AddStringToObject(eq, "backend", g_eq_backend);
+  cJSON_AddBoolToObject(eq, "supports_split", HAL_HAS_HW_PEQ ? true : false);
+  cJSON_AddStringToObject(eq, "channel_mode",
+                          cfg->getEqChannelMode() == EqChannelMode::Split ? "split" : "ganged");
+  cJSON_AddItemToObject(eq, "bands", bandsToJsonArray(left));
+#if HAL_HAS_HW_PEQ
+  cJSON_AddItemToObject(eq, "bands_r", bandsToJsonArray(right));
+#endif
+  cJSON* hr = cJSON_CreateObject();
+  cJSON_AddStringToObject(hr, "mode",
+                          cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
+  cJSON_AddNumberToObject(hr, "manual_db", cfg->getHeadroomManualDb());
+  const float peak_db = &compute_eq_peak_db ? compute_eq_peak_db() : 0.f;
+  cJSON_AddNumberToObject(hr, "auto_db", (double)(peak_db > 0.f ? -peak_db : 0.f));
+  cJSON_AddItemToObject(eq, "headroom", hr);
+  cJSON_AddNumberToObject(eq, "active_slot", cfg->getEqActiveSlot());
 }
 
 // ---- /api/state (aggregated snapshot) ------------------------------------
@@ -381,29 +402,9 @@ cJSON* buildStateJson(ConfigManager* cfg) {
                           s_wifi_mgr ? s_wifi_mgr->probeStateName() : "idle");
   cJSON_AddItemToObject(root, "wifi", wifi_cfg);
 
-  // Single-layer PEQ.
+  // Parametric EQ (Louder may include bands_r + channel_mode).
   cJSON* eq = cJSON_CreateObject();
-  ParametricBand curve[PARAMETRIC_BANDS];
-  cfg->getEqBands(curve);
-  cJSON_AddBoolToObject(eq, "enabled", cfg->getEqEnabled());
-  const uint8_t band_count = cfg->getEqActiveBands();
-  cJSON_AddNumberToObject(eq, "band_count", band_count);
-  // Per-board runtime cap. SPA uses this to gate the +/- band controls.
-  cJSON_AddNumberToObject(eq, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
-  cJSON_AddStringToObject(eq, "backend", g_eq_backend);
-  cJSON* bands_arr = cJSON_CreateArray();
-  for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) cJSON_AddItemToArray(bands_arr, bandToJson(curve[i]));
-  cJSON_AddItemToObject(eq, "bands", bands_arr);
-  cJSON* hr = cJSON_CreateObject();
-  cJSON_AddStringToObject(hr, "mode",
-                          cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
-  cJSON_AddNumberToObject(hr, "manual_db", cfg->getHeadroomManualDb());
-  // auto_db is negative the peak gain of the enabled cascade. A peak of
-  // +6 dB -> auto_db of -6 dB (so total gain stays at or below unity).
-  const float peak_db = &compute_eq_peak_db ? compute_eq_peak_db() : 0.f;
-  cJSON_AddNumberToObject(hr, "auto_db", (double)(peak_db > 0.f ? -peak_db : 0.f));
-  cJSON_AddItemToObject(eq, "headroom", hr);
-  cJSON_AddNumberToObject(eq, "active_slot", cfg->getEqActiveSlot());
+  fill_eq_object(eq, cfg);
   cJSON_AddItemToObject(root, "eq", eq);
 
   cJSON* tt = cJSON_CreateObject();
@@ -1156,7 +1157,18 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
   if (!body) return ESP_FAIL;
 
   ParametricBand bands[PARAMETRIC_BANDS];
+  ParametricBand bands_r[PARAMETRIC_BANDS];
   cfg->getEqBands(bands);
+  cfg->getEqBandsR(bands_r);
+
+  const cJSON* modej = cJSON_GetObjectItemCaseSensitive(body, "channel_mode");
+  if (cJSON_IsString(modej) && modej->valuestring) {
+    if (!strcmp(modej->valuestring, "split")) {
+      cfg->setEqChannelMode(EqChannelMode::Split);
+    } else if (!strcmp(modej->valuestring, "ganged")) {
+      cfg->setEqChannelMode(EqChannelMode::Ganged);
+    }
+  }
 
   // `band_count` is clamped to the board's runtime cap
   // (`HAL_EQ_MAX_BANDS_ACTIVE`). Storage still holds up to 15 bands so a
@@ -1180,29 +1192,29 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
       ++i;
     }
   }
+  const cJSON* arr_r = cJSON_GetObjectItemCaseSensitive(body, "bands_r");
+  if (cJSON_IsArray(arr_r)) {
+    int i = 0;
+    const cJSON* it = nullptr;
+    cJSON_ArrayForEach(it, arr_r) {
+      if (i >= (int)PARAMETRIC_BANDS) break;
+      (void)jsonToBand(it, &bands_r[i]);
+      ++i;
+    }
+  }
 
   const bool enabled = jbool(body, "enabled", cfg->getEqEnabled());
   cfg->setEqBands(bands);
+  if (cfg->getEqChannelMode() == EqChannelMode::Split) {
+    cfg->setEqBandsR(bands_r);
+  }
   cfg->setEqEnabled(enabled);
   cJSON_Delete(body);
 
   if (&on_eq_changed) on_eq_changed();
 
-  // Reply with the full curve as stored (post-clamp) so the UI can
-  // reconcile. Include the updated headroom block — any EQ edit can
-  // change the peak gain and thus the auto headroom — plus the backend
-  // label and per-board cap so the SPA can render its "hardware / software
-  // (fallback)" status hint.
-  cJSON* rj = curveToJson(bands, enabled, cfg->getEqActiveBands());
-  cJSON_AddNumberToObject(rj, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
-  cJSON_AddStringToObject(rj, "backend", g_eq_backend);
-  cJSON* hr = cJSON_CreateObject();
-  cJSON_AddStringToObject(hr, "mode",
-                          cfg->getHeadroomMode() == HeadroomMode::Manual ? "manual" : "auto");
-  cJSON_AddNumberToObject(hr, "manual_db", cfg->getHeadroomManualDb());
-  const float peak_db = &compute_eq_peak_db ? compute_eq_peak_db() : 0.f;
-  cJSON_AddNumberToObject(hr, "auto_db", (double)(peak_db > 0.f ? -peak_db : 0.f));
-  cJSON_AddItemToObject(rj, "headroom", hr);
+  cJSON* rj = cJSON_CreateObject();
+  fill_eq_object(rj, cfg);
   return send_json(req, rj);
 }
 
@@ -1236,11 +1248,15 @@ static esp_err_t handle_post_eq_headroom(httpd_req_t* req) {
 //   V1 (pre-Phase-1): 32-byte name + 10 bands × 12 bytes (freq/gain/Q).
 //   V2 (Phase-1..2)  : magic + version + band_count + reserved + 32-byte name +
 //                      10 bands × 16 bytes.
-//   V3 (this refactor): same header + 15 bands × 16 bytes. `band_count` is
-//                       the user-active count (1..15).
-static constexpr uint32_t kPresetMagic = 0x33504745u;   // 'EGP3' LE
+//   V3               : same header + 15 bands × 16 bytes. `band_count` is
+//                      the user-active count (1..15). Read as ganged (R=L).
+//   V4 (current)     : V3 + channel_mode in the reserved byte + second 15-band
+//                      array (`bands_r`). Magic 'EGP4'. Amped load uses L only.
+static constexpr uint32_t kPresetMagic = 0x34504745u;   // 'EGP4' LE
+static constexpr uint32_t kPresetMagicV3 = 0x33504745u; // 'EGP3' LE — read-only
 static constexpr uint32_t kPresetMagicV2 = 0x32504745u; // 'EGP2' LE — read-only
-static constexpr uint16_t kPresetVersion = 3;
+static constexpr uint16_t kPresetVersion = 4;
+static constexpr uint16_t kPresetVersionV3 = 3;
 static constexpr size_t kPresetV2BandCount = 10;
 
 #pragma pack(push, 1)
@@ -1250,9 +1266,25 @@ struct PresetFileV3 {
   uint8_t band_count;
   uint8_t reserved;
   char name[PRESET_NAME_MAX];
-  ParametricBand bands[PARAMETRIC_BANDS];  // 15 slots
+  ParametricBand bands[PARAMETRIC_BANDS];
+};
+struct PresetFileV4 {
+  uint32_t magic;
+  uint16_t version;
+  uint8_t band_count;
+  uint8_t channel_mode;  // 0 ganged, 1 split
+  char name[PRESET_NAME_MAX];
+  ParametricBand bands[PARAMETRIC_BANDS];
+  ParametricBand bands_r[PARAMETRIC_BANDS];
 };
 #pragma pack(pop)
+
+static_assert(sizeof(PresetFileV4) > 512, "V4 preset must not fit in the old 512-byte read buffer");
+
+static void presetCopyLtoR(PresetFileV4* out) {
+  memcpy(out->bands_r, out->bands, sizeof(out->bands_r));
+  out->channel_mode = 0;
+}
 
 static void presetMigrate12(const uint8_t* src, size_t src_bands, ParametricBand out[PARAMETRIC_BANDS]) {
   // Match ConfigManager::loadDefaultEqBands defaults for the tail.
@@ -1279,30 +1311,48 @@ static void presetPath(char out[64], size_t idx) {
   snprintf(out, 64, "%s/pref_%u.bin", PRESETS_DIR, (unsigned)idx);
 }
 
-static bool presetReadV3(size_t idx, PresetFileV3* out) {
+static bool presetReadV4(size_t idx, PresetFileV4* out) {
   char path[64];
   presetPath(path, idx);
   int fd = open(path, O_RDONLY);
   if (fd < 0) return false;
-  uint8_t buf[512];
+  uint8_t buf[640];
   ssize_t r = read(fd, buf, sizeof(buf));
   close(fd);
 
+  constexpr ssize_t kV4 = (ssize_t)sizeof(PresetFileV4);
   constexpr ssize_t kV3 = (ssize_t)sizeof(PresetFileV3);
   constexpr ssize_t kV2 = (ssize_t)(8u + PRESET_NAME_MAX + kPresetV2BandCount * sizeof(ParametricBand));
   constexpr ssize_t kV1 = (ssize_t)(PRESET_NAME_MAX + kPresetV2BandCount * 12u + 8u);
 
-  // V3 (current).
-  if (r >= kV3) {
+  auto clamp_count = [](uint8_t bc) {
+    if (bc < 1 || bc > (uint8_t)PARAMETRIC_BANDS) return (uint8_t)PARAMETRIC_BANDS;
+    return bc;
+  };
+
+  if (r >= kV4) {
     memcpy(out, buf, sizeof(*out));
     if (out->magic == kPresetMagic && out->version == kPresetVersion) {
-      if (out->band_count < 1 || out->band_count > (uint8_t)PARAMETRIC_BANDS)
-        out->band_count = (uint8_t)PARAMETRIC_BANDS;
+      out->band_count = clamp_count(out->band_count);
+      if (out->channel_mode > 1) out->channel_mode = 0;
       out->name[PRESET_NAME_MAX - 1] = '\0';
       return true;
     }
   }
-  // V2 header shape — same field layout, 10 bands.
+  if (r >= kV3) {
+    PresetFileV3 v3{};
+    memcpy(&v3, buf, sizeof(v3));
+    if (v3.magic == kPresetMagicV3 && v3.version == kPresetVersionV3) {
+      out->magic = kPresetMagic;
+      out->version = kPresetVersion;
+      out->band_count = clamp_count(v3.band_count);
+      memcpy(out->name, v3.name, PRESET_NAME_MAX);
+      out->name[PRESET_NAME_MAX - 1] = '\0';
+      memcpy(out->bands, v3.bands, sizeof(out->bands));
+      presetCopyLtoR(out);
+      return true;
+    }
+  }
   if (r >= kV2) {
     uint32_t magic;
     memcpy(&magic, buf, sizeof(magic));
@@ -1312,10 +1362,8 @@ static bool presetReadV3(size_t idx, PresetFileV3* out) {
       uint8_t band_count = buf[6];
       out->band_count = (band_count >= 1 && band_count <= kPresetV2BandCount) ? band_count
                                                                               : (uint8_t)kPresetV2BandCount;
-      out->reserved = 0;
       memcpy(out->name, buf + 8, PRESET_NAME_MAX);
       out->name[PRESET_NAME_MAX - 1] = '\0';
-      // Reset slots to defaults, then copy the 10 V2 bands.
       for (size_t i = 0; i < PARAMETRIC_BANDS; ++i) {
         out->bands[i].freq_hz = 1000.f;
         out->bands[i].gain_db = 0.f;
@@ -1326,10 +1374,10 @@ static bool presetReadV3(size_t idx, PresetFileV3* out) {
       }
       memcpy(out->bands, buf + 8 + PRESET_NAME_MAX,
              kPresetV2BandCount * sizeof(ParametricBand));
+      presetCopyLtoR(out);
       return true;
     }
   }
-  // V1 (12-byte-per-band, no magic header).
   if (r >= kV1) {
     memcpy(out->name, buf, PRESET_NAME_MAX);
     out->name[PRESET_NAME_MAX - 1] = '\0';
@@ -1337,13 +1385,13 @@ static bool presetReadV3(size_t idx, PresetFileV3* out) {
     out->magic = kPresetMagic;
     out->version = kPresetVersion;
     out->band_count = (uint8_t)kPresetV2BandCount;
-    out->reserved = 0;
+    presetCopyLtoR(out);
     return true;
   }
   return false;
 }
 
-static bool presetWriteV3(size_t idx, const PresetFileV3* in) {
+static bool presetWriteV4(size_t idx, const PresetFileV4* in) {
   (void)mkdir(PRESETS_DIR, 0777);
   char path[64];
   presetPath(path, idx);
@@ -1372,8 +1420,8 @@ static esp_err_t handle_get_presets(httpd_req_t* req) {
   for (size_t i = 0; i < PRESET_SLOT_COUNT; ++i) {
     cJSON* s = cJSON_CreateObject();
     cJSON_AddNumberToObject(s, "index", i);
-    PresetFileV3 pf{};
-    const bool saved = presetReadV3(i, &pf);
+    PresetFileV4 pf{};
+    const bool saved = presetReadV4(i, &pf);
     if (saved) {
       pf.name[PRESET_NAME_MAX - 1] = '\0';
       cJSON_AddStringToObject(s, "name", pf.name);
@@ -1455,16 +1503,17 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     cJSON* body = parse_body(req);
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
-    PresetFileV3 pf{};
+    PresetFileV4 pf{};
     pf.magic = kPresetMagic;
     pf.version = kPresetVersion;
     pf.band_count = cfg->getEqActiveBands();
-    pf.reserved = 0;
+    pf.channel_mode = cfg->getEqChannelMode() == EqChannelMode::Split ? 1 : 0;
     if (name && *name) strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     else snprintf(pf.name, PRESET_NAME_MAX, "Preset %u", (unsigned)(idx + 1));
     pf.name[PRESET_NAME_MAX - 1] = '\0';
     cfg->getEqBands(pf.bands);
-    const bool ok = presetWriteV3(idx, &pf);
+    cfg->getEqBandsR(pf.bands_r);
+    const bool ok = presetWriteV4(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
     cfg->setEqActiveSlot((uint8_t)idx);
@@ -1476,9 +1525,14 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
   }
 
   if (!strcmp(action, "load")) {
-    PresetFileV3 pf{};
-    if (!presetReadV3(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
+    PresetFileV4 pf{};
+    if (!presetReadV4(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
+    const bool split = (pf.channel_mode == 1);
+    cfg->setEqChannelMode(split ? EqChannelMode::Split : EqChannelMode::Ganged);
     cfg->setEqBands(pf.bands);
+    if (cfg->getEqChannelMode() == EqChannelMode::Split) {
+      cfg->setEqBandsR(pf.bands_r);
+    }
     uint8_t bc = pf.band_count;
     if (bc > HAL_EQ_MAX_BANDS_ACTIVE) bc = HAL_EQ_MAX_BANDS_ACTIVE;
     cfg->setEqActiveBands(bc);
@@ -1488,8 +1542,9 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     cJSON_AddNumberToObject(rj, "index", (double)idx);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
     cJSON_AddStringToObject(rj, "name", pf.name);
-    cJSON_AddItemToObject(rj, "eq",
-                          curveToJson(pf.bands, cfg->getEqEnabled(), cfg->getEqActiveBands()));
+    cJSON* eqj = cJSON_CreateObject();
+    fill_eq_object(eqj, cfg);
+    cJSON_AddItemToObject(rj, "eq", eqj);
     return send_json(req, rj);
   }
 
@@ -1498,11 +1553,11 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
     if (!body) return ESP_FAIL;
     const char* name = jstr(body, "name", nullptr);
     if (!name || !*name) { cJSON_Delete(body); return send_err_json(req, HTTPD_400_BAD_REQUEST, "name required"); }
-    PresetFileV3 pf{};
-    if (!presetReadV3(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
+    PresetFileV4 pf{};
+    if (!presetReadV4(idx, &pf)) { cJSON_Delete(body); return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty"); }
     strncpy(pf.name, name, PRESET_NAME_MAX - 1);
     pf.name[PRESET_NAME_MAX - 1] = '\0';
-    const bool ok = presetWriteV3(idx, &pf);
+    const bool ok = presetWriteV4(idx, &pf);
     cJSON_Delete(body);
     if (!ok) return send_err_json(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
     cJSON* rj = cJSON_CreateObject();

@@ -11,12 +11,14 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 
 namespace geelen_idf {
 
@@ -32,7 +34,35 @@ std::atomic<Phase> s_phase{Phase::Boot};
 std::atomic<bool> s_wifi_up{false};
 std::atomic<bool> s_a2dp_connected{false};
 std::atomic<bool> s_user_takeover{false};
+std::atomic<int64_t> s_vol_until_us{0};
+std::atomic<uint8_t> s_vol_pct{0};
+std::atomic<bool> s_vol_muted{false};
 ConfigManager* s_cfg = nullptr;
+
+constexpr int64_t kVolOverlayUs = 2000000;
+
+void draw_volume_bar() {
+  const uint16_t n = geelen_hal::ledPixelCount();
+  if (n == 0) return;
+  const bool muted = s_vol_muted.load(std::memory_order_relaxed);
+  const uint8_t pct = muted ? 0 : s_vol_pct.load(std::memory_order_relaxed);
+  const uint32_t scaled = (uint32_t)pct * (uint32_t)n;
+  const uint16_t full = (uint16_t)(scaled / 100u);
+  const uint8_t frac = (uint8_t)(scaled % 100u);
+  for (uint16_t i = 0; i < n; ++i) {
+    uint8_t w = 0;
+    if (i < full) w = 255;
+    else if (i == full) w = (uint8_t)((255u * (uint16_t)frac) / 100u);
+    geelen_hal::ledSetPixel(i, w, w, w);
+  }
+  geelen_hal::ledRefresh();
+}
+
+bool volume_overlay_active() {
+  const int64_t until = s_vol_until_us.load(std::memory_order_relaxed);
+  if (until <= 0) return false;
+  return esp_timer_get_time() < until;
+}
 
 // 0 at t=0, 255 at half period, 0 at period. HAL then scales by max duty.
 uint8_t pulse_u8(uint32_t t) {
@@ -84,14 +114,30 @@ void on_a2dp_disconnected(void*, esp_event_base_t, int32_t, void*) {
 void led_task(void*) {
   uint32_t pulse_t = 0;
   bool green_done = false;
+  bool overlay_was = false;
   for (;;) {
+    const Phase p = s_phase.load(std::memory_order_relaxed);
+    const bool overlay = volume_overlay_active() && p != Phase::Boot &&
+                         !(p == Phase::Wifi && !green_done);
+    if (overlay) {
+      overlay_was = true;
+      draw_volume_bar();
+      vTaskDelay(kPulseTick);
+      continue;
+    }
+    if (overlay_was) {
+      overlay_was = false;
+      if (p == Phase::User || s_user_takeover.load(std::memory_order_relaxed)) {
+        enter_user();
+      }
+    }
+
     if (s_user_takeover.load(std::memory_order_relaxed)) {
       enter_user();
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
     }
 
-    const Phase p = s_phase.load(std::memory_order_relaxed);
     switch (p) {
       case Phase::Boot: {
         const uint8_t v = pulse_u8(pulse_t++);
@@ -177,6 +223,14 @@ const char* ledPhaseName() {
 void ledTakeoverUser() {
   s_user_takeover.store(true, std::memory_order_relaxed);
   enter_user();
+}
+
+void ledShowVolume(uint8_t pct, bool muted) {
+  if (pct > 100) pct = 100;
+  s_vol_pct.store(pct, std::memory_order_relaxed);
+  s_vol_muted.store(muted, std::memory_order_relaxed);
+  if (s_phase.load(std::memory_order_relaxed) == Phase::Boot) return;
+  s_vol_until_us.store(esp_timer_get_time() + kVolOverlayUs, std::memory_order_relaxed);
 }
 
 }  // namespace geelen_idf

@@ -23,6 +23,7 @@ idf_component_register(
     "idf_state_stream.cpp"
     "idf_mode_manager.cpp"
     "idf_led.cpp"
+    "idf_encoder.cpp"
     "idf_identity.cpp"
     "idf_mdns.cpp"
     # Hardware Abstraction Layer sources. Both DAC backends are always compiled;

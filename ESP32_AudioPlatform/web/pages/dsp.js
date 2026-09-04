@@ -7,7 +7,8 @@
 // the device applies. The `state.eq.max_bands` value (from the server) sets
 // the runtime cap (10 on Amped, 15 on Louder); `state.eq.backend` reports
 // which backend actually applies the biquads ("software", "hardware", or
-// "software (fallback)").
+// "software (fallback)"). Louder may set `supports_split`; Amped is always
+// one ganged curve.
 
 import { html, useEffect, useState, useRef, useMemo, useCallback } from "/vendor/htm-preact.mjs";
 
@@ -243,28 +244,40 @@ function curvePath(curve, w, h) {
 const TICK_FREQS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const TICK_LABELS = { 20: "20", 50: "50", 100: "100", 200: "200", 500: "500", 1000: "1k", 2000: "2k", 5000: "5k", 10000: "10k", 20000: "20k" };
 
-function normalizeCurve(curve, maxBands) {
-  const bands = [];
+function normalizeBands(src) {
   const defBand = { freq: 1000, gain_db: 0, q: 1.2, type: "bell", slope_db_oct: 12 };
+  const bands = [];
   for (let i = 0; i < MAX_STORAGE_BANDS; i++) {
-    bands.push(normalizeBand({ ...defBand, ...(curve.bands && curve.bands[i]) }));
+    bands.push(normalizeBand({ ...defBand, ...(src && src[i]) }));
   }
+  return bands;
+}
+
+function normalizeCurve(curve, maxBands) {
+  const bands = normalizeBands(curve.bands);
+  const bands_r = curve.bands_r ? normalizeBands(curve.bands_r) : bands.map((b) => ({ ...b }));
   const cap = clamp(maxBands || DEFAULT_MAX_BANDS, 1, MAX_STORAGE_BANDS);
   return {
     enabled: !!curve.enabled,
     band_count: clamp(curve.band_count ?? cap, 1, cap),
     bands,
+    bands_r,
+    channel_mode: curve.channel_mode === "split" ? "split" : "ganged",
+    supports_split: !!curve.supports_split,
   };
 }
 
-function EqPlot({ curve, maxBands, onDrag, onDragEnd }) {
+function EqPlot({ curve, curveR, activeCh, maxBands, onDrag, onDragEnd }) {
   const svgRef = useRef(null);
   const dragBand = useRef(null);
   const pendingDrag = useRef(null);
   const rafId = useRef(0);
 
   const activeN = clamp(curve.band_count || DEFAULT_MAX_BANDS, 1, maxBands);
-  const path = useMemo(() => curvePath(curve, PLOT_W, PLOT_H), [curve]);
+  const pathL = useMemo(() => curvePath(curve, PLOT_W, PLOT_H), [curve]);
+  const pathR = useMemo(() => curveR ? curvePath(curveR, PLOT_W, PLOT_H) : null, [curveR]);
+  const handles = (activeCh === "R" && curveR) ? curveR : curve;
+  const handleFill = (activeCh === "R" && curveR) ? "var(--eq-cal)" : "var(--eq-pref)";
 
   const eventToSvg = useCallback((e) => {
     const r = svgRef.current.getBoundingClientRect();
@@ -320,13 +333,14 @@ function EqPlot({ curve, maxBands, onDrag, onDragEnd }) {
         <line x1=${freqToX(f, PLOT_W)} x2=${freqToX(f, PLOT_W)} y1="0" y2=${PLOT_H} stroke="var(--line)" stroke-dasharray="2 4" />
         <text x=${freqToX(f, PLOT_W) + 3} y=${PLOT_H - 6} fill="var(--fg-2)" font-size="10" font-family="var(--font-mono)">${TICK_LABELS[f]}</text>
       `)}
-      <path d=${path} fill="none" stroke="var(--accent)" stroke-width="2.2" />
-      ${curve.bands.slice(0, activeN).map((b, i) => {
+      ${pathR ? html`<path d=${pathR} fill="none" stroke="var(--eq-cal)" stroke-width="2.2" opacity="0.85" />` : ""}
+      <path d=${pathL} fill="none" stroke="var(--eq-pref)" stroke-width="2.2" />
+      ${handles.bands.slice(0, activeN).map((b, i) => {
         const nb = normalizeBand(b);
         const cx = freqToX(nb.freq, PLOT_W);
         const cy = gainToY(clamp(nb.gain_db, -DB_RANGE, DB_RANGE), PLOT_H);
         return html`
-          <circle key=${i} cx=${cx} cy=${cy} r="9" fill="var(--eq-pref)" stroke="var(--bg-1)" stroke-width="2"
+          <circle key=${i} cx=${cx} cy=${cy} r="9" fill=${handleFill} stroke="var(--bg-1)" stroke-width="2"
                   style="cursor: grab; touch-action: none;" onPointerDown=${(e) => onPointerDown(i, e)}>
             <title>Band ${i + 1}: ${nb.type} ${formatHz(nb.freq)}, ${nb.gain_db.toFixed(1)} dB</title>
           </circle>`;
@@ -343,7 +357,7 @@ const FILTER_OPTIONS = [
   ["high_pass", "High-pass"],
 ];
 
-function BandRow({ band, idx, onChange }) {
+function BandRow({ band, idx, onChange, idPrefix = "b", swatch = "var(--eq-pref)" }) {
   const b = normalizeBand(band);
   const freqPos = freqToPos(b.freq);
   const freqPct = (freqPos / FREQ_POS_MAX) * 100;
@@ -353,11 +367,12 @@ function BandRow({ band, idx, onChange }) {
   const showGain = b.type !== "notch" && b.type !== "low_pass" && b.type !== "high_pass";
   const showQ = b.type !== "low_pass" && b.type !== "high_pass";
   const showSlope = b.type === "low_pass" || b.type === "high_pass";
+  const fid = `${idPrefix}${idx}`;
 
   return html`
     <div class="eq-band">
       <div class="eq-band__head">
-        <span class="eq-band__idx"><span style="color:var(--eq-pref)">●</span> Band ${idx + 1}</span>
+        <span class="eq-band__idx"><span style="color:${swatch}">●</span> Band ${idx + 1}</span>
         <span>${b.type} · ${formatHz(b.freq)}${showGain ? ` · ${b.gain_db >= 0 ? "+" : ""}${b.gain_db.toFixed(1)} dB` : ""}${showQ ? ` · Q ${b.q.toFixed(2)}` : ""}</span>
       </div>
       <div class="eq-band__row">
@@ -378,24 +393,24 @@ function BandRow({ band, idx, onChange }) {
           </select>
         </div>` : ""}
       <div class="eq-band__row">
-        <label for=${`b${idx}-f`}>Freq</label>
-        <input id=${`b${idx}-f`} class="slider" type="range" min="0" max=${FREQ_POS_MAX} step="1" value=${freqPos}
+        <label for=${`${fid}-f`}>Freq</label>
+        <input id=${`${fid}-f`} class="slider" type="range" min="0" max=${FREQ_POS_MAX} step="1" value=${freqPos}
                style=${`--fill:${freqPct}`}
                onInput=${(e) => onChange({ freq: posToFreq(parseInt(e.target.value, 10)) })} />
         <span class="chip">${formatHz(b.freq)}</span>
       </div>
       ${showGain ? html`
         <div class="eq-band__row">
-          <label for=${`b${idx}-g`}>Gain</label>
-          <input id=${`b${idx}-g`} class="slider" type="range" min=${MIN_GAIN} max=${MAX_GAIN} step="0.1" value=${b.gain_db}
+          <label for=${`${fid}-g`}>Gain</label>
+          <input id=${`${fid}-g`} class="slider" type="range" min=${MIN_GAIN} max=${MAX_GAIN} step="0.1" value=${b.gain_db}
                  style=${`--fill:${gainPct}`}
                  onInput=${(e) => onChange({ gain_db: clamp(parseFloat(e.target.value), MIN_GAIN, MAX_GAIN) })} />
           <span class="chip">${b.gain_db >= 0 ? "+" : ""}${b.gain_db.toFixed(1)} dB</span>
         </div>` : ""}
       ${showQ ? html`
         <div class="eq-band__row">
-          <label for=${`b${idx}-q`}>Q</label>
-          <input id=${`b${idx}-q`} class="slider" type="range" min=${MIN_Q} max=${qMax} step="0.05" value=${b.q}
+          <label for=${`${fid}-q`}>Q</label>
+          <input id=${`${fid}-q`} class="slider" type="range" min=${MIN_Q} max=${qMax} step="0.05" value=${b.q}
                  style=${`--fill:${qPct}`}
                  onInput=${(e) => onChange({ q: clamp(parseFloat(e.target.value), MIN_Q, qMax) })} />
           <span class="chip">${b.q.toFixed(2)}</span>
@@ -471,6 +486,7 @@ function backendBadge(backend) {
 
 export default function Dsp({ api, toast }) {
   const [state, setState] = useState(null);
+  const [editCh, setEditCh] = useState("L");
   const commitT = useRef(null);
 
   // Subscribe but ONLY seed from the first frame: the page's optimistic
@@ -501,21 +517,42 @@ export default function Dsp({ api, toast }) {
   const eq = state.eq;
   const headroom = eq.headroom || { mode: "auto", manual_db: 0, auto_db: 0 };
   const maxBands = eq.max_bands;
+  const split = eq.supports_split && eq.channel_mode === "split";
 
   function patchCurve(next) {
     setState((prev) => ({ ...prev, eq: { ...prev.eq, ...next } }));
   }
 
+  function commitBody(overrides = {}) {
+    const channel_mode = overrides.channel_mode ?? eq.channel_mode ?? "ganged";
+    const payload = {
+      enabled: overrides.enabled ?? eq.enabled,
+      band_count: overrides.band_count ?? eq.band_count,
+      channel_mode,
+      bands: overrides.bands ?? eq.bands,
+    };
+    if (eq.supports_split && channel_mode === "split") {
+      payload.bands_r = overrides.bands_r ?? eq.bands_r;
+    }
+    return payload;
+  }
+
   function patchBand(idx, partial) {
+    if (split && editCh === "R") {
+      const bands_r = eq.bands_r.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
+      patchCurve({ bands_r });
+      scheduleCommit(commitBody({ bands_r }));
+      return;
+    }
     const bands = eq.bands.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
     patchCurve({ bands });
-    scheduleCommit({ enabled: eq.enabled, band_count: eq.band_count, bands });
+    scheduleCommit(commitBody({ bands }));
   }
 
   function setBandCount(n) {
     const v = clamp(n, 1, maxBands);
     patchCurve({ band_count: v });
-    scheduleCommit({ enabled: eq.enabled, band_count: v, bands: eq.bands });
+    scheduleCommit(commitBody({ band_count: v }));
   }
 
   function scheduleCommit(payload) {
@@ -538,7 +575,34 @@ export default function Dsp({ api, toast }) {
   function toggleEq() {
     const en = !eq.enabled;
     patchCurve({ enabled: en });
-    scheduleCommit({ enabled: en, band_count: eq.band_count, bands: eq.bands });
+    scheduleCommit(commitBody({ enabled: en }));
+  }
+
+  function unlink() {
+    const bands_r = eq.bands.map((b) => ({ ...b }));
+    patchCurve({ channel_mode: "split", bands_r });
+    setEditCh("L");
+    scheduleCommit(commitBody({ channel_mode: "split", bands_r }));
+  }
+
+  function relink() {
+    if (!confirm("Relink channels? Right will match Left.")) return;
+    const bands_r = eq.bands.map((b) => ({ ...b }));
+    patchCurve({ channel_mode: "ganged", bands_r });
+    setEditCh("L");
+    scheduleCommit(commitBody({ channel_mode: "ganged", bands: eq.bands }));
+  }
+
+  function copyLR() {
+    const bands_r = eq.bands.map((b) => ({ ...b }));
+    patchCurve({ bands_r });
+    scheduleCommit(commitBody({ bands_r }));
+  }
+
+  function copyRL() {
+    const bands = eq.bands_r.map((b) => ({ ...b }));
+    patchCurve({ bands });
+    scheduleCommit(commitBody({ bands }));
   }
 
   async function setHeadroomMode(mode) {
@@ -555,36 +619,60 @@ export default function Dsp({ api, toast }) {
   }
 
   const bc = clamp(eq.band_count || DEFAULT_MAX_BANDS, 1, maxBands);
+  const editorBands = split && editCh === "R" ? eq.bands_r : eq.bands;
+  const editorSwatch = split && editCh === "R" ? "var(--eq-cal)" : "var(--eq-pref)";
+  const plotR = split ? { ...eq, bands: eq.bands_r } : null;
+  const plotL = { ...eq, bands: eq.bands };
 
   return html`
     <h1 class="page__title">DSP / EQ</h1>
     <p class="page__subtitle">
-      Single parametric cascade, up to ${maxBands} bands on this device.
+      ${split ? "Independent left and right parametric curves" : "Single parametric cascade"}, up to ${maxBands} bands on this device.
       Filter types, per-band frequency / gain / Q, and slope on HP/LP filters.
       ${backendBadge(eq.backend)}
     </p>
 
     <div class="card" style="padding: var(--sp-4)">
-      <${EqPlot} curve=${eq} maxBands=${maxBands}
+      <${EqPlot} curve=${plotL} curveR=${plotR} activeCh=${split ? editCh : "L"} maxBands=${maxBands}
         onDrag=${(idx, partial) => patchBand(idx, partial)}
         onDragEnd=${() => {}} />
+      ${split ? html`
+        <div style="display:flex; gap: var(--sp-4); margin-top: var(--sp-2); font-size: 0.85rem; color: var(--fg-1)">
+          <span><span style="color:var(--eq-pref)">●</span> Left</span>
+          <span><span style="color:var(--eq-cal)">●</span> Right</span>
+        </div>` : ""}
     </div>
 
     <div class=${"card" + (eq.enabled ? "" : " card--muted")}>
-      <div style="display:flex; justify-content:space-between; align-items:center; gap: var(--sp-4)">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap: var(--sp-4); flex-wrap: wrap">
         <div>
           <div class="card__title">Parametric EQ</div>
           <p style="color: var(--fg-1); margin: var(--sp-2) 0 0;">
-            Room correction and personal preference in one curve. Backend: ${eq.backend}.
+            Room correction and personal preference. Backend: ${eq.backend}.
           </p>
         </div>
-        <label style="display:flex; align-items:center; gap: var(--sp-3)">
-          <span style="color:var(--fg-1)">Enabled</span>
-          <span class="switch">
-            <input type="checkbox" checked=${eq.enabled} onChange=${toggleEq} />
-            <span class="switch__slider"></span>
-          </span>
-        </label>
+        <div style="display:flex; align-items:center; gap: var(--sp-3); flex-wrap: wrap; justify-content: flex-end">
+          ${eq.supports_split ? html`
+            ${split ? html`
+              <div class="pill-group">
+                <button class=${"btn" + (editCh === "L" ? " btn--primary" : "")} onClick=${() => setEditCh("L")}>Left</button>
+                <button class=${"btn" + (editCh === "R" ? " btn--primary" : "")} onClick=${() => setEditCh("R")}>Right</button>
+              </div>
+              <button class="btn" onClick=${copyLR}>Copy L→R</button>
+              <button class="btn" onClick=${copyRL}>Copy R→L</button>
+              <button class="btn" onClick=${relink}>Relink</button>
+            ` : html`
+              <button class="btn" onClick=${unlink}>Unlink L/R</button>
+            `}
+          ` : ""}
+          <label style="display:flex; align-items:center; gap: var(--sp-3)">
+            <span style="color:var(--fg-1)">Enabled</span>
+            <span class="switch">
+              <input type="checkbox" checked=${eq.enabled} onChange=${toggleEq} />
+              <span class="switch__slider"></span>
+            </span>
+          </label>
+        </div>
       </div>
 
       ${!eq.enabled ? html`
@@ -602,8 +690,10 @@ export default function Dsp({ api, toast }) {
       </div>
 
       <div class="eq-bands">
-        ${eq.bands.slice(0, bc).map((b, i) =>
-          html`<${BandRow} key=${i} band=${b} idx=${i}
+        ${editorBands.slice(0, bc).map((b, i) =>
+          html`<${BandRow} key=${(split ? editCh : "G") + "-" + i} band=${b} idx=${i}
+                           idPrefix=${split ? (editCh === "R" ? "br" : "bl") : "b"}
+                           swatch=${editorSwatch}
                            onChange=${(p) => patchBand(i, p)} />`)}
       </div>
     </div>
@@ -638,9 +728,9 @@ export default function Dsp({ api, toast }) {
     <div class="card">
       <div class="card__title">Presets</div>
       <p style="color: var(--fg-1); margin: var(--sp-2) 0 var(--sp-3);">
-        10 slots. Save/load the full EQ curve including band count and filter types.
-        Presets round-trip across boards; loading a 15-band Louder preset on Amped
-        activates the first ${maxBands} bands.
+        10 slots. Save/load the full EQ curve including band count, filter types,
+        and on Louder both L/R curves. Presets round-trip across boards; loading a
+        15-band Louder preset on Amped activates the first ${maxBands} bands (left only).
       </p>
       <${Presets} api=${api} toast=${toast}
                   activeSlot=${eq.active_slot < 10 ? eq.active_slot : null}
