@@ -1,8 +1,9 @@
 # ESP32_AudioPlatform bring-up checklist (Amped-ESP32, ESP-IDF)
 
 ## Serial logging
+- Named flash from repo root: `task fw:amped` (or `task fw:louder` on TAS boards)
 - Build/upload: `pio run -e amped-esp32-idf -t upload`
-- Monitor: `pio device monitor -e amped-esp32-idf`
+- Monitor: `pio device monitor -e amped-esp32-idf` (Louder: `-e louder-esp32-idf`)
 - If you see "nothing", press **RESET** once while the monitor is open.
 
 Expected early output:

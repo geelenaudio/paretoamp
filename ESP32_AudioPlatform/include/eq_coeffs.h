@@ -54,6 +54,18 @@ constexpr float EQ_INTERSAMPLE_HEADROOM_DB = 1.5f;
  */
 float eqPeakGainDb(float sample_rate, const EqBand* bands, uint8_t active_band_count);
 
+/** TAS58xx Book 0xAA biquad slots per channel. Software PEQ is not capped. */
+constexpr uint8_t EQ_HW_MAX_SLOTS = 15;
+
+/**
+ * Nominal TAS slot cost of one UI band (not the bypass-zero-gain expansion).
+ * 24 dB/oct low_pass / high_pass = 2; every other type/slope = 1.
+ */
+uint8_t eqHwSlotCost(const EqBand& band);
+
+/** Sum of `eqHwSlotCost` over the first `active_band_count` bands. */
+size_t eqHwSlotTotal(const EqBand* bands, uint8_t active_band_count);
+
 }  // namespace geelen
 
 #endif

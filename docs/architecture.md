@@ -105,7 +105,9 @@ Two thresholds drive the producer/consumer dance:
   audio task flips into a "rebuffer" state and stays silent until prefill is
   hit again. Going below low-water mid-clip is exactly what produces the
   classic "first prompt is silent" symptom, so the voice task never lets the
-  ring drain past `AUDIO_LOW_WATER_MS + 40 ms` between prompts (see below).
+  ring drain past `AUDIO_LOW_WATER_MS + 40 ms` between prompts. The last
+  queued clip is padded with ~400 ms of silence first, so the ~300 ms the
+  engine then abandons is zeros rather than the last syllable (see below).
 
 `feedPCM` serializes multiple producers (A2DP, Snapcast, MP3, voice)
 against each other with a small `producer_mutex_`. The consumer never
@@ -160,14 +162,18 @@ stateDiagram-v2
   Idle --> Runtime: voiceFeedbackEnqueueClip<br/>owners += 1 (synchronous)
   Boot --> Boot: next boot clip (FIFO)
   Boot --> Runtime: queue drains in order
-  Boot --> Idle: boot pair drained<br/>+ ring < 340 ms<br/>posts EV_VOICE_BOOT_DONE
-  Runtime --> Idle: prompt drained<br/>+ ring < 340 ms<br/>posts EV_VOICE_PROMPT_FINISHED
+  Boot --> Idle: last clip + 400 ms silence<br/>+ ring < 340 ms<br/>posts EV_VOICE_BOOT_DONE
+  Runtime --> Idle: last clip + 400 ms silence<br/>+ ring < 340 ms<br/>posts EV_VOICE_PROMPT_FINISHED
   Runtime --> Runtime: more prompts queued
 ```
 
 The producer-side gate (`voiceFeedbackActive()`) is a refcount bumped
 SYNCHRONOUSLY on enqueue and dropped only AFTER the clip's PCM has been
 fed AND the engine ring has drained back below the rebuffer threshold.
+The last clip in the queue also feeds ~400 ms of silence before that
+drain, so the engine's low-water rebuffer (which abandons the remaining
+~300 ms) drops zeros rather than speech. Mid-sequence clips skip the
+pad — the next clip tops the ring up and their tails play in full.
 As long as the count is > 0, A2DP / Snapcast / DLNA producers refuse to
 feed the ring.
 

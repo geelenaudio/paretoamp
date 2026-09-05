@@ -53,9 +53,10 @@ On-device Spotify Connect is not supported. Use Snapcast instead:
   brightness live on Overview (`POST /api/led`); pixel count is firmware
   compile-time, not a slider.
 - **EQ:** Parametric curve. Amped caps at 10 bands (software, always
-  ganged). Louder caps at 15 on-chip; default is one shared L/R curve.
-  On Louder, **Unlink L/R** edits channels separately, with **Copy L→R /
-  R→L** and **Relink** (uses Left). See [eq.md](eq.md).
+  ganged — independent L/R is Louder-only; the Amped cascade is already at
+  the Core 1 budget). Louder caps at 15 on-chip; default is one shared L/R
+  curve. On Louder, **Unlink L/R** edits channels separately, with **Copy
+  L→R / R→L** and **Relink** (uses Left). See [eq.md](eq.md).
 - **Wi-Fi:** Validate then commit (same flow as the captive portal).
 - **Reset:** Scoped reset via `/api/reset`.
 

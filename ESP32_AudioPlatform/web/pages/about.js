@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Geelen Audio contributors
 //
 // About page. Cards show firmware build metadata, chip/hardware identity,
-// editable device identity (name, hostname, MAC override), filesystem info
-// and links to the embedded API docs and project source.
+// editable device identity (name, hostname, MAC override), filesystem info,
+// the project site, source repository, and links to the embedded API docs.
 //
 // Identity comes from `/api/identity` plus `/api/system/identity`;
 // heap/PSRAM from `/api/system/metrics`.
@@ -245,6 +245,12 @@ export default function About({ api, toast }) {
       </${Card}>
 
       <${Card} title="Documentation">
+        <${Row} k="Developed by">
+          <a href="https://geelen.audio/" target="_blank" rel="noopener">geelen.audio ↗</a>
+        </${Row}>
+        <${Row} k="Source">
+          <a href="https://github.com/geelenaudio/paretoamp" target="_blank" rel="noopener">geelenaudio/paretoamp ↗</a>
+        </${Row}>
         <${Row} k="API reference">
           <a href="/docs" target="_blank" rel="noopener">Swagger UI ↗</a>
         </${Row}>

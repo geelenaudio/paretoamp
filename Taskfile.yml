@@ -1,24 +1,34 @@
 # Mini dev loop for the ESP32 Audio Platform.
 #
-#   task                # list all tasks
-#   task fw:all         # build firmware + SPA + flash both
-#   task snap:up        # start the snapcast server
-#   task stream:desktop # pipe desktop audio into the snapserver FIFO
+#   task                 # list all tasks
+#   task fw:targets      # board → env → flash command
+#   task fw:amped        # flash Amped-WROVER (software PEQ)
+#   task fw:louder       # flash Louder-WROVER (TAS58xx HW PEQ)
+#   task snap:up         # start the snapcast server
+#   task stream:desktop  # pipe desktop audio into the snapserver FIFO
 #
-# Requires `task` (go-task, https://taskfile.dev) — already installed via brew.
+# Requires `task` (go-task, https://taskfile.dev).
 #
-# pio isn't on PATH by default, so we resolve it via ~/.platformio/penv/bin/pio.
-# Override by setting PIO when invoking, e.g. `PIO=pio task fw:build`.
+# PlatformIO env is compile-time: Amped images never talk to the TAS, so
+# flashing the default onto a Louder board makes EQ look like "software".
+# Prefer the named tasks. Generic fw:* still default to amped-esp32-idf.
+#
+# Overrides (both forms work):
+#   task fw:upload PIO_ENV=louder-esp32-idf
+#   PIO_ENV=louder-esp32-idf task fw:upload
+#   task fw:louder PIO_PORT=/dev/ttyACM0
+#
+# pio is resolved from PATH, else ~/.platformio/penv/bin/pio.
 version: "3"
 
 vars:
-  # PlatformIO binary. Falls back to the usual install location so you don't
-  # have to touch your shell rc just to run `task`.
   PIO:
     sh: command -v pio 2>/dev/null || echo "$HOME/.platformio/penv/bin/pio"
-  # Override per-board: `PIO_ENV=louder-esp32-idf task fw:build`
-  PIO_ENV: amped-esp32-idf
-  PIO_PORT: /dev/ttyUSB0
+  # Shell env wins, then CLI `task … PIO_ENV=…`, else Amped-WROVER.
+  PIO_ENV:
+    sh: echo "${PIO_ENV:-amped-esp32-idf}"
+  PIO_PORT:
+    sh: echo "${PIO_PORT:-/dev/ttyUSB0}"
   FW_DIR: ESP32_AudioPlatform
   SNAP_DIR: snapcast-example
   SNAP_FIFO: snapcast-example/data/testfifo
@@ -31,16 +41,111 @@ tasks:
 
   # ---------- firmware --------------------------------------------------------
 
+  fw:targets:
+    desc: Show boards, PlatformIO envs, and the matching flash tasks
+    silent: true
+    cmds:
+      - |
+        cat <<'EOF'
+        Board                         Task              PIO env              PEQ
+        ----------------------------- ----------------- -------------------- -------------------
+        Amped-ESP32 (WROVER)          task fw:amped     amped-esp32-idf      software (10 bands)
+        Louder-ESP32-Plus (WROVER)    task fw:louder    louder-esp32-idf     TAS58xx HW (15)
+        Amped-ESP32-S3                task fw:amped-s3  amped-esp32s3-idf    software (10 bands)
+        Louder-ESP32-S3               task fw:louder-s3 louder-esp32s3-idf   TAS58xx HW (15)
+
+        Port defaults to /dev/ttyUSB0. Override:  task fw:louder PIO_PORT=/dev/ttyACM0
+        List serial devices:                      task fw:ports
+
+        Generic fw:upload / fw:web / fw:monitor still need an explicit env on
+        Louder/S3, otherwise they flash Amped:
+          task fw:upload PIO_ENV=louder-esp32-idf
+          PIO_ENV=louder-esp32-idf task fw:upload
+        EOF
+
+  fw:ports:
+    desc: List serial devices PlatformIO can flash
+    cmds:
+      - "{{.PIO}} device list"
+
+  fw:amped:
+    desc: Flash Amped-ESP32 WROVER (software PEQ) — app + SPIFFS
+    aliases: [flash:amped]
+    cmds:
+      - task: fw:flash
+        vars: { PIO_ENV: amped-esp32-idf, PIO_PORT: "{{.PIO_PORT}}", PIO: "{{.PIO}}" }
+
+  fw:louder:
+    desc: Flash Louder-ESP32-Plus WROVER (TAS58xx HW PEQ) — app + SPIFFS
+    aliases: [flash:louder]
+    cmds:
+      - task: fw:flash
+        vars: { PIO_ENV: louder-esp32-idf, PIO_PORT: "{{.PIO_PORT}}", PIO: "{{.PIO}}" }
+
+  fw:amped-s3:
+    desc: Flash Amped-ESP32-S3 (software PEQ) — app + SPIFFS
+    aliases: [flash:amped-s3]
+    cmds:
+      - task: fw:flash
+        vars: { PIO_ENV: amped-esp32s3-idf, PIO_PORT: "{{.PIO_PORT}}", PIO: "{{.PIO}}" }
+
+  fw:louder-s3:
+    desc: Flash Louder-ESP32-S3 (TAS58xx HW PEQ) — app + SPIFFS
+    aliases: [flash:louder-s3]
+    cmds:
+      - task: fw:flash
+        vars: { PIO_ENV: louder-esp32s3-idf, PIO_PORT: "{{.PIO_PORT}}", PIO: "{{.PIO}}" }
+
+  _fw_check:
+    internal: true
+    silent: true
+    cmds:
+      - |
+        case "{{.PIO_ENV}}" in
+          amped-esp32-idf|amped-esp32s3-idf|louder-esp32-idf|louder-esp32s3-idf) ;;
+          *)
+            echo "Unknown PIO_ENV={{.PIO_ENV}}"
+            echo "Valid: amped-esp32-idf  amped-esp32s3-idf  louder-esp32-idf  louder-esp32s3-idf"
+            echo "Or:    task fw:amped | fw:louder | fw:amped-s3 | fw:louder-s3"
+            exit 2
+            ;;
+        esac
+
+  _fw_banner:
+    internal: true
+    silent: true
+    cmds:
+      - task: _fw_check
+        vars: { PIO_ENV: "{{.PIO_ENV}}" }
+      - |
+        echo
+        echo ">>> {{.FW_ACTION}}  env={{.PIO_ENV}}  port={{.PIO_PORT}}"
+        echo "    Amped = software PEQ (no TAS).  Louder = TAS58xx hardware PEQ."
+        echo "    Named flash: task fw:amped | fw:louder | fw:amped-s3 | fw:louder-s3"
+        echo
+
   fw:build:
-    desc: Compile the ESP-IDF firmware (no upload)
+    desc: Compile firmware for PIO_ENV (default Amped-WROVER; no upload)
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: build
       - "{{.PIO}} run -e {{.PIO_ENV}}"
 
   fw:upload:
-    desc: Flash the app partition only (keeps SPIFFS)
+    desc: Flash the app partition only (keeps SPIFFS). Default env is Amped.
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: "upload app"
       - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
 
   fw:build:verbose:
@@ -49,20 +154,38 @@ tasks:
     env:
       PLATFORMIO_BUILD_FLAGS: -DVERBOSE_AUDIO_LOG=1
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: "build verbose"
       - "{{.PIO}} run -e {{.PIO_ENV}}"
 
   fw:upload:verbose:
-    desc: "Flash with -DVERBOSE_AUDIO_LOG=1 (boot-prompt + drain diagnostics)"
+    desc: "Flash app with -DVERBOSE_AUDIO_LOG=1 (boot-prompt + drain diagnostics)"
     dir: "{{.FW_DIR}}"
     env:
       PLATFORMIO_BUILD_FLAGS: -DVERBOSE_AUDIO_LOG=1
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: "upload app verbose"
       - "{{.PIO}} run -e {{.PIO_ENV}} -t upload --upload-port {{.PIO_PORT}}"
 
   fw:web:
-    desc: Bundle the SPA (web/ -> data/web/ gzipped) + build + flash SPIFFS
+    desc: Bundle SPA (web/ → data/web/) + flash SPIFFS for PIO_ENV
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: "upload SPIFFS"
       - "{{.PIO}} run -e {{.PIO_ENV}} -t uploadfs --upload-port {{.PIO_PORT}}"
 
   fw:web-bundle:
@@ -75,41 +198,80 @@ tasks:
     desc: Build the SPIFFS image (.pio/.../spiffs.bin), but don't flash it
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_check
+        vars: { PIO_ENV: "{{.PIO_ENV}}" }
       - "{{.PIO}} run -e {{.PIO_ENV}} -t buildfs"
       - |
         img=$(ls -1 .pio/build/{{.PIO_ENV}}/*spiffs*.bin 2>/dev/null | head -n 1)
         [ -n "$img" ] && echo "SPIFFS image: $(pwd)/$img ($(stat -c %s "$img") bytes)"
 
-  fw:all:
-    desc: Build + flash firmware, then bundle + build + flash SPIFFS assets
+  fw:flash:
+    desc: Flash app + SPIFFS for PIO_ENV (no monitor). Default env is Amped.
     cmds:
       - task: fw:upload
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
       - task: fw:web
-      - task: fw:monitor
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+
+  fw:all:
+    desc: Flash app + SPIFFS for PIO_ENV (same as fw:flash; does not attach monitor)
+    cmds:
+      - task: fw:flash
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
 
   fw:all:verbose:
-    desc: Build + flash firmware, then bundle + build + flash SPIFFS assets
+    desc: Flash verbose app + SPIFFS for PIO_ENV (no monitor)
     cmds:
       - task: fw:upload:verbose
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
       - task: fw:web
-      - task: fw:monitor
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
 
   fw:monitor:
-    desc: Attach serial monitor (115200, exception decoder, timestamps)
+    desc: Serial monitor (115200, exception decoder). Pass PIO_ENV for Louder/S3.
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: monitor
       - "{{.PIO}} device monitor -e {{.PIO_ENV}} --port {{.PIO_PORT}}"
 
   fw:erase:
     desc: Erase the entire flash (nukes WiFi creds, EQ, presets — use sparingly)
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: erase
       - "{{.PIO}} run -e {{.PIO_ENV}} -t erase --upload-port {{.PIO_PORT}}"
 
   fw:clean:
-    desc: Drop PlatformIO build cache for this env
+    desc: Drop PlatformIO build cache for PIO_ENV
     dir: "{{.FW_DIR}}"
     cmds:
+      - task: _fw_check
+        vars: { PIO_ENV: "{{.PIO_ENV}}" }
       - "{{.PIO}} run -e {{.PIO_ENV}} -t clean"
 
   # ---------- snapcast server -------------------------------------------------
@@ -290,9 +452,13 @@ tasks:
   # ---------- composite -------------------------------------------------------
 
   up:
-    desc: fw:all + snap:up (full bring-up after a fresh clone)
+    desc: fw:all + snap:up (full bring-up after a fresh clone; pass PIO_ENV for Louder)
     cmds:
       - task: fw:all
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
       - task: snap:up
 
   down:

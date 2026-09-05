@@ -78,7 +78,8 @@ enum class AudioSource : uint8_t {
 
 enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };
 enum class StereoMode : uint8_t { Stereo = 0, Mono = 1 };
-/** Louder TAS only. Amped is always Ganged (one software cascade). */
+/** Louder TAS only. Amped is always Ganged (one software cascade; Core 1
+ *  budget — do not add a second curve, see docs/eq.md). */
 enum class EqChannelMode : uint8_t { Ganged = 0, Split = 1 };
 
 // Phase 5 — Wi-Fi power-save selector. Default `None` matches pre-Phase-5

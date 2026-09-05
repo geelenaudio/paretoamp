@@ -7,6 +7,7 @@
 #include "idf_config_manager.h"
 #include "idf_wifi_manager.h"
 #include "eq_types.h"
+#include "eq_coeffs.h"
 #include "hal/hal_board.h"
 #include "hal/dac.h"
 #include "hal/led.h"
@@ -98,6 +99,43 @@ static esp_err_t send_err_json(httpd_req_t* req, httpd_err_code_t code, const ch
   free(out);
   return rc;
 }
+
+#if HAL_HAS_HW_PEQ
+static esp_err_t send_hw_slots_exceeded(httpd_req_t* req, size_t slots, const char* channel) {
+  cJSON* r = cJSON_CreateObject();
+  cJSON_AddStringToObject(r, "error", "hw_slots_exceeded");
+  cJSON_AddNumberToObject(r, "slots", (double)slots);
+  cJSON_AddNumberToObject(r, "max_slots", (double)geelen::EQ_HW_MAX_SLOTS);
+  cJSON_AddStringToObject(r, "channel", channel ? channel : "left");
+  char* out = cJSON_PrintUnformatted(r);
+  cJSON_Delete(r);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_status(req, "400 Bad Request");
+  esp_err_t rc = httpd_resp_send(req, out ? out : "{}", HTTPD_RESP_USE_STRLEN);
+  free(out);
+  return rc;
+}
+
+static bool eq_hw_slots_ok(const ParametricBand* left, const ParametricBand* right,
+                           uint8_t band_count, bool split,
+                           size_t* out_slots, const char** out_ch) {
+  const size_t l = geelen::eqHwSlotTotal(left, band_count);
+  if (l > geelen::EQ_HW_MAX_SLOTS) {
+    if (out_slots) *out_slots = l;
+    if (out_ch) *out_ch = "left";
+    return false;
+  }
+  if (split && right) {
+    const size_t r = geelen::eqHwSlotTotal(right, band_count);
+    if (r > geelen::EQ_HW_MAX_SLOTS) {
+      if (out_slots) *out_slots = r;
+      if (out_ch) *out_ch = "right";
+      return false;
+    }
+  }
+  return true;
+}
+#endif
 
 static esp_err_t send_ok(httpd_req_t* req) {
   cJSON* r = cJSON_CreateObject();
@@ -276,11 +314,13 @@ static bool jsonToBand(const cJSON* o, ParametricBand* out) {
   return true;
 }
 
-// EQ backend for `/api/state.eq.backend` — mirrors what
-// `AudioEngine`/`geelen_hal::dacApplyPeqBands` are actually doing. Values:
+// EQ backend for `/api/state.eq.backend` — where the curve runs when
+// `enabled` is true (independent of the on/off flag). Values:
 //   "software"             — cascade lives in the AudioEngine (Amped).
-//   "hardware"             — DAC applied the biquads in HW (Louder OK).
-//   "software (fallback)"  — Louder HW upload failed, dropped back to SW.
+//   "hardware"             — native Louder path (TAS Book 0xAA); also
+//                            reported when HW PEQ is bypassed (`enabled`
+//                            false), not a software cascade.
+//   "software (fallback)"  — Louder HW upload failed while enabled.
 static const char* g_eq_backend = "software";
 extern "C" void geelen_eq_set_backend(const char* label) {
   if (label && *label) g_eq_backend = label;
@@ -302,12 +342,18 @@ static void fill_eq_object(cJSON* eq, ConfigManager* cfg) {
   cJSON_AddNumberToObject(eq, "band_count", band_count);
   cJSON_AddNumberToObject(eq, "max_bands", (double)HAL_EQ_MAX_BANDS_ACTIVE);
   cJSON_AddStringToObject(eq, "backend", g_eq_backend);
+  // Louder TAS only. Amped stays ganged — Core 1 budget, see docs/eq.md.
   cJSON_AddBoolToObject(eq, "supports_split", HAL_HAS_HW_PEQ ? true : false);
   cJSON_AddStringToObject(eq, "channel_mode",
                           cfg->getEqChannelMode() == EqChannelMode::Split ? "split" : "ganged");
   cJSON_AddItemToObject(eq, "bands", bandsToJsonArray(left));
 #if HAL_HAS_HW_PEQ
   cJSON_AddItemToObject(eq, "bands_r", bandsToJsonArray(right));
+  cJSON_AddNumberToObject(eq, "max_hw_slots", (double)geelen::EQ_HW_MAX_SLOTS);
+  cJSON_AddNumberToObject(eq, "hw_slots",
+                          (double)geelen::eqHwSlotTotal(left, band_count));
+  cJSON_AddNumberToObject(eq, "hw_slots_r",
+                          (double)geelen::eqHwSlotTotal(right, band_count));
 #endif
   cJSON* hr = cJSON_CreateObject();
   cJSON_AddStringToObject(hr, "mode",
@@ -1161,25 +1207,32 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
   cfg->getEqBands(bands);
   cfg->getEqBandsR(bands_r);
 
+  EqChannelMode mode = cfg->getEqChannelMode();
   const cJSON* modej = cJSON_GetObjectItemCaseSensitive(body, "channel_mode");
   if (cJSON_IsString(modej) && modej->valuestring) {
     if (!strcmp(modej->valuestring, "split")) {
-      cfg->setEqChannelMode(EqChannelMode::Split);
+      mode = EqChannelMode::Split;
     } else if (!strcmp(modej->valuestring, "ganged")) {
-      cfg->setEqChannelMode(EqChannelMode::Ganged);
+      mode = EqChannelMode::Ganged;
     }
   }
+#if !HAL_HAS_HW_PEQ
+  // Amped: coerce split → ganged. Do not grow a second software cascade
+  // (docs/eq.md). A Louder split preset still applies the left curve.
+  mode = EqChannelMode::Ganged;
+#endif
 
   // `band_count` is clamped to the board's runtime cap
   // (`HAL_EQ_MAX_BANDS_ACTIVE`). Storage still holds up to 15 bands so a
   // preset created on Louder round-trips through Amped without losing
   // metadata — Amped just refuses to *activate* more than 10 bands.
+  uint8_t band_count = cfg->getEqActiveBands();
   const cJSON* bcj = cJSON_GetObjectItemCaseSensitive(body, "band_count");
   if (cJSON_IsNumber(bcj)) {
     int v = (int)cJSON_GetNumberValue(bcj);
     if (v < 1) v = 1;
     if (v > HAL_EQ_MAX_BANDS_ACTIVE) v = HAL_EQ_MAX_BANDS_ACTIVE;
-    cfg->setEqActiveBands((uint8_t)v);
+    band_count = (uint8_t)v;
   }
 
   const cJSON* arr = cJSON_GetObjectItemCaseSensitive(body, "bands");
@@ -1203,7 +1256,21 @@ static esp_err_t handle_post_eq(httpd_req_t* req) {
     }
   }
 
+#if HAL_HAS_HW_PEQ
+  {
+    size_t slots = 0;
+    const char* ch = "left";
+    if (!eq_hw_slots_ok(bands, bands_r, band_count, mode == EqChannelMode::Split,
+                        &slots, &ch)) {
+      cJSON_Delete(body);
+      return send_hw_slots_exceeded(req, slots, ch);
+    }
+  }
+#endif
+
   const bool enabled = jbool(body, "enabled", cfg->getEqEnabled());
+  cfg->setEqChannelMode(mode);
+  cfg->setEqActiveBands(band_count);
   cfg->setEqBands(bands);
   if (cfg->getEqChannelMode() == EqChannelMode::Split) {
     cfg->setEqBandsR(bands_r);
@@ -1527,14 +1594,24 @@ static esp_err_t handle_presets_route(httpd_req_t* req) {
   if (!strcmp(action, "load")) {
     PresetFileV4 pf{};
     if (!presetReadV4(idx, &pf)) return send_err_json(req, HTTPD_404_NOT_FOUND, "slot empty");
+    uint8_t bc = pf.band_count;
+    if (bc > HAL_EQ_MAX_BANDS_ACTIVE) bc = HAL_EQ_MAX_BANDS_ACTIVE;
+#if HAL_HAS_HW_PEQ
+    {
+      const bool split = (pf.channel_mode == 1);
+      size_t slots = 0;
+      const char* ch = "left";
+      if (!eq_hw_slots_ok(pf.bands, pf.bands_r, bc, split, &slots, &ch)) {
+        return send_hw_slots_exceeded(req, slots, ch);
+      }
+    }
+#endif
     const bool split = (pf.channel_mode == 1);
     cfg->setEqChannelMode(split ? EqChannelMode::Split : EqChannelMode::Ganged);
     cfg->setEqBands(pf.bands);
     if (cfg->getEqChannelMode() == EqChannelMode::Split) {
       cfg->setEqBandsR(pf.bands_r);
     }
-    uint8_t bc = pf.band_count;
-    if (bc > HAL_EQ_MAX_BANDS_ACTIVE) bc = HAL_EQ_MAX_BANDS_ACTIVE;
     cfg->setEqActiveBands(bc);
     cfg->setEqActiveSlot((uint8_t)idx);
     if (&on_eq_changed) on_eq_changed();

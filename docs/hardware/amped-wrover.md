@@ -37,9 +37,11 @@ end-to-end on `/dev/ttyUSB0`.
   not programmed by this firmware — flashing an Amped env always stays
   on the software path.
 - Cascade lives in `AudioEngine::processSamples` (biquads + first-order
-  LP/HP). Preset storage is 15 bands so a preset created on Louder round-
-  trips through Amped without losing metadata; only the first 10 are pushed
-  to the DSP.
+  LP/HP). Always **ganged**: one curve, stereo delay lines. Independent
+  L/R software EQ is out of scope (Core 1 is already at the 10-band
+  budget; Unlink is Louder TAS only — [eq.md](../eq.md)). Preset storage
+  is 15 bands so a preset created on Louder round-trips through Amped
+  without losing metadata; only the first 10 are pushed to the DSP.
 - Related file: [`docs/eq.md`](../eq.md).
 
 ## PSRAM
@@ -75,6 +77,8 @@ end-to-end on `/dev/ttyUSB0`.
   (`POST /api/led`). All peaks are capped by max duty.
 
 ## Flashing this variant
+
+From the repo root: `task fw:amped`. Raw PlatformIO:
 
 ```bash
 pio run -e amped-esp32-idf -t uploadfs   # SPIFFS assets

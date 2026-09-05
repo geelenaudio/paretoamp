@@ -61,10 +61,12 @@ It enqueues:
 
 Since the PCM is already resident in PSRAM, the serializer feeds the
 first clip immediately — there is no "boot settle" ladder. After each
-clip it drains the engine ring to ~340 ms, then plays the next, and
-only after the last one drops the producer-side gate. When the boot
-pair has finished it posts `EV_VOICE_BOOT_DONE` so DLNA's SOAP `Play`
-handler can stop waiting.
+clip it drains the engine ring to ~340 ms, then plays the next. After
+the last queued clip it first feeds ~400 ms of silence (`AUDIO_LOW_WATER_MS
++ 100`) so the engine's low-water rebuffer abandons zeros rather than
+the last syllable, then drains to ~340 ms and drops the producer-side
+gate. When the boot pair has finished it posts `EV_VOICE_BOOT_DONE` so
+DLNA's SOAP `Play` handler can stop waiting.
 
 ### Runtime BT prompts
 

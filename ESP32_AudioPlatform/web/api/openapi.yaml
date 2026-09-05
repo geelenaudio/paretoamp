@@ -3,6 +3,9 @@ info:
   title: Geelen Audio Device API
   summary: On-device REST + SSE API for the Geelen ESP32 audio amplifier.
   description: |
+    Developed by [Geelen Audio](https://geelen.audio/). Source:
+    [geelenaudio/paretoamp](https://github.com/geelenaudio/paretoamp).
+
     Every endpoint served at `/api/*` by the firmware. This spec is the single
     source of truth: both the firmware handlers (`src/idf_api.cpp`) and the
     SPA (`web/api.js`) must conform byte-for-byte to the schemas defined
@@ -20,14 +23,20 @@ info:
   version: 0.4.0
   contact:
     name: Geelen Audio
-    url: https://github.com/geelen/ESP32_AudioPlatform
+    url: https://geelen.audio/
   license:
     name: GPL-3.0-or-later
     url: https://www.gnu.org/licenses/gpl-3.0.txt
 
+externalDocs:
+  description: Pareto Amp source
+  url: https://github.com/geelenaudio/paretoamp
+
 servers:
+  - url: /
+    description: This device (same origin as the docs page)
   - url: http://geelen.local
-    description: Local device (mDNS)
+    description: mDNS hostname
   - url: http://{host}
     description: Arbitrary host / IP
     variables:
@@ -604,15 +613,22 @@ paths:
 
         Each band has a `type` (`bell`, `low_shelf`, `high_shelf`, `notch`,
         `low_pass`, `high_pass`) and optional `slope_db_oct` (**6**, **12**, or
-        **24**) for low-pass / high-pass only.
+        **24**) for low-pass / high-pass only. On Louder (`HAL_HAS_HW_PEQ`),
+        24 dB/oct HP/LP uses **two** of the 15 TAS biquad slots; other
+        types use one. `POST /api/eq` returns **400** `hw_slots_exceeded`
+        if the active bands would need more than 15 slots on either
+        channel. Amped software PEQ does not enforce this (10 bands × 2
+        stages still fits the 30-stage cascade).
 
         The firmware clamps frequencies, gains, and Q before storage. On
         Louder boards the coefficients are pushed to independent Book 0xAA
         banks; TAS5825M gang=0 when split. The response's `backend` field
-        reports the actual applied backend ("hardware", "software", or
-        "software (fallback)" when the HW upload failed — fallback stays
-        ganged on the left curve). The response also includes `headroom`
-        (auto attenuation is max of L and R peaks).
+        reports where the curve runs when `enabled` is true ("hardware",
+        "software", or "software (fallback)" when the HW upload failed —
+        fallback stays ganged on the left curve). Independent of `enabled`:
+        when EQ is off no cascade is applied, but Louder still reports
+        `"hardware"`. The response also includes `headroom` (auto
+        attenuation is max of L and R peaks).
       operationId: setEqCurve
       requestBody:
         required: true
@@ -644,8 +660,24 @@ paths:
                       backend:
                         type: string
                         enum: [software, hardware, "software (fallback)"]
-                        description: Which EQ backend is currently applied.
+                        description: |
+                          Where the curve runs when `enabled` is true.
+                          Independent of `enabled`; Louder reports
+                          `hardware` even when EQ is off.
                       headroom: { $ref: "#/components/schemas/HeadroomSetting" }
+        "400":
+          description: |
+            Louder only: the merged curve needs more than 15 TAS biquad
+            slots on a channel (`24` dB/oct HP/LP counts as two). Amped
+            never returns this.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HwSlotsExceeded" }
+              example:
+                error: hw_slots_exceeded
+                slots: 16
+                max_slots: 15
+                channel: left
 
   /api/eq/headroom:
     post:
@@ -726,6 +758,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "400":
+          description: Louder only — preset expands past 15 TAS slots.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HwSlotsExceeded" }
 
   /api/eq/presets/{idx}/rename:
     post:
@@ -1129,7 +1166,10 @@ components:
           type: integer
           enum: [6, 12, 24]
           default: 12
-          description: "Rolloff for low_pass and high_pass only."
+          description: |
+            Rolloff for low_pass and high_pass only. On Louder, 24 dB/oct
+            occupies two TAS biquad slots; 6 and 12 occupy one. Amped has
+            no slot budget.
 
     EqCurve:
       type: object
@@ -1162,13 +1202,27 @@ components:
           items: { $ref: "#/components/schemas/EqBand" }
         supports_split:
           type: boolean
-          description: True on Louder (`HAL_HAS_HW_PEQ`). Amped is always false.
+          description: |
+            True on Louder (`HAL_HAS_HW_PEQ`). Amped is always false —
+            software Unlink is out of scope (10-band ganged cascade already
+            saturates Core 1; see docs/eq.md).
         channel_mode:
           type: string
           enum: [ganged, split]
           description: |
             Ganged = one curve on both channels. Split = independent L/R
             (Louder hardware only). Amped always reports ganged.
+        max_hw_slots:
+          type: integer
+          description: |
+            Present on Louder only (15 TAS biquad slots per channel).
+            Amped omits this — software PEQ has no 15-slot cap.
+        hw_slots:
+          type: integer
+          description: Nominal slots used by the left / ganged active bands (Louder).
+        hw_slots_r:
+          type: integer
+          description: Nominal slots used by the right active bands (Louder).
 
     EqCurveUpdate:
       type: object
@@ -1300,7 +1354,10 @@ components:
                 backend:
                   type: string
                   enum: [software, hardware, "software (fallback)"]
-                  description: Which EQ backend is currently applied.
+                  description: |
+                    Where the curve runs when `enabled` is true.
+                    Independent of `enabled`; Louder reports `hardware`
+                    even when EQ is off.
                 headroom: { $ref: "#/components/schemas/HeadroomSetting" }
                 active_slot:
                   type: integer
@@ -1313,6 +1370,18 @@ components:
                 bands_r:
                   type: array
                   items: { $ref: "#/components/schemas/EqBand" }
+                max_hw_slots:
+                  type: integer
+                  description: |
+                    TAS biquad slots per channel (15). Present on Louder
+                    only. Amped omits this field (software cascade has no
+                    15-slot cap).
+                hw_slots:
+                  type: integer
+                  description: Nominal TAS slots used by the left / ganged active bands.
+                hw_slots_r:
+                  type: integer
+                  description: Nominal TAS slots used by the right active bands (Louder).
 
     WifiSetting:
       type: object
@@ -1528,3 +1597,14 @@ components:
       required: [error]
       properties:
         error: { type: string }
+
+    HwSlotsExceeded:
+      type: object
+      required: [error, slots, max_slots, channel]
+      properties:
+        error:
+          type: string
+          enum: [hw_slots_exceeded]
+        slots: { type: integer, description: Nominal TAS slots the rejected curve would need. }
+        max_slots: { type: integer, enum: [15] }
+        channel: { type: string, enum: [left, right] }

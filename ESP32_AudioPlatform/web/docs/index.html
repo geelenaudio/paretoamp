@@ -4,21 +4,60 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Geelen Audio — API reference</title>
-  <link rel="stylesheet" href="/docs/ui.css" />
   <style>
-    body { margin: 0; background: #fafafa; }
+    body { margin: 0; background: #fafafa; font-family: system-ui, sans-serif; }
     .topbar { display: none; }
     .swagger-ui .scheme-container { background: #f7f7f7; }
+    #status { padding: 1.25rem 1.5rem; color: #555; }
   </style>
 </head>
 <body>
+  <p id="status">Loading API docs…</p>
   <div id="swagger-ui"></div>
-  <script src="/docs/ui.js" charset="UTF-8"></script>
   <script>
-    // Standalone Swagger UI pointed at the device's OpenAPI spec. Lives in
-    // SPIFFS alongside the spec so the docs work even when the device has
-    // no upstream connectivity.
-    window.onload = function () {
+    // The on-device Swagger UI bundle is ~400 KiB gzipped and saturates the
+    // ESP32 HTTP stack. Prefer a CDN copy (browser has internet; device
+    // does not need to). Fall back to the SPIFFS bundle, then to the raw spec.
+    const CSS = [
+      "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css",
+      "https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css",
+      "/docs/ui.css",
+    ];
+    const JS = [
+      "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js",
+      "https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js",
+      "/docs/ui.js",
+    ];
+
+    function loadCss(hrefs, i) {
+      if (i >= hrefs.length) return;
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = hrefs[i];
+      l.onerror = function () { loadCss(hrefs, i + 1); };
+      document.head.appendChild(l);
+    }
+
+    function loadScript(hrefs, i, onload) {
+      if (i >= hrefs.length) {
+        document.getElementById("status").innerHTML =
+          'Could not load Swagger UI. The OpenAPI spec is still at <a href="/openapi.yaml">/openapi.yaml</a>.';
+        return;
+      }
+      if (hrefs[i].indexOf("/docs/ui.js") === 0) {
+        document.getElementById("status").textContent =
+          "CDN unavailable — loading bundled Swagger UI from the device (slow)…";
+      }
+      const s = document.createElement("script");
+      s.src = hrefs[i];
+      s.charset = "UTF-8";
+      s.onload = onload;
+      s.onerror = function () { loadScript(hrefs, i + 1, onload); };
+      document.body.appendChild(s);
+    }
+
+    function boot() {
+      document.getElementById("status").style.display = "none";
       window.ui = SwaggerUIBundle({
         url: "/openapi.yaml",
         dom_id: "#swagger-ui",
@@ -26,7 +65,10 @@
         tryItOutEnabled: true,
         presets: [SwaggerUIBundle.presets.apis],
       });
-    };
+    }
+
+    loadCss(CSS, 0);
+    loadScript(JS, 0, boot);
   </script>
 </body>
 </html>

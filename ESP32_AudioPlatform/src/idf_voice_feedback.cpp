@@ -3,9 +3,11 @@
 // Phase 2: the prompt path is pure PCM. No Helix, no command mailbox, no
 // 12 s safety caps. The voice task pulls a `voice_clip_id_t` off the queue,
 // looks up the pre-decoded PCM in `idf_voice_cache`, and feeds it to the
-// engine ring in 1024-frame chunks paced just above realtime. After every
-// clip we post `EV_VOICE_PROMPT_FINISHED`; after the last queued boot clip
-// we post `EV_VOICE_BOOT_DONE` AND give the legacy boot-done semaphore so
+// engine ring in 1024-frame chunks paced just above realtime. The last
+// queued clip is followed by ~400 ms of silence so the engine's low-water
+// rebuffer abandons zeros rather than the last syllable. After every clip
+// we post `EV_VOICE_PROMPT_FINISHED`; after the last queued boot clip we
+// post `EV_VOICE_BOOT_DONE` AND give the legacy boot-done semaphore so
 // existing waiters (DLNA SOAP `Play`, test-tone start) keep working without
 // a rewrite of those callsites.
 
@@ -61,6 +63,19 @@ SemaphoreHandle_t s_boot_done_sem = nullptr;
 QueueHandle_t s_prompt_queue = nullptr;
 TaskHandle_t s_voice_task_handle = nullptr;
 
+// Feed pacing shared by clip PCM and the last-clip silence pad. 1024 frames
+// ≈ 23 ms at 44.1 kHz; sleeping 18 ms between chunks is ~1.27× realtime —
+// fast enough that a 1.5 s clip finishes feeding in ~1.2 s wallclock
+// without the ring (~2 s capacity) ever filling past ~80 %.
+constexpr size_t kFeedChunkFrames = 1024;
+constexpr int kFeedChunkDelayMs = 18;
+
+// Extra silence after the last queued clip. The engine rebuffers below
+// AUDIO_LOW_WATER_MS and abandons whatever is still in the ring, so this
+// pad must be longer than that abandoned zone. Drain then stops at
+// low-water + 40 ms (~340 ms) with only silence remaining.
+constexpr uint32_t kLastClipSilenceMs = geelen::AUDIO_LOW_WATER_MS + 100;
+
 // Block until the engine ring has drained back close to its low-water mark
 // before dropping the producer gate. Without this, A2DP/Snap PCM would
 // splice in during the rebuffer-margin window and the clip's tail would
@@ -77,25 +92,42 @@ void drainEngineTail() {
   }
 }
 
-// Feed one fully-decoded clip to the engine ring, paced slightly above
-// realtime so the ring fills (and crosses prefill on cold boot) without
-// overflowing. 1024 frames ≈ 23 ms of audio at 44.1 kHz; sleeping 18 ms
-// between chunks gives ~1.27× realtime — fast enough that a 1.5 s clip
-// finishes feeding in ~1.2 s wallclock without the ring (~2 s capacity)
-// ever filling past ~80 %.
-void feedClipToEngine(const VoiceClip& c) {
-  if (!s_eng || !c.pcm || c.frame_count == 0) return;
-  constexpr size_t kChunkFrames = 1024;
-  constexpr int kChunkDelayMs = 18;
+void feedPcmFrames(const int16_t* pcm, size_t frame_count) {
+  if (!s_eng || !pcm || frame_count == 0) return;
   size_t pos = 0;
-  while (pos < c.frame_count) {
-    const size_t n = (kChunkFrames < c.frame_count - pos) ? kChunkFrames
-                                                          : (c.frame_count - pos);
-    s_eng->feedPCM(reinterpret_cast<const uint8_t*>(c.pcm + pos * 2),
+  while (pos < frame_count) {
+    const size_t n = (kFeedChunkFrames < frame_count - pos) ? kFeedChunkFrames
+                                                            : (frame_count - pos);
+    s_eng->feedPCM(reinterpret_cast<const uint8_t*>(pcm + pos * 2),
                    n * 2 * sizeof(int16_t));
     pos += n;
-    if (pos < c.frame_count) {
-      vTaskDelay(pdMS_TO_TICKS(kChunkDelayMs));
+    if (pos < frame_count) {
+      vTaskDelay(pdMS_TO_TICKS(kFeedChunkDelayMs));
+    }
+  }
+}
+
+void feedClipToEngine(const VoiceClip& c) {
+  if (!c.pcm || c.frame_count == 0) return;
+  feedPcmFrames(c.pcm, c.frame_count);
+}
+
+// Paced zeros so the last clip's speech is fully consumed past low-water
+// before drainEngineTail returns. The engine then abandons ~300 ms of
+// silence rather than the last syllable. Same chunk/delay as feedPcmFrames;
+// kZeros is only one chunk long so we loop here instead of one call.
+void feedSilence(size_t frame_count) {
+  static const int16_t kZeros[kFeedChunkFrames * 2] = {};
+  if (!s_eng || frame_count == 0) return;
+  size_t pos = 0;
+  while (pos < frame_count) {
+    const size_t n = (kFeedChunkFrames < frame_count - pos) ? kFeedChunkFrames
+                                                            : (frame_count - pos);
+    s_eng->feedPCM(reinterpret_cast<const uint8_t*>(kZeros),
+                   n * 2 * sizeof(int16_t));
+    pos += n;
+    if (pos < frame_count) {
+      vTaskDelay(pdMS_TO_TICKS(kFeedChunkDelayMs));
     }
   }
 }
@@ -125,6 +157,14 @@ void voice_task(void*) {
                (unsigned)item.id, (int)item.is_boot,
                s_voice_owners.load(std::memory_order_relaxed));
       feedClipToEngine(*clip);
+      // Last clip in the queue: pad past the engine's rebuffer threshold so
+      // the abandoned ring tail is silence, not the last syllable. Mid-sequence
+      // clips skip this — the next clip tops the ring up and their tails play.
+      if (uxQueueMessagesWaiting(s_prompt_queue) == 0) {
+        const size_t silence_frames =
+            (size_t)((uint64_t)geelen::SAMPLE_RATE * kLastClipSilenceMs / 1000);
+        feedSilence(silence_frames);
+      }
       drainEngineTail();
     } else {
       ESP_LOGW(TAG, "skipping unloaded clip id=%u", (unsigned)item.id);

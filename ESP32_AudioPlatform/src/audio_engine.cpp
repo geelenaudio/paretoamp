@@ -337,6 +337,10 @@ IRAM_ATTR void AudioEngine::processSamples(int16_t* buf, size_t num_frames) {
 
   Cascade& c = cascade_;
   const bool eq_active = c.enabled && c.stage_count > 0;
+  // Ganged stereo DF1: same b0..a2 for L and R, independent delay state.
+  // A split Amped curve would still be N_L + N_R evals (not 2× this loop)
+  // but extra DRAM coeff loads on a path that already reports dma_wait
+  // ~12–20% on Amped-WROVER. Keep one stage list; see docs/eq.md.
   for (size_t f = 0; f < num_frames; f++) {
     float L = (float)buf[f * 2];
     float R = (float)buf[f * 2 + 1];
@@ -624,6 +628,8 @@ bool AudioEngine::process() {
     // With portMAX_DELAY that is almost all "blocked until DMA has room" — i.e. the
     // hardware clock pacing realtime output. High values (~60–80%) are normal and
     // mean the task is *not* busy-spinning between chunks. Math: blocked_us/(elapsed_ms*10).
+    // Amped software 10-band PEQ often reports ~12–20% — that is compute-bound,
+    // not healthy slack. Do not add a second software curve (docs/eq.md).
     const unsigned blocked_pct =
       elapsed_ms > 0 ? (unsigned)(blocked_delta / (10ULL * (uint64_t)elapsed_ms)) : 0;
     last_stats_blocked_us_ = blocked_now;

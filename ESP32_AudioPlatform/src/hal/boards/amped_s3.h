@@ -53,6 +53,7 @@
 #endif
 
 // ---- EQ cap ---------------------------------------------------------------
+// Same 10-band ganged software PEQ as Amped-WROVER. No Unlink (docs/eq.md).
 #define HAL_EQ_MAX_BANDS_ACTIVE 10
 
 #define HAL_HAS_ENCODER 0

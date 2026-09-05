@@ -117,6 +117,8 @@ debounce. Common of A/B/SW to GND.
 
 ## Flashing
 
+From the repo root: `task fw:louder`. Raw PlatformIO:
+
 ```bash
 pio run -e louder-esp32-idf -t upload
 pio run -e louder-esp32-idf -t uploadfs

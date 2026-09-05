@@ -149,8 +149,19 @@ extern "C" void geelen_engine_read_output_meters(float* pl, float* pr, float* rl
 // Push EQ from NVS into the engine / TAS, then apply headroom.
 // Louder: hardware PEQ (independent L/R banks when split). If I2C fails,
 // software fallback stays ganged on the left curve — do not run two
-// software cascades. Amped: one software cascade on the left/ganged curve.
+// software cascades. Amped: one software cascade on the left/ganged curve
+// (Core 1 budget; Unlink is Louder-only — see docs/eq.md).
 extern "C" void geelen_eq_set_backend(const char* label);
+
+static float peak_from_bands(const geelen::EqBand* left, const geelen::EqBand* right, uint8_t n,
+                             bool split) {
+  const float pL = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, left, n);
+  float pR = pL;
+  if (split && right) {
+    pR = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, right, n);
+  }
+  return pL > pR ? pL : pR;
+}
 
 static float peak_from_cfg() {
   if (!g_cfg.getEqEnabled()) return 0.f;
@@ -159,14 +170,9 @@ static float peak_from_cfg() {
   g_cfg.getEqBands(left);
   g_cfg.getEqBandsR(right);
   const uint8_t n = g_cfg.getEqActiveBands();
-  const auto* l = reinterpret_cast<const geelen::EqBand*>(left);
-  const auto* r = reinterpret_cast<const geelen::EqBand*>(right);
-  const float pL = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, l, n);
-  float pR = pL;
-  if (g_cfg.getEqChannelMode() == geelen_idf::EqChannelMode::Split) {
-    pR = geelen::eqPeakGainDb((float)geelen::SAMPLE_RATE, r, n);
-  }
-  return pL > pR ? pL : pR;
+  const bool split = (g_cfg.getEqChannelMode() == geelen_idf::EqChannelMode::Split);
+  return peak_from_bands(reinterpret_cast<const geelen::EqBand*>(left),
+                         reinterpret_cast<const geelen::EqBand*>(right), n, split);
 }
 
 // In Auto mode the headroom dB equals -peak gain of the louder of L/R so
@@ -205,6 +211,13 @@ static void apply_eq_from_cfg() {
     g_engine.setEqCurve(eq_l, band_count, /*enabled*/ true);
     g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
     geelen_eq_set_backend("software (fallback)");
+  } else if (geelen_hal::dacSupportsHwPeq()) {
+    // EQ off on a HW-PEQ board: bypass both paths, report the native
+    // backend (not "software") so `state.eq.backend` stays independent
+    // of `enabled`.
+    g_engine.setEqCurve(eq_l, band_count, /*enabled*/ false);
+    g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Hardware);
+    geelen_eq_set_backend("hardware");
   } else {
     g_engine.setEqCurve(eq_l, band_count, enabled);
     g_engine.setEqBackend(geelen::AudioEngine::EqBackend::Software);
@@ -213,7 +226,7 @@ static void apply_eq_from_cfg() {
 
   float db = g_cfg.getHeadroomManualDb();
   if (g_cfg.getHeadroomMode() == geelen_idf::HeadroomMode::Auto) {
-    const float peak = peak_from_cfg();
+    const float peak = enabled ? peak_from_bands(eq_l, eq_r, band_count, split) : 0.f;
     db = peak > 0.f ? -peak : 0.f;
   }
   g_engine.setHeadroomDb(db);

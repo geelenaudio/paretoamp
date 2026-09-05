@@ -184,6 +184,11 @@ CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # audio + httpd. Documented in docs/architecture.md.
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
 
+# Louder `app_main` expands HW PEQ (two 30-stage lists) then sweeps peak
+# gain and talks I2C. IDF's 3584-byte main stack overflowed there; Louder
+# sdkconfig files set CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192. Amped stays
+# on the default.
+
 # mDNS responder: one _http._tcp service, STA only, PSRAM task/heap so we
 # do not steal internal DRAM from A2DP + httpd. See docs/identity.md.
 CONFIG_MDNS_MAX_SERVICES=2

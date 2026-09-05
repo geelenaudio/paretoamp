@@ -28,10 +28,20 @@ advertises `state.eq.supports_split`. The SPA **Unlink** toggle sets
 separately, with **Copy L→R / R→L**. Relink confirms, then gangs from
 **left**.
 
-Amped never splits: independent software curves would double EQ math in
-`processSamples`. `supports_split` is false, `channel_mode` is always
-`"ganged"`, and a Louder split preset loaded on Amped applies the **left**
-curve only (no 400).
+Amped never splits (`supports_split` is false, `channel_mode` is always
+`"ganged"`). A Louder split preset loaded on Amped applies the **left**
+curve only (no 400). This is a Core 1 budget decision, not missing stereo
+IIR: `processSamples` already runs the same coefficients through independent
+L and R delay lines. A second curve would not double the biquad MACs in the
+usual 10+10 bell case, but it would add coefficient traffic and a denser
+worst case (24 dB/oct on both sides) on a path that is already compute-bound.
+
+On Amped-WROVER with 10-band software PEQ, A2DP, and STA, `dma_wait` is
+typically **12–20%** (healthy I2S pacing is ~60–80%; low wait means the FPU
+is filling the chunk) and Core 1 sits around **90%+**. The leftover window
+is what `a2dp_pump` and httpd run in. Unlink on Amped is **out of scope**;
+spend any remaining budget on the existing 10-band cascade, not a second
+curve. Independent L/R EQ belongs on Louder, where it is free in silicon.
 
 If Louder I2C upload fails, software fallback is **ganged on the left
 curve** — not two software cascades. `backend` stays `"hardware"` or
@@ -47,6 +57,15 @@ from L), `eq_ch_mode` (0 ganged / 1 split). One `eq_on` and one
 
 Presets are **V4** (`EGP4`) with `channel_mode` and a second 15-band array.
 V3 files load as ganged (R=L).
+
+## TAS 15-slot budget (Louder only)
+
+Each TAS channel has **15** biquad slots. 24 dB/oct low-pass / high-pass
+uses two; every other type and slope uses one. The SPA shrinks the
+active-band slider as you pick 24 dB/oct. `POST /api/eq` returns 400
+`hw_slots_exceeded` if a write would overflow. Amped software PEQ does
+**not** have this limit (`EQ_MAX_STAGES_PER_LAYER` is 30; 10 × 24 dB/oct
+fits).
 
 `GET /api/state` reports:
 
@@ -64,10 +83,13 @@ V3 files load as ganged (R=L).
 }
 ```
 
-On Louder, `supports_split` is true and `bands_r` is always present.
+On Louder, `supports_split` is true and `bands_r` is always present, plus
+`max_hw_slots` (15), `hw_slots`, and `hw_slots_r`.
 
 `backend` is `"software"`, `"hardware"`, or `"software (fallback)"` when a
-Louder I2C upload fails for the session.
+Louder I2C upload fails for the session. It is independent of `enabled`:
+when EQ is off no cascade is applied, but Louder still reports
+`"hardware"` (the native path) rather than `"software"`.
 
 Bluetooth AVRCP, the encoder, SPA, and NVS all share the same **0–100%**
 control value. Hardware register mapping is private to the Louder HAL.
