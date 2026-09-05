@@ -38,6 +38,9 @@ IR / mic / TFT stay out of scope.
 
 ## Flashing
 
+From the repo root: `task fw:louder-s3`. S3 often enumerates as `/dev/ttyACM0`
+(`task fw:louder-s3 PIO_PORT=/dev/ttyACM0`). Raw PlatformIO:
+
 ```bash
 pio run -e louder-esp32s3-idf -t upload
 pio run -e louder-esp32s3-idf -t uploadfs

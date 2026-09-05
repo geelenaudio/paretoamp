@@ -10,6 +10,7 @@ already shipped.
 ## EQ / DSP
 
 - [x] Per-channel (L/R) EQ: expose `eq.channel_mode` and store two 15-band curves (Louder HW only; Amped stays ganged).
+- Amped software Unlink is **out of scope**. The ganged 10-band stereo cascade already saturates Core 1 on Amped-WROVER (`dma_wait` ~12–20% with A2DP+STA). A second curve is not 2× MACs, but there is no slack for extra coeff loads or 24 dB/oct on both sides. Independent L/R belongs on Louder TAS. See [eq.md](eq.md).
 - [ ] TAS5825M DRC: `GET/POST /api/drc` wrapping sonocotta DRC registers.
 - [ ] ISO 226 loudness contour toggle on top of the user PEQ.
 - [ ] Hardware EQ magnitude readback so the SPA shows the as-applied curve.

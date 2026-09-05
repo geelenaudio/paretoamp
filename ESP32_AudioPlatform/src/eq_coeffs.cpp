@@ -347,4 +347,20 @@ float eqPeakGainDb(float sample_rate, const EqBand* bands, uint8_t active_band_c
   return 20.f * log10f(peak) + EQ_INTERSAMPLE_HEADROOM_DB;
 }
 
+uint8_t eqHwSlotCost(const EqBand& band) {
+  if ((band.type == EqFilterType::LowPass || band.type == EqFilterType::HighPass) &&
+      band.slope_db_oct == 24) {
+    return 2;
+  }
+  return 1;
+}
+
+size_t eqHwSlotTotal(const EqBand* bands, uint8_t active_band_count) {
+  if (!bands) return 0;
+  if (active_band_count > EQ_MAX_BANDS) active_band_count = (uint8_t)EQ_MAX_BANDS;
+  size_t n = 0;
+  for (uint8_t i = 0; i < active_band_count; ++i) n += eqHwSlotCost(bands[i]);
+  return n;
+}
+
 }  // namespace geelen

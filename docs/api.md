@@ -33,15 +33,23 @@ EQ lives on `GET /api/state` (`eq` object) and `POST /api/eq`. There is no
 separate GET for the curve.
 
 **`eq` fields:** `{ enabled, band_count, max_bands, backend, supports_split,
-channel_mode, bands[], bands_r?, headroom, active_slot }`.
+channel_mode, bands[], bands_r?, max_hw_slots?, hw_slots?, hw_slots_r?,
+headroom, active_slot }`.
 
 - `max_bands`: 10 on Amped software PEQ, 15 on Louder TAS hardware PEQ.
 - `backend`: `"software"`, `"hardware"`, or `"software (fallback)"`.
+  Independent of `enabled`. When EQ is off no cascade is applied; Louder
+  still reports `"hardware"` (the native path).
 - `supports_split`: true only on Louder (`HAL_HAS_HW_PEQ`). Amped is always
-  `"ganged"` and omits `bands_r`.
+  `"ganged"` and omits `bands_r` (software Unlink is out of scope; see
+  [eq.md](eq.md)).
 - `channel_mode`: `"ganged"` or `"split"`. `POST /api/eq` accepts optional
   `channel_mode` and `bands_r`. Amped coerces split to ganged (does not 400)
   so a Louder preset still applies using the left curve.
+- Louder only: `max_hw_slots` (15), `hw_slots`, `hw_slots_r`. 24 dB/oct
+  HP/LP counts as two TAS slots. `POST /api/eq` and preset load return
+  **400** `{ error: "hw_slots_exceeded", slots, max_slots, channel }` if
+  the curve cannot fit. Amped never returns this.
 - Presets are V4 (`EGP4`) with both curves; V3 loads as ganged (R=L).
 
 Canonical schema: [`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml).

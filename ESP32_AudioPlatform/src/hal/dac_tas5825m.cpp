@@ -64,6 +64,30 @@ bool s_hw_ready = false;
 bool s_play_ok = false;
 
 #if HAL_HAS_TAS5805M_DRIVER
+// Expanded biquad lists for TAS upload. Kept in BSS, not on the caller
+// stack: `app_main` used to be 3584 bytes and this pair is ~1.4 KiB.
+// Upload is serialized (boot + `on_eq_changed` on the HTTP worker).
+geelen::EqStage s_peq_l[geelen::EQ_MAX_STAGES_PER_LAYER];
+geelen::EqStage s_peq_r[geelen::EQ_MAX_STAGES_PER_LAYER];
+
+static bool write_peq_bank(const geelen::EqStage* stages, size_t n, TAS5805M_EQ_CHANNELS ch) {
+  const size_t slots = (n > geelen::EQ_HW_MAX_SLOTS) ? geelen::EQ_HW_MAX_SLOTS : n;
+  for (uint8_t i = 0; i < geelen::EQ_HW_MAX_SLOTS; ++i) {
+    int32_t hw[5];
+    if (i < slots) {
+      geelen::eqStageToTas5825mQ5_27(stages[i].b0, stages[i].b1, stages[i].b2,
+                                     stages[i].a1, stages[i].a2, hw);
+    } else {
+      hw[0] = 0x08000000;
+      hw[1] = hw[2] = hw[3] = hw[4] = 0;
+    }
+    if (tas5805m_set_bq_coeffs(i, ch, hw[0], hw[1], hw[2], hw[3], hw[4]) != ESP_OK) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void tas_status_later(void*) {
   vTaskDelay(pdMS_TO_TICKS(2500));
   if (s_hw_ready) tas5805m_log_status();
@@ -200,54 +224,35 @@ bool dacApplyPeqBandsLR(const geelen::EqBand* left, uint8_t nL,
   if (!s_play_ok || !left || nL == 0) return false;
   if (!ganged && (!right || nR == 0)) return false;
 
-  geelen::EqStage stagesL[geelen::EQ_MAX_STAGES_PER_LAYER];
-  geelen::EqStage stagesR[geelen::EQ_MAX_STAGES_PER_LAYER];
   const size_t nStagesL =
-      geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, left, nL, stagesL);
-  const geelen::EqStage* rightStages = stagesL;
+      geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, left, nL, s_peq_l);
+  const geelen::EqStage* rightStages = s_peq_l;
   size_t nStagesR = nStagesL;
   if (!ganged) {
-    nStagesR = geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, right, nR, stagesR);
-    rightStages = stagesR;
+    nStagesR = geelen::eqBuildStageList((float)geelen::SAMPLE_RATE, right, nR, s_peq_r);
+    rightStages = s_peq_r;
   }
-  if (nStagesL > 15 || nStagesR > 15) {
-    ESP_LOGW(TAG, "PEQ expansion L=%u R=%u stages, using first 15 TAS slots",
-             (unsigned)nStagesL, (unsigned)nStagesR);
+  if (nStagesL > geelen::EQ_HW_MAX_SLOTS || nStagesR > geelen::EQ_HW_MAX_SLOTS) {
+    ESP_LOGW(TAG, "PEQ expansion L=%u R=%u stages, using first %u TAS slots",
+             (unsigned)nStagesL, (unsigned)nStagesR, (unsigned)geelen::EQ_HW_MAX_SLOTS);
   }
 
   tas5805m_set_eq_ganged(ganged);
   if (tas5805m_set_eq_enabled(false) != ESP_OK) return false;
 
-  auto fail_bypass = []() {
+  if (!write_peq_bank(s_peq_l, nStagesL, TAS5805M_CH_LEFT)) {
     (void)tas5805m_set_eq_enabled(false);
     return false;
-  };
-
-  auto write_bank = [&](const geelen::EqStage* stages, size_t n, TAS5805M_EQ_CHANNELS ch) {
-    const size_t slots = (n > 15) ? 15 : n;
-    for (uint8_t i = 0; i < 15; ++i) {
-      int32_t hw[5];
-      if (i < slots) {
-        geelen::eqStageToTas5825mQ5_27(stages[i].b0, stages[i].b1, stages[i].b2,
-                                       stages[i].a1, stages[i].a2, hw);
-      } else {
-        hw[0] = 0x08000000;
-        hw[1] = hw[2] = hw[3] = hw[4] = 0;
-      }
-      if (tas5805m_set_bq_coeffs(i, ch, hw[0], hw[1], hw[2], hw[3], hw[4]) != ESP_OK) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  if (!write_bank(stagesL, nStagesL, TAS5805M_CH_LEFT)) return fail_bypass();
-  if (!write_bank(rightStages, nStagesR, TAS5805M_CH_RIGHT)) return fail_bypass();
+  }
+  if (!write_peq_bank(rightStages, nStagesR, TAS5805M_CH_RIGHT)) {
+    (void)tas5805m_set_eq_enabled(false);
+    return false;
+  }
 
   if (tas5805m_set_eq_enabled(true) != ESP_OK) return false;
   ESP_LOGI(TAG, "HW PEQ uploaded (L=%u R=%u stages, %s)",
-           (unsigned)((nStagesL > 15) ? 15 : nStagesL),
-           (unsigned)((nStagesR > 15) ? 15 : nStagesR),
+           (unsigned)((nStagesL > geelen::EQ_HW_MAX_SLOTS) ? geelen::EQ_HW_MAX_SLOTS : nStagesL),
+           (unsigned)((nStagesR > geelen::EQ_HW_MAX_SLOTS) ? geelen::EQ_HW_MAX_SLOTS : nStagesR),
            ganged ? "ganged" : "split");
   return true;
 #else

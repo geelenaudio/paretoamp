@@ -211,6 +211,39 @@ void test_eqPeakGainDb_max_of_l_and_r(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.4f, 3.f + geelen::EQ_INTERSAMPLE_HEADROOM_DB, pL);
 }
 
+void test_eqHwSlotCost_bell_is_one(void) {
+  geelen::EqBand b = makeBand(1000.f, 0.f, 1.2f, geelen::EqFilterType::Bell, 12);
+  TEST_ASSERT_EQUAL_UINT8(1, geelen::eqHwSlotCost(b));
+}
+
+void test_eqHwSlotCost_lp24_is_two(void) {
+  geelen::EqBand b = makeBand(1000.f, 0.f, 1.f, geelen::EqFilterType::LowPass, 24);
+  TEST_ASSERT_EQUAL_UINT8(2, geelen::eqHwSlotCost(b));
+}
+
+void test_eqHwSlotCost_hp12_is_one(void) {
+  geelen::EqBand b = makeBand(1000.f, 0.f, 1.f, geelen::EqFilterType::HighPass, 12);
+  TEST_ASSERT_EQUAL_UINT8(1, geelen::eqHwSlotCost(b));
+}
+
+void test_eqHwSlotTotal_eight_times_24_is_16(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  for (size_t i = 0; i < 8; ++i) {
+    bands[i] = makeBand(1000.f, 0.f, 1.f, geelen::EqFilterType::HighPass, 24);
+  }
+  TEST_ASSERT_EQUAL_size_t(16u, geelen::eqHwSlotTotal(bands, 8));
+  TEST_ASSERT_TRUE(geelen::eqHwSlotTotal(bands, 8) > geelen::EQ_HW_MAX_SLOTS);
+}
+
+void test_eqHwSlotTotal_seven_times_24_is_14(void) {
+  geelen::EqBand bands[geelen::EQ_MAX_BANDS]{};
+  for (size_t i = 0; i < 7; ++i) {
+    bands[i] = makeBand(1000.f, 0.f, 1.f, geelen::EqFilterType::LowPass, 24);
+  }
+  TEST_ASSERT_EQUAL_size_t(14u, geelen::eqHwSlotTotal(bands, 7));
+  TEST_ASSERT_TRUE(geelen::eqHwSlotTotal(bands, 7) <= geelen::EQ_HW_MAX_SLOTS);
+}
+
 /* --- Phase 0: event taxonomy stability ------------------------------------
  *
  * These checks exist so the native build catches accidental enum reorderings
@@ -376,6 +409,11 @@ int main(int argc, char** argv) {
   RUN_TEST(test_eqBuildStageList_lowpass_6_one_pole);
   RUN_TEST(test_eqLinearMagProduct_bell_boost_at_centre);
   RUN_TEST(test_eqPeakGainDb_max_of_l_and_r);
+  RUN_TEST(test_eqHwSlotCost_bell_is_one);
+  RUN_TEST(test_eqHwSlotCost_lp24_is_two);
+  RUN_TEST(test_eqHwSlotCost_hp12_is_one);
+  RUN_TEST(test_eqHwSlotTotal_eight_times_24_is_16);
+  RUN_TEST(test_eqHwSlotTotal_seven_times_24_is_14);
   RUN_TEST(test_event_ids_are_stable);
   RUN_TEST(test_event_payloads_are_pod);
   RUN_TEST(test_event_payload_sizes);

@@ -7,10 +7,14 @@
 // EQ backend selection (compile-time via HAL_HAS_HW_PEQ):
 //   - Amped (HAL_HAS_HW_PEQ=0): the AudioEngine runs the full cascade in
 //     software on the audio task. Bands beyond `maxBands()` (=10) are ignored.
+//     Always one ganged curve: shared coefficients, independent L/R delay
+//     lines. Do not add a second software cascade — 10-band stereo already
+//     saturates Core 1 on Amped-WROVER (see docs/eq.md "Channel mode").
 //   - Louder (HAL_HAS_HW_PEQ=1): the AudioEngine can be told to skip its own
 //     cascade because the DAC applied the biquads in hardware. When the HW
 //     path is active, `setEqCurve(..., use_hw = true)` sets `cascade_.enabled
-//     = false` so the software math stays out of the way.
+//     = false` so the software math stays out of the way. Split L/R lives
+//     in TAS Book 0xAA, not here.
 
 #ifndef GEELEN_AUDIO_ENGINE_H
 #define GEELEN_AUDIO_ENGINE_H
@@ -97,6 +101,9 @@ class AudioEngine {
   void rebuildCascade();
   void processSamples(int16_t* buf, size_t num_frames);
 
+  // One coefficient list, two delay lines ([stage][ch]). Ganged on purpose:
+  // Amped has no second curve. Adding stages_L / stages_R is a product
+  // decision against docs/eq.md, not a missing array.
   struct Cascade {
     EqBand bands[AUDIO_EQ_BANDS];
     uint8_t active_band_count;

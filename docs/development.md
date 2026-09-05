@@ -24,23 +24,38 @@ invariants, and the voice-prompt state machine.
 
 ## Build / flash / monitor
 
-The PlatformIO env is `amped-esp32-idf` (default). All commands are run
-from `ESP32_AudioPlatform/` (the directory that contains
+Four PlatformIO envs live in `ESP32_AudioPlatform/platformio.ini`. The env is
+**compile-time** (HAL + TAS driver). Flashing Amped onto a Louder board leaves
+EQ on the software cascade. Prefer named tasks from the **repo root**:
+
+```sh
+task fw:amped       # Amped-WROVER
+task fw:louder      # Louder-WROVER + TAS58xx
+task fw:amped-s3
+task fw:louder-s3
+task fw:targets     # cheat sheet
+task fw:ports       # serial devices
+```
+
+Generic `task fw:upload` defaults to Amped. Override with
+`task fw:upload PIO_ENV=louder-esp32-idf` (or `PIO_ENV=…` in the environment).
+Port defaults to `/dev/ttyUSB0`; pass `PIO_PORT=/dev/ttyACM0` for S3 CDC.
+
+Raw PlatformIO, from `ESP32_AudioPlatform/` (the directory that contains
 `platformio.ini`):
 
 ```sh
-pio run                     # build firmware (ELF + bin)
-pio run -t upload           # flash firmware over USB
-pio run -t buildfs          # build SPIFFS image from data/
-pio run -t uploadfs         # flash SPIFFS partition
-pio device monitor          # 115200 baud, with esp32 exception decoder
+pio run -e louder-esp32-idf                     # build
+pio run -e louder-esp32-idf -t upload           # flash app
+pio run -e louder-esp32-idf -t uploadfs         # flash SPIFFS
+pio device monitor -e louder-esp32-idf          # 115200, exception decoder
 ```
 
-Typical full-flash workflow after editing both code and SPA / audio
-assets:
+Omit `-e` and PlatformIO uses `default_envs = amped-esp32-idf`. Typical
+full-flash after editing both firmware and SPA:
 
 ```sh
-pio run -t uploadfs && pio run -t upload && pio device monitor
+task fw:louder && task fw:monitor PIO_ENV=louder-esp32-idf
 ```
 
 Helpful flags:
@@ -96,9 +111,10 @@ as a pre-build step in `platformio.ini`) bundles + gzips the SPA into
 To iterate on UI changes:
 
 1. Edit files under `web/`.
-2. Run `pio run -t buildfs -e amped-esp32-idf && pio run -t uploadfs`
+2. Run `task fw:web PIO_ENV=<env>` (or `pio run -e <env> -t uploadfs`)
    to flash just the SPIFFS partition. The firmware does not need
-   re-flashing for SPA changes.
+   re-flashing for SPA changes. Use the same env you last flashed
+   (`louder-esp32-idf` on Louder, not the Amped default).
 
 ## SPIFFS audio assets
 
@@ -129,8 +145,9 @@ and re-run `uploadfs`.
 
 ## OpenAPI
 
-The canonical API schema is `web/api/openapi.yaml`. The SPA renders it
-at `/docs` on the device using a small viewer page.
+The canonical API schema is `web/api/openapi.yaml`. `GET /docs` on the
+device is a Swagger UI page (CDN bundle, on-device fallback) pointed at
+`GET /openapi.yaml`.
 
 When you add or change an endpoint:
 

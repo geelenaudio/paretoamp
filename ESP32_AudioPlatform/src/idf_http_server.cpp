@@ -267,10 +267,10 @@ struct AsyncFileSendArgs {
   size_t total_bytes;   // for logging
 };
 
-// Drain `fd` to `req` in 2 KiB chunks with a 1-tick yield between sends so
-// the lwip TX task can recycle pbufs between iterations. `httpd_resp_set_*`
-// headers must already have been written before `async_handler_begin` —
-// IDF locks the response state at handoff, so the worker only emits body.
+// Drain `fd` to `req` in 4 KiB chunks. Yield every few chunks so lwip can
+// recycle pbufs; retry send_chunk on the 5 s send_wait_timeout instead of
+// aborting (a truncated chunked body hangs the browser). Headers must
+// already have been written before `async_handler_begin`.
 static void async_file_send_task(void* arg) {
   auto* a = static_cast<AsyncFileSendArgs*>(arg);
   httpd_req_t* req = a->req;
@@ -278,29 +278,27 @@ static void async_file_send_task(void* arg) {
   const size_t total = a->total_bytes;
   delete a;
 
-  // 2 KiB chunks: a balance between fewer send_chunk calls (vs. 1 KiB) and
-  // a cheap stack footprint (vs. malloc). Stays well below the 5760 B TCP
-  // send buf so each chunk fits in a single lwip write. Lives on the task
-  // stack — we sized it to 6 KiB below specifically to accommodate this.
-  char buf[2048];
+  char buf[4096];
   size_t sent = 0;
+  int chunks = 0;
   ssize_t r;
   while ((r = read(fd, buf, sizeof(buf))) > 0) {
-    esp_err_t rc = httpd_resp_send_chunk(req, buf, r);
+    esp_err_t rc = ESP_FAIL;
+    for (int try_n = 0; try_n < 8; ++try_n) {
+      rc = httpd_resp_send_chunk(req, buf, r);
+      if (rc == ESP_OK) break;
+      vTaskDelay(pdMS_TO_TICKS(40));
+    }
     if (rc != ESP_OK) {
       ESP_LOGW(TAG, "async send_chunk failed after %u/%u B (rc=0x%x)",
                (unsigned)sent, (unsigned)total, rc);
       goto done;
     }
     sent += (size_t)r;
-    // Yield one tick so the lwip TCPIP task can drain its tx queue. Without
-    // this we hot-loop into send_chunk faster than ACKs come back, the
-    // socket buffer fills, and the next send blocks for up to 5 s — which
-    // either truncates the response or stalls other handlers waiting on
-    // shared httpd state. One tick = 10 ms (CONFIG_FREERTOS_HZ=100), so
-    // a 400 KiB file takes ~2 s of wall-clock yields on top of network
-    // time — fine for a one-time SwaggerUI bundle load.
-    vTaskDelay(1);
+    // Every 4 chunks (~16 KiB) yield one tick so Core 1 audio / lwip ACKs
+    // run. Yielding every 2 KiB made `/docs/ui.js` (~400 KiB gz) crawl at
+    // tens of KB/s and trip the browser timeout.
+    if ((++chunks & 3) == 0) vTaskDelay(1);
   }
 
   // Terminating empty chunk completes the chunked body.
@@ -347,18 +345,18 @@ static esp_err_t start_async_file_send(httpd_req_t* req, int fd, size_t total_by
   }
 
   // Stack on internal DRAM (default for `xTaskCreatePinnedToCore` — see
-  // idf_logs.cpp's `sse_stream_task` for the same pattern). 6 KiB
-  // accommodates the 2 KiB on-stack chunk buffer plus lwip/httpd/file IO
+  // idf_logs.cpp's `sse_stream_task` for the same pattern). 8 KiB
+  // accommodates the 4 KiB on-stack chunk buffer plus lwip/httpd/file IO
   // call frames with margin. PSRAM stacks tested unstable here (long
   // chunked writes hit PSRAM-cache flush windows in lwip), so we accept
-  // the internal-DRAM cost — capped at 12 KiB total via kAsyncMaxWorkers.
+  // the internal-DRAM cost — capped at 16 KiB total via kAsyncMaxWorkers.
   // Pin to Core 1 to mirror the httpd worker (Core 0 is full of Wi-Fi /
   // BT / lwip; see HttpServer::begin for the rationale).
-  // Priority 4: below httpd (10) so /api/state JSON polls take priority,
-  // mirrors the SSE log streamer (4).
+  // Priority 8: below httpd (10) so /api/state JSON polls take priority,
+  // above the old prio-4 which lost the Core 1 slice to audio too often.
   BaseType_t ok = xTaskCreatePinnedToCore(
-      async_file_send_task, "http-bigsend", /*stack*/ 6144, args,
-      /*prio*/ 4, nullptr, /*core*/ 1);
+      async_file_send_task, "http-bigsend", /*stack*/ 8192, args,
+      /*prio*/ 8, nullptr, /*core*/ 1);
   if (ok != pdPASS) {
     delete args;
     httpd_req_async_handler_complete(detached);
@@ -426,6 +424,17 @@ static esp_err_t serve_file(httpd_req_t* req, const char* fs_path_no_gz,
     return ESP_OK;
   }
 
+  // Refuse large bodies before headers so a busy worker pool cannot pin
+  // the single httpd thread on a 400 KiB `/docs/ui.js` send (that froze
+  // the SPA). The CDN-first docs page retries; browsers honour Retry-After.
+  if ((size_t)st.st_size >= kAsyncThreshold &&
+      s_async_workers.load(std::memory_order_relaxed) >= kAsyncMaxWorkers) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_hdr(req, "Retry-After", "1");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "busy", HTTPD_RESP_USE_STRLEN);
+  }
+
   int fd = open(path, O_RDONLY);
   if (fd < 0) return ESP_FAIL;
 
@@ -454,7 +463,7 @@ static esp_err_t serve_file(httpd_req_t* req, const char* fs_path_no_gz,
     }
     // Pool full or async setup failed — fall back to inline send. Better
     // a slow request than a dropped one. We still own fd at this point.
-    ESP_LOGW(TAG, "async pool busy, sending %s inline (%u B)",
+    ESP_LOGW(TAG, "async spawn failed, sending %s inline (%u B)",
              path, (unsigned)st.st_size);
   }
 

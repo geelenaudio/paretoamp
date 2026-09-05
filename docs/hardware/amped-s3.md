@@ -38,9 +38,13 @@ Same DAC + amp topology as the WROVER Amped, new SoC.
 
 ## EQ backend
 
-- **Software** parametric EQ, 10 bands (identical to Amped-WROVER).
+- **Software** parametric EQ, 10 bands (identical to Amped-WROVER). Always
+  ganged; Unlink is Louder-only ([eq.md](../eq.md)).
 
 ## Flashing
+
+From the repo root: `task fw:amped-s3`. S3 often enumerates as `/dev/ttyACM0`
+(`task fw:amped-s3 PIO_PORT=/dev/ttyACM0`). Raw PlatformIO:
 
 ```bash
 pio run -e amped-esp32s3-idf -t upload

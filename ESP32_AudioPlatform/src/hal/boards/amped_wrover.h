@@ -20,9 +20,12 @@
 // AudioEngine falls back to its cascade of biquads.
 //
 // `HAL_EQ_MAX_BANDS_ACTIVE = 10` — the user-visible band count cap for this
-// board. Storage (`geelen::EQ_MAX_BANDS = 15`) stays at the Louder maximum so
-// a preset created on Louder round-trips through Amped without losing bands
-// (extra bands are truncated on apply, not on read).
+// board. Always one ganged software cascade (no Unlink): 10-band stereo
+// DF1 is already at the Core 1 budget on this WROVER; split L/R is Louder
+// TAS only (docs/eq.md). Storage (`geelen::EQ_MAX_BANDS = 15`) stays at
+// the Louder maximum so a preset created on Louder round-trips through
+// Amped without losing bands (extra bands are truncated on apply, not on
+// read).
 
 #pragma once
 
@@ -67,8 +70,5 @@
 #define HAL_HAS_ENCODER 0
 
 // ---- EQ cap ---------------------------------------------------------------
-// Requested by the product: 10-band parametric EQ on Amped. Storage capacity
-// (`EQ_MAX_BANDS`) is higher so a preset saved on Louder round-trips through
-// Amped without losing metadata; only the first HAL_EQ_MAX_BANDS_ACTIVE bands
-// are pushed to the DSP.
+// 10-band ganged software PEQ (see file header). Unlink is Louder TAS only.
 #define HAL_EQ_MAX_BANDS_ACTIVE 10

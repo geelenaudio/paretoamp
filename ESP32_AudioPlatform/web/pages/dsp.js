@@ -6,9 +6,14 @@
 // Preview math mirrors `eq_coeffs.cpp` so what you see on the plot is what
 // the device applies. The `state.eq.max_bands` value (from the server) sets
 // the runtime cap (10 on Amped, 15 on Louder); `state.eq.backend` reports
-// which backend actually applies the biquads ("software", "hardware", or
-// "software (fallback)"). Louder may set `supports_split`; Amped is always
-// one ganged curve.
+// where the curve runs when enabled ("software", "hardware", or
+// "software (fallback)"). Independent of `enabled` — when EQ is off the
+// subtitle pill shows "off". Louder may set `supports_split`; Amped is
+// always one ganged curve (software Unlink is out of scope — Core 1 is
+// already at the 10-band budget; see docs/eq.md). Louder also sends
+// `max_hw_slots` (15 TAS biquads per channel); 24 dB/oct HP/LP costs two
+// slots and the SPA shrinks the active-band slider to stay inside that
+// budget. Amped omits the field.
 
 import { html, useEffect, useState, useRef, useMemo, useCallback } from "/vendor/htm-preact.mjs";
 
@@ -60,6 +65,50 @@ function normalizeBand(b) {
   const types = ["bell", "low_shelf", "high_shelf", "notch", "low_pass", "high_pass"];
   const type = types.includes(b.type) ? b.type : "bell";
   return { freq, gain_db, q, type, slope_db_oct: slope };
+}
+
+function bandSlotCost(b) {
+  const nb = normalizeBand(b || {});
+  if ((nb.type === "low_pass" || nb.type === "high_pass") && nb.slope_db_oct === 24) return 2;
+  return 1;
+}
+
+function curveSlotTotal(bands, count) {
+  let n = 0;
+  const lim = Math.max(0, count || 0);
+  for (let i = 0; i < lim; i++) n += bandSlotCost(bands && bands[i]);
+  return n;
+}
+
+function maxActiveForSlots(bands, maxSlots, cap) {
+  let used = 0;
+  let n = 0;
+  for (let i = 0; i < cap; i++) {
+    const c = bandSlotCost(bands && bands[i]);
+    if (used + c > maxSlots) break;
+    used += c;
+    n++;
+  }
+  return Math.max(1, n);
+}
+
+function canUse24(bands, idx, maxSlots) {
+  if (!maxSlots) return true;
+  const trial = (bands || []).map((b, i) =>
+    i === idx ? normalizeBand({ ...b, slope_db_oct: 24 }) : b);
+  return curveSlotTotal(trial, idx + 1) <= maxSlots;
+}
+
+function coerceNewBands(bands, from, to, maxSlots) {
+  const out = (bands || []).map((b) => ({ ...normalizeBand(b) }));
+  let used = curveSlotTotal(out, from);
+  for (let i = from; i < to; i++) {
+    if (used + bandSlotCost(out[i]) > maxSlots) {
+      out[i] = normalizeBand({ ...out[i], type: "bell", slope_db_oct: 12 });
+    }
+    used += bandSlotCost(out[i]);
+  }
+  return out;
 }
 
 function normBq(b0, b1, b2, a0, a1, a2) {
@@ -357,7 +406,7 @@ const FILTER_OPTIONS = [
   ["high_pass", "High-pass"],
 ];
 
-function BandRow({ band, idx, onChange, idPrefix = "b", swatch = "var(--eq-pref)" }) {
+function BandRow({ band, idx, onChange, idPrefix = "b", swatch = "var(--eq-pref)", allow24 = true }) {
   const b = normalizeBand(band);
   const freqPos = freqToPos(b.freq);
   const freqPct = (freqPos / FREQ_POS_MAX) * 100;
@@ -389,7 +438,7 @@ function BandRow({ band, idx, onChange, idPrefix = "b", swatch = "var(--eq-pref)
                   onChange=${(e) => onChange({ slope_db_oct: parseInt(e.target.value, 10) })}>
             <option value="6">6 dB/oct</option>
             <option value="12">12 dB/oct</option>
-            <option value="24">24 dB/oct</option>
+            <option value="24" disabled=${!allow24 && b.slope_db_oct !== 24}>24 dB/oct</option>
           </select>
         </div>` : ""}
       <div class="eq-band__row">
@@ -469,19 +518,32 @@ function Presets({ api, toast, activeSlot, onLoaded }) {
 
 function normalizeEqState(eq) {
   const maxBands = clamp(eq.max_bands ?? DEFAULT_MAX_BANDS, 1, MAX_STORAGE_BANDS);
+  const curve = normalizeCurve(eq, maxBands);
+  const maxHw = Number.isFinite(Number(eq.max_hw_slots)) ? Number(eq.max_hw_slots) : 0;
+  let band_count = curve.band_count;
+  if (maxHw > 0) {
+    const capL = maxActiveForSlots(curve.bands, maxHw, maxBands);
+    const capR = maxActiveForSlots(curve.bands_r, maxHw, maxBands);
+    band_count = clamp(Math.min(band_count, capL, capR), 1, maxBands);
+  }
   return {
-    ...normalizeCurve(eq, maxBands),
+    ...curve,
+    band_count,
     max_bands: maxBands,
+    max_hw_slots: maxHw || undefined,
+    hw_slots: eq.hw_slots,
+    hw_slots_r: eq.hw_slots_r,
     backend: eq.backend || "software",
     headroom: eq.headroom || { mode: "auto", manual_db: 0, auto_db: 0 },
     active_slot: eq.active_slot,
   };
 }
 
-function backendBadge(backend) {
-  if (backend === "hardware") return html`<span class="pill pill--ok">HW PEQ</span>`;
+function backendBadge(backend, enabled) {
+  if (!enabled) return html`<span class="pill">off</span>`;
+  if (backend === "hardware") return html`<span class="pill pill--ok">hardware on</span>`;
   if (backend === "software (fallback)") return html`<span class="pill pill--warn">SW fallback</span>`;
-  return html`<span class="pill">software</span>`;
+  return html`<span class="pill pill--ok">software on</span>`;
 }
 
 export default function Dsp({ api, toast }) {
@@ -538,21 +600,59 @@ export default function Dsp({ api, toast }) {
   }
 
   function patchBand(idx, partial) {
-    if (split && editCh === "R") {
-      const bands_r = eq.bands_r.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
-      patchCurve({ bands_r });
-      scheduleCommit(commitBody({ bands_r }));
-      return;
+    const applyToR = split && editCh === "R";
+    let bands = eq.bands;
+    let bands_r = eq.bands_r;
+    if (applyToR) {
+      bands_r = eq.bands_r.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
+    } else {
+      bands = eq.bands.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
     }
-    const bands = eq.bands.map((b, i) => i === idx ? normalizeBand({ ...b, ...partial }) : b);
-    patchCurve({ bands });
-    scheduleCommit(commitBody({ bands }));
+    let bc = eq.band_count;
+    const cap = eq.max_hw_slots || 0;
+    const slotRelated = partial.slope_db_oct != null || partial.type != null;
+    if (cap) {
+      const edited = applyToR ? bands_r : bands;
+      const other = applyToR ? bands : bands_r;
+      const prefixOver = curveSlotTotal(edited, idx + 1) > cap ||
+        (split && curveSlotTotal(other, idx + 1) > cap);
+      if (prefixOver) {
+        if (slotRelated) {
+          toast("24 dB/oct uses two TAS biquads; active bands reduced to " + bc + ".", "warn");
+        }
+        return;
+      }
+      const before = bc;
+      while (bc > idx + 1 && (curveSlotTotal(bands, bc) > cap ||
+          (split && curveSlotTotal(bands_r, bc) > cap))) {
+        bc--;
+      }
+      if (slotRelated && bc < before) {
+        toast("24 dB/oct uses two TAS biquads; active bands reduced to " + bc + ".", "warn");
+      }
+    }
+    patchCurve({ bands, bands_r, band_count: bc });
+    scheduleCommit(commitBody({ bands, bands_r, band_count: bc }));
   }
 
   function setBandCount(n) {
-    const v = clamp(n, 1, maxBands);
-    patchCurve({ band_count: v });
-    scheduleCommit(commitBody({ band_count: v }));
+    const cap = eq.max_hw_slots || 0;
+    let v = clamp(n, 1, maxBands);
+    let bands = eq.bands;
+    let bands_r = eq.bands_r;
+    if (cap) {
+      const used = Math.max(
+        curveSlotTotal(eq.bands, eq.band_count),
+        split ? curveSlotTotal(eq.bands_r, eq.band_count) : 0);
+      const hi = Math.min(maxBands, eq.band_count + Math.max(0, cap - used));
+      v = clamp(n, 1, hi);
+      if (v > eq.band_count) {
+        bands = coerceNewBands(eq.bands, eq.band_count, v, cap);
+        if (split) bands_r = coerceNewBands(eq.bands_r, eq.band_count, v, cap);
+      }
+    }
+    patchCurve({ band_count: v, bands, bands_r });
+    scheduleCommit(commitBody({ band_count: v, bands, bands_r }));
   }
 
   function scheduleCommit(payload) {
@@ -618,8 +718,16 @@ export default function Dsp({ api, toast }) {
     } catch (e) { toast(String(e), "err"); }
   }
 
-  const bc = clamp(eq.band_count || DEFAULT_MAX_BANDS, 1, maxBands);
+  const hwMax = eq.max_hw_slots || 0;
+  const usedL = curveSlotTotal(eq.bands, clamp(eq.band_count || 1, 1, maxBands));
+  const usedR = curveSlotTotal(eq.bands_r, clamp(eq.band_count || 1, 1, maxBands));
+  const usedTight = split ? Math.max(usedL, usedR) : usedL;
+  const sliderMax = hwMax
+    ? clamp((eq.band_count || 1) + Math.max(0, hwMax - usedTight), 1, maxBands)
+    : maxBands;
+  const bc = clamp(eq.band_count || DEFAULT_MAX_BANDS, 1, sliderMax);
   const editorBands = split && editCh === "R" ? eq.bands_r : eq.bands;
+  const editorSlots = curveSlotTotal(editorBands, bc);
   const editorSwatch = split && editCh === "R" ? "var(--eq-cal)" : "var(--eq-pref)";
   const plotR = split ? { ...eq, bands: eq.bands_r } : null;
   const plotL = { ...eq, bands: eq.bands };
@@ -629,7 +737,7 @@ export default function Dsp({ api, toast }) {
     <p class="page__subtitle">
       ${split ? "Independent left and right parametric curves" : "Single parametric cascade"}, up to ${maxBands} bands on this device.
       Filter types, per-band frequency / gain / Q, and slope on HP/LP filters.
-      ${backendBadge(eq.backend)}
+      ${backendBadge(eq.backend, eq.enabled)}
     </p>
 
     <div class="card" style="padding: var(--sp-4)">
@@ -648,7 +756,8 @@ export default function Dsp({ api, toast }) {
         <div>
           <div class="card__title">Parametric EQ</div>
           <p style="color: var(--fg-1); margin: var(--sp-2) 0 0;">
-            Room correction and personal preference. Backend: ${eq.backend}.
+            Room correction and personal preference.
+            ${eq.enabled ? `Backend: ${eq.backend}.` : `EQ is off (${eq.backend}).`}
           </p>
         </div>
         <div style="display:flex; align-items:center; gap: var(--sp-3); flex-wrap: wrap; justify-content: flex-end">
@@ -681,12 +790,19 @@ export default function Dsp({ api, toast }) {
           <button class="btn btn--primary" style="margin-left: var(--sp-3)" onClick=${toggleEq}>Enable now</button>
         </div>` : ""}
 
+      ${hwMax ? html`
+        <p style="color: var(--fg-1); margin: var(--sp-3) 0 0; font-size: 0.9rem;">
+          Hardware biquads: <strong>${editorSlots} / ${hwMax}</strong>
+          ${split ? (editCh === "R" ? " (right)" : " (left)") : ""}.
+          24 dB/oct high-pass / low-pass uses two TAS biquads.
+        </p>` : ""}
+
       <div class="eq-band__row" style="margin-top: var(--sp-3)">
         <label>Active bands</label>
-        <input class="slider" type="range" min="1" max=${maxBands} step="1" value=${bc}
-               style=${`--fill:${pct(bc, 1, maxBands)}`}
+        <input class="slider" type="range" min="1" max=${sliderMax} step="1" value=${bc}
+               style=${`--fill:${pct(bc, 1, sliderMax)}`}
                onInput=${(e) => setBandCount(parseInt(e.target.value, 10))} />
-        <span class="chip">${bc} / ${maxBands}</span>
+        <span class="chip">${bc} / ${sliderMax}</span>
       </div>
 
       <div class="eq-bands">
@@ -694,6 +810,7 @@ export default function Dsp({ api, toast }) {
           html`<${BandRow} key=${(split ? editCh : "G") + "-" + i} band=${b} idx=${i}
                            idPrefix=${split ? (editCh === "R" ? "br" : "bl") : "b"}
                            swatch=${editorSwatch}
+                           allow24=${canUse24(editorBands, i, hwMax)}
                            onChange=${(p) => patchBand(i, p)} />`)}
       </div>
     </div>
