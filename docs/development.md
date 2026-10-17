@@ -181,6 +181,9 @@ host build will fail before flash.
 - `platform = ${common.platform}` in `platformio.ini`: pioarduino
   `55.03.37` (ESP-IDF 5.5.2). Do not leave this unpinned — GitHub Actions
   otherwise installs a current `espressif32` with IDF 6.x.
+- PlatformIO Core **6.1.19** (not 6.2). 6.2 ships SCons 4.11.1; this
+  platform pins 4.8.1, and the mismatch wipes `tool-scons` mid-link. CI
+  pins the same version in `.github/workflows/platformio.yml`.
 - IDF components: `nvs_flash`, `spiffs`, `esp_wifi`, `esp_netif`,
   `esp_event`, `esp_http_server`, `esp_timer`, `lwip`, `mdns`, `bt`.
 - External libraries: vendored `chmorgan/esp-libhelix-mp3`
