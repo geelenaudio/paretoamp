@@ -178,12 +178,13 @@ host build will fail before flash.
 
 ## Toolchain dependencies
 
-- `platform = espressif32`, framework `espidf`. Version pinned by the
-  PlatformIO platform release.
+- `platform = ${common.platform}` in `platformio.ini`: pioarduino
+  `55.03.37` (ESP-IDF 5.5.2). Do not leave this unpinned — GitHub Actions
+  otherwise installs a current `espressif32` with IDF 6.x.
 - IDF components: `nvs_flash`, `spiffs`, `esp_wifi`, `esp_netif`,
   `esp_event`, `esp_http_server`, `esp_timer`, `lwip`, `mdns`, `bt`.
-- External libraries: `chmorgan/esp-libhelix-mp3` (MP3 decoding), pulled
-  via the IDF component manager; vendored `espressif/led_strip` 3.0.3
+- External libraries: vendored `chmorgan/esp-libhelix-mp3`
+  (`components/libhelix-mp3/`); vendored `espressif/led_strip` 3.0.3
   (`components/led_strip/`) for WS2812 RMT; vendored
   `espressif/usb_device_uac` 1.3.2 (`components_s3/usb_device_uac/`, S3
   only) plus managed `espressif/tinyusb` for USB audio.
