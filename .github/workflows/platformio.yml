@@ -25,14 +25,19 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: ${{ runner.os }}-pio-${{ hashFiles('ESP32_AudioPlatform/platformio.ini') }}
+          # Include the core pin so a previous 6.2 cache cannot sneak back in.
+          key: ${{ runner.os }}-pio-6.1.19-${{ hashFiles('ESP32_AudioPlatform/platformio.ini') }}
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Install PlatformIO Core
-        run: pip install --upgrade platformio
+        # 6.2.0 wants tool-scons 4.11.1; pioarduino 55.03.37 wants 4.8.1. Those
+        # two delete/reinstall SCons mid-link and fail with
+        # `No module named 'SCons.Tool.FortranCommon'`. Local builds use 6.1.19.
+        # https://github.com/pioarduino/platform-espressif32/issues/529
+        run: pip install --upgrade "platformio==6.1.19"
 
       - name: Build PlatformIO Project
         run: pio run -e amped-esp32-idf
