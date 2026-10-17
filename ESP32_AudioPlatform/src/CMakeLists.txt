@@ -1,3 +1,12 @@
+# TinyUSB UAC gadget (espressif/usb_device_uac) exists only on S3. WROVER
+# USB is a UART bridge; HAL_HAS_USB_AUDIO=0 collapses idf_usb_audio.cpp.
+# Hard REQUIRES (not optional) so a missing managed component fails cmake
+# instead of compiling idf_usb_audio.cpp without usb_device_uac.h.
+set(GEELEN_USB_AUDIO_REQUIRES)
+if(IDF_TARGET STREQUAL "esp32s3")
+  list(APPEND GEELEN_USB_AUDIO_REQUIRES usb_device_uac)
+endif()
+
 idf_component_register(
   SRCS
     "idf_main.cpp"
@@ -15,6 +24,7 @@ idf_component_register(
     "idf_voice_feedback.cpp"
     "idf_test_tone.cpp"
     "idf_a2dp_sink.cpp"
+    "idf_usb_audio.cpp"
     "idf_snapclient.cpp"
     "snapcast_protocol.cpp"
     "idf_events.cpp"
@@ -53,4 +63,7 @@ idf_component_register(
     driver
     tas5805m
     led_strip
+    ${GEELEN_USB_AUDIO_REQUIRES}
 )
+
+

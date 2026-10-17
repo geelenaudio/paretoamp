@@ -17,6 +17,7 @@ The prompt manifest lives in `idf_voice_cache.cpp`:
 { VOICE_CLIP_DLNA_MODE,         "/spiffs/audio/DLNAMode.mp3"         },
 { VOICE_CLIP_BLUETOOTH_CONNECTED, "/spiffs/audio/BluetoothConnected.mp3" },
 { VOICE_CLIP_PAIRING,           "/spiffs/audio/Pairing.mp3"          },
+{ VOICE_CLIP_USB_MODE,          "/spiffs/audio/UsbMode.mp3"          },
 ```
 
 ## Catalogue
@@ -30,6 +31,7 @@ The prompt manifest lives in `idf_voice_cache.cpp`:
 | `DLNAMode.mp3` | "DLNA mode" | Boot, in DLNA mode, after the Wi-Fi clip |
 | `BluetoothConnected.mp3` | "Bluetooth connected" | A2DP `CONNECTION_STATE_CONNECTED` from the phone |
 | `Pairing.mp3` | "Pairing" | BT GAP `PIN_REQ_EVT` (debounced to once / 5 s) |
+| `UsbMode.mp3` | ident (placeholder two-tone; replace with spoken "USB mode") | Boot, in USB mode, after the Wi-Fi clip |
 
 In test-tone mode there is no spoken "test-tone mode" clip; only the
 Wi-Fi clip plays at boot.

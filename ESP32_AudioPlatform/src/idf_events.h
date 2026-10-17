@@ -67,6 +67,12 @@ typedef enum {
   EV_WIFI_PROBE_START,
   EV_WIFI_PROBE_RESULT,
 
+  // USB Audio Class gadget (S3 only; idf_usb_audio). Appended — do not
+  // reorder earlier ids (native test_event_ids_are_stable).
+  EV_USB_MOUNTED,
+  EV_USB_STREAMING,
+  EV_USB_STOPPED,
+
   // Sentinel — keep last so handlers can range-check for forward compat.
   EV_COUNT_,
 } geelen_event_id_t;

@@ -44,6 +44,9 @@
 #if !defined(HAL_HAS_HW_PEQ)
 #  error "Board header did not define HAL_HAS_HW_PEQ (0 for software PEQ, 1 for hardware)"
 #endif
+#if !defined(HAL_HAS_USB_AUDIO)
+#  error "Board header did not define HAL_HAS_USB_AUDIO (1 on S3 native USB, 0 on WROVER UART-bridge)"
+#endif
 #if !defined(HAL_EQ_MAX_BANDS_ACTIVE)
 #  error "Board header did not define HAL_EQ_MAX_BANDS_ACTIVE (10 on Amped, up to 15 on Louder)"
 #endif

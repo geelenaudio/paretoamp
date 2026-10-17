@@ -115,6 +115,19 @@ export function IcoCast({ class: cls = "ico" } = {}) {
   </svg>`;
 }
 
+export function IcoUsb({ class: cls = "ico" } = {}) {
+  return html`<svg class=${cls} viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 3 V14" />
+    <circle cx="12" cy="16.5" r="2.2" />
+    <path d="M12 18.7 V21" />
+    <path d="M12 8 H8.5 A1.5 1.5 0 0 1 8.5 5 H12" />
+    <path d="M12 11 H16.2" />
+    <circle cx="17.4" cy="11" r="1.3" />
+  </svg>`;
+}
+
 export function IcoTv({ class: cls = "ico" } = {}) {
   return html`<svg class=${cls} viewBox="0 0 24 24" fill="none"
     stroke="currentColor" stroke-width="2" stroke-linecap="round"

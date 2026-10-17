@@ -30,7 +30,7 @@ flowchart LR
 
   subgraph Core1["Core 1 (audio + control plane)"]
     HTTP["esp_http_server (httpd, prio 10)"]
-    PUMP["a2dp_pump (prio 12)<br/>StreamBuffer -> resample -> feedPCM"]
+    PUMP["a2dp_pump / usb_pump (prio 12)<br/>StreamBuffer -> resample -> feedPCM"]
     AUDIO["audio_task (prio 20)<br/>SPSC ring -> EQ -> I2S"]
     SNAP["snap (prio 5)<br/>Snapcast TCP -> feedPCM"]
     MP3["dlna-mp3 (prio 5)<br/>HTTP MP3 -> feedPCM (DLNA only)"]
@@ -42,6 +42,7 @@ flowchart LR
   RING[(PSRAM SPSC ring<br/>atomic head/tail, ~2 s)]
 
   BT --> PUMP
+  USB["USB UAC (S3 TinyUSB)"] --> PUMP
   PUMP --> RING
   SNAP -- feedPCM --> RING
   MP3 -- feedPCM --> RING
@@ -66,7 +67,7 @@ static geelen_idf::A2dpSink g_a2dp;
 ```
 
 The audio task is pinned to Core 1 at priority 20 to outrank everything that
-might preempt it. `a2dp_pump` sits at prio 12 — above httpd at 10 — so SPA
+might preempt it. `a2dp_pump` / `usb_pump` sit at prio 12 — above httpd at 10 — so SPA
 SSE accept/prune/JSON cannot stall PCM drainage; httpd must stay below the
 pump. Other producers (Snapcast, MP3 streamer, voice) sit at prio 3–5 on
 the same core so they can never starve I2S, while Wi-Fi / BT / LwIP keep

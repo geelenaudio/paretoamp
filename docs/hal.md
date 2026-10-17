@@ -46,6 +46,7 @@ GPIO or via a TAS5825M state machine — are captured in the
 | `HAL_PIN_I2S_{BCK,WS,DATA}`  | I2S output pins for the DAC.                     |
 | `HAL_HAS_AMP_EN`, `HAL_PIN_AMP_EN`, `HAL_I2S_STABLE_MS` | Amp-enable GPIO + settle time. |
 | `HAL_HAS_HW_PEQ`             | Whether the DAC has on-chip PEQ we should push to. |
+| `HAL_HAS_USB_AUDIO`          | Native USB PHY for UAC playback (1 on S3, 0 on WROVER UART-bridge). |
 | `HAL_HAS_I2C_DAC`            | Whether a `dac_tas5825m` implementation is present. |
 | `HAL_EQ_MAX_BANDS_ACTIVE`    | Runtime cap for the EQ (10 on Amped, up to 15 on Louder). |
 | `HAL_HAS_WS2812`             | 1 if this board has an optional WS2812B data pin. |

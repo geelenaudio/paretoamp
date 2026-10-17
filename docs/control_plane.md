@@ -49,7 +49,8 @@ typedef enum {
   EV_A2DP_CONNECTED, EV_A2DP_DISCONNECTED, EV_A2DP_PAIRING,
   EV_SNAP_CONNECTED, EV_SNAP_DISCONNECTED,
   EV_DLNA_PLAY_REQUESTED,
-  EV_STATE_DIFF,
+  EV_STATE_DIFF, EV_WIFI_PROBE_START, EV_WIFI_PROBE_RESULT,
+  EV_USB_MOUNTED, EV_USB_STREAMING, EV_USB_STOPPED,
   EV_COUNT_,
 } geelen_event_id_t;
 ```
@@ -166,6 +167,9 @@ inline ModeTransitionResult decideTransition(uint8_t prev_source,
   if (prev_source == next_source) return ModeTransitionResult::Noop;
   if (prev_source == mode_source::kBluetooth ||
       next_source == mode_source::kBluetooth) {
+    return ModeTransitionResult::RebootRequired;
+  }
+  if (prev_source == mode_source::kUsb || next_source == mode_source::kUsb) {
     return ModeTransitionResult::RebootRequired;
   }
   // Snap ↔ DLNA ↔ TestTone are structurally hot-swappable, but the

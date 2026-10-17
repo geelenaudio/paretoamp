@@ -26,8 +26,8 @@ are diving into the code, start with **Architecture**.
 - [Control plane](control_plane.md) — Geelen event bus, supervisor +
   watchdog, Mode Manager FSM, Wi-Fi reconnect ladder, BT coex
   preference, push-based SPA state. Diagrams included.
-- [Audio modes](audio_modes.md) — the four `AudioSource` modes
-  (`Bluetooth`, `Network`/Snapcast, `Dlna`, `TestTone`), who feeds the engine
+- [Audio modes](audio_modes.md) — the five `AudioSource` modes
+  (`Bluetooth`, `Network`/Snapcast, `Dlna`, `Usb` on S3, `TestTone`), who feeds the engine
   in each, why switching modes still reboots today.
 - [Voice prompts](voice_prompts.md) — every clip in the PSRAM cache, when
   each fires, FIFO ordering guarantees.

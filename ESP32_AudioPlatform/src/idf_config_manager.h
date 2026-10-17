@@ -4,7 +4,7 @@
 // ESP-IDF ConfigManager (NVS + esp_littlefs).
 //
 // Post-refactor state:
-//   - AudioSource: Bluetooth / Network / Dlna / TestTone
+//   - AudioSource: Bluetooth / Network / Dlna / TestTone / Usb (S3 UAC)
 //   - Per-channel volume (vol_l / vol_r) + muted.
 //   - StereoMode + channel enables.
 //   - **Single-layer** parametric EQ, up to `geelen::EQ_MAX_BANDS` (=15)
@@ -74,6 +74,7 @@ enum class AudioSource : uint8_t {
   Network = 1,   // Snapclient
   Dlna = 2,      // Phase 9: native DLNA renderer
   TestTone = 3,  // Built-in sine / test signal (reboot to enter/exit)
+  Usb = 4,       // S3 UAC playback gadget (HAL_HAS_USB_AUDIO); WROVER migrates away
 };
 
 enum class HeadroomMode : uint8_t { Auto = 0, Manual = 1 };

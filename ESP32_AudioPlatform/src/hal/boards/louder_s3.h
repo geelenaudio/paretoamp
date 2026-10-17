@@ -34,6 +34,9 @@
 #define HAL_I2C_FREQ_HZ        400000
 #define HAL_TAS5825M_I2C_ADDR  0x4C
 
+// Native USB PHY. UAC gadget is S3-only (WROVER USB is a UART bridge).
+#define HAL_HAS_USB_AUDIO 1
+
 // ---- WS2812B (optional RGB). GPIO 21 on Louder-Plus S3 (Tindie); do not
 // use GPIO 9 — that is I2C SCL on this board.
 #define HAL_HAS_WS2812  1

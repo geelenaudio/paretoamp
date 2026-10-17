@@ -18,6 +18,7 @@
 #include "idf_logs.h"
 #include "idf_state_stream.h"
 #include "idf_wifi_manager.h"
+#include "hal/hal_board.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -631,7 +632,8 @@ static esp_err_t handle_source(httpd_req_t* req) {
     }
   }
   if (s < 0) s = 0;
-  if (s > 3) s = 3;
+  if (s > 4) s = 4;
+  if (s == (int)AudioSource::Usb && !HAL_HAS_USB_AUDIO) s = 0;
   cfg->setAudioSource((AudioSource)s);
   cfg->save();
 

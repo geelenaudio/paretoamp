@@ -292,7 +292,10 @@ void test_event_ids_are_stable(void) {
   TEST_ASSERT_EQUAL_INT(16, EV_STATE_DIFF);
   TEST_ASSERT_EQUAL_INT(17, EV_WIFI_PROBE_START);
   TEST_ASSERT_EQUAL_INT(18, EV_WIFI_PROBE_RESULT);
-  TEST_ASSERT_EQUAL_INT(19, EV_COUNT_);
+  TEST_ASSERT_EQUAL_INT(19, EV_USB_MOUNTED);
+  TEST_ASSERT_EQUAL_INT(20, EV_USB_STREAMING);
+  TEST_ASSERT_EQUAL_INT(21, EV_USB_STOPPED);
+  TEST_ASSERT_EQUAL_INT(22, EV_COUNT_);
 }
 
 void test_event_payloads_are_pod(void) {
@@ -335,6 +338,8 @@ void test_mode_fsm_noop_for_same_source(void) {
                         (int)geelen_idf::decideTransition(kDlna, kDlna));
   TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::Noop,
                         (int)geelen_idf::decideTransition(kTestTone, kTestTone));
+  TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::Noop,
+                        (int)geelen_idf::decideTransition(kUsb, kUsb));
 }
 
 void test_mode_fsm_bluetooth_either_side_reboots(void) {
@@ -342,11 +347,22 @@ void test_mode_fsm_bluetooth_either_side_reboots(void) {
   using namespace geelen_idf::mode_source;
   /* Any transition that crosses Bluetooth must reboot until Bluedroid
    * de-init becomes safe at runtime. */
-  for (uint8_t other : {kSnapclient, kDlna, kTestTone}) {
+  for (uint8_t other : {kSnapclient, kDlna, kTestTone, kUsb}) {
     TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::RebootRequired,
                           (int)geelen_idf::decideTransition(kBluetooth, other));
     TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::RebootRequired,
                           (int)geelen_idf::decideTransition(other, kBluetooth));
+  }
+}
+
+void test_mode_fsm_usb_either_side_reboots(void) {
+  using geelen_idf::ModeTransitionResult;
+  using namespace geelen_idf::mode_source;
+  for (uint8_t other : {kSnapclient, kDlna, kTestTone}) {
+    TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::RebootRequired,
+                          (int)geelen_idf::decideTransition(kUsb, other));
+    TEST_ASSERT_EQUAL_INT((int)ModeTransitionResult::RebootRequired,
+                          (int)geelen_idf::decideTransition(other, kUsb));
   }
 }
 
@@ -372,6 +388,7 @@ void test_mode_fsm_name_for_source(void) {
   TEST_ASSERT_EQUAL_STRING("Snapclient", geelen_idf::nameForSource(kSnapclient));
   TEST_ASSERT_EQUAL_STRING("DLNA",       geelen_idf::nameForSource(kDlna));
   TEST_ASSERT_EQUAL_STRING("TestTone",   geelen_idf::nameForSource(kTestTone));
+  TEST_ASSERT_EQUAL_STRING("USB",        geelen_idf::nameForSource(kUsb));
   TEST_ASSERT_EQUAL_STRING("?",          geelen_idf::nameForSource(99));
 }
 
@@ -419,6 +436,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_event_payload_sizes);
   RUN_TEST(test_mode_fsm_noop_for_same_source);
   RUN_TEST(test_mode_fsm_bluetooth_either_side_reboots);
+  RUN_TEST(test_mode_fsm_usb_either_side_reboots);
   RUN_TEST(test_mode_fsm_non_bluetooth_currently_reboots);
   RUN_TEST(test_mode_fsm_name_for_source);
   RUN_TEST(test_q131_zero);

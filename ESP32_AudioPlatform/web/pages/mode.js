@@ -1,9 +1,10 @@
 // Mode switch page.
 //
-// Three audio sources map to the firmware's AudioSource enum:
+// Audio sources map to the firmware's AudioSource enum:
 //   - bluetooth : Classic BT A2DP sink                       (ordinal 0)
 //   - snapclient: Snapcast client, configurable host/port    (ordinal 1)
 //   - dlna      : Native UPnP/AV renderer, configurable name (ordinal 2)
+//   - usb       : UAC playback gadget (S3 only, supports_usb) (ordinal 4)
 //
 // Every card renders a "Select" CTA plus the mode's own inline settings.
 // Changing the active mode reboots the device so the firmware can rebuild its
@@ -14,7 +15,7 @@
 // flip to snapclient knowing the target is already set.
 
 import { html, useEffect, useState } from "/vendor/htm-preact.mjs";
-import { IcoHeadphones, IcoCast, IcoTv, IcoFlask } from "/icons.js";
+import { IcoHeadphones, IcoCast, IcoTv, IcoFlask, IcoUsb } from "/icons.js";
 
 // Static descriptor. `configure()` returns the inline settings subtree for
 // each mode so the card renderer stays declarative.
@@ -42,6 +43,15 @@ const MODES = [
     blurb:
       "Appear as a UPnP/AV MediaRenderer on the LAN. Control from BubbleUPnP, " +
       "VLC, Kodi, or the native app of most NAS/streaming services.",
+  },
+  {
+    id: "usb",
+    label: "USB audio",
+    icon: IcoUsb,
+    blurb:
+      "Appear as a USB sound card on a computer. Playback only, through the " +
+      "on-device EQ. ESP32-S3 boards with native USB; not the WROVER UART jack.",
+    requiresUsb: true,
   },
   {
     id: "test_tone",
@@ -223,7 +233,7 @@ export default function Mode({ api, toast }) {
     <h1 class="page__title">Mode</h1>
     <p class="page__subtitle">
       Pick which source drives the amplifier. Any mode change reboots the device
-      so the firmware can start or stop Bluetooth, Snapclient, DLNA, or the test generator.
+      so the firmware can start or stop Bluetooth, Snapclient, DLNA, USB, or the test generator.
     </p>
     ${apOnly ? html`<p class="banner banner--warn" style="margin-bottom:var(--sp-4)">
       Setup hotspot only — Snapcast to a home-LAN server and DLNA from a phone on
@@ -251,7 +261,7 @@ export default function Mode({ api, toast }) {
     </div>
 
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr))">
-      ${MODES.map((m) => {
+      ${MODES.filter((m) => !m.requiresUsb || state.supports_usb).map((m) => {
         const isActive = active === m.id;
         return html`
           <div key=${m.id} class="card" style=${{

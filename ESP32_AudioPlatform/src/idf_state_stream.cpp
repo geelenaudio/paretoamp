@@ -7,6 +7,7 @@
 #include "idf_api.h"
 #include "idf_config_manager.h"
 #include "idf_a2dp_sink.h"
+#include "idf_usb_audio.h"
 #include "idf_voice_feedback.h"
 
 #include "esp_heap_caps.h"
@@ -378,7 +379,8 @@ void broadcaster_task(void*) {
            kBroadcastPeriodMs, (unsigned)kMaxSubscribers);
   TickType_t last_heartbeat = xTaskGetTickCount();
   for (;;) {
-    const bool streaming = a2dpPlaybackActive() || voiceFeedbackActive();
+    const bool streaming =
+        a2dpPlaybackActive() || voiceFeedbackActive() || usbAudioStreaming();
     vTaskDelay(pdMS_TO_TICKS(streaming ? kBroadcastPeriodStreamingMs : kBroadcastPeriodMs));
 
     // Cheap: a single uint32 read in ConfigManager (a relaxed-atomic

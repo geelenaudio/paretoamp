@@ -11,8 +11,9 @@ back-to-back:
 1. **Either "Wi-Fi connected" or "Wi-Fi not connected"** — depending on
    whether the saved Wi-Fi credentials worked.
 2. **The mode clip for the currently selected source** — one of
-   "Bluetooth mode", "Snapcast mode", or "DLNA mode". Test-tone mode is
-   silent (no spoken mode clip).
+   "Bluetooth mode", "Snapcast mode", "DLNA mode", or the USB-mode ident
+   clip on Amped-S3 / Louder-S3. Test-tone mode is silent (no spoken
+   mode clip).
 
 If you turn voice feedback off in the Web UI, the device starts silent.
 
@@ -46,18 +47,24 @@ again on the next boot and you can retry.
 
 ## Switching modes
 
-The device has four audio sources:
+The device has five audio sources (USB is S3-only; hidden on WROVER):
 
 | Mode | Who plays | When to use |
 |---|---|---|
 | Bluetooth | Your phone over BT Classic A2DP | One-tap audio from a phone |
 | Snapcast | A Snapcast server on your LAN | Multi-room sync, librespot/Spotify, custom pipes |
 | DLNA | Any UPnP control point (BubbleUPnP, Hi-Fi Cast, VLC, foobar2000, Linn Kazoo, …) | Casting from apps that speak DLNA/UPnP |
+| USB audio | A computer over USB Audio Class (S3 native USB PHY) | This device as a sound card. Not on WROVER. |
 | Test tone | On-device generator | Diagnostic / speaker check |
 
 Switch modes from the Web UI ("Mode" page). The device persists the new
 mode and **reboots** to rebuild its task graph cleanly. This takes ~1 s
 plus the boot voice prompts.
+
+On Amped-S3 / Louder-S3, USB mode takes over the USB-C PHY (TinyUSB UAC
+speaker). Serial/flash that port with USB-Serial-JTAG in other modes;
+in USB mode hold BOOT for ROM download, or use a UART adapter. WROVER
+USB jacks are UART bridges and cannot become a sound card.
 
 See [audio_modes.md](audio_modes.md) for the full breakdown.
 

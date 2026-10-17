@@ -39,7 +39,9 @@ task fw:ports       # serial devices
 
 Generic `task fw:upload` defaults to Amped. Override with
 `task fw:upload PIO_ENV=louder-esp32-idf` (or `PIO_ENV=…` in the environment).
-Port defaults to `/dev/ttyUSB0`; pass `PIO_PORT=/dev/ttyACM0` for S3 CDC.
+Port defaults to `/dev/ttyUSB0`; pass `PIO_PORT=/dev/ttyACM0` for S3 CDC
+(USB-Serial-JTAG). In **USB audio** mode TinyUSB owns the PHY — flash via
+ROM download (hold BOOT, still `ttyACM`) or a UART adapter.
 
 Raw PlatformIO, from `ESP32_AudioPlatform/` (the directory that contains
 `platformio.ini`):
@@ -168,6 +170,8 @@ Runs Unity tests under `test/test_native/`. Current coverage:
 - `audio_util` — `gainDbToLinear` matches the ESP target's behaviour.
 - `snapcast_protocol` — base header parsing.
 - `eq_coeffs` — biquad coefficient generation matches the reference.
+- Mode FSM — USB↔USB Noop; USB↔any other RebootRequired; `nameForSource("USB")`.
+- Event IDs — `EV_USB_*` appended; `EV_COUNT_` is 22.
 
 The native env is also exercised in CI, so any change that breaks the
 host build will fail before flash.
@@ -180,7 +184,9 @@ host build will fail before flash.
   `esp_event`, `esp_http_server`, `esp_timer`, `lwip`, `mdns`, `bt`.
 - External libraries: `chmorgan/esp-libhelix-mp3` (MP3 decoding), pulled
   via the IDF component manager; vendored `espressif/led_strip` 3.0.3
-  (`components/led_strip/`) for WS2812 RMT.
+  (`components/led_strip/`) for WS2812 RMT; vendored
+  `espressif/usb_device_uac` 1.3.2 (`components_s3/usb_device_uac/`, S3
+  only) plus managed `espressif/tinyusb` for USB audio.
 
 ## Hardware
 

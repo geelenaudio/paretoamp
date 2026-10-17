@@ -42,6 +42,9 @@
 #define HAL_HAS_I2C_DAC 0
 #define HAL_HAS_HW_PEQ  0
 
+// Native USB PHY (GPIO 19/20). UAC gadget is Amped-S3 / Louder-S3 only.
+#define HAL_HAS_USB_AUDIO 1
+
 // ---- WS2812B (optional RGB, Sonocotta ESP32-S3 "RGB OUT") ----------------
 #define HAL_HAS_WS2812  1
 #define HAL_PIN_WS2812  GPIO_NUM_9

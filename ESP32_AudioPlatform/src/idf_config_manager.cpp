@@ -559,8 +559,12 @@ bool ConfigManager::load() {
   uint8_t src = 0;
   bool source_needs_migration = false;
   if (nvs_get_u8(h, NVS_KEY_SOURCE, &src) == ESP_OK) {
-    if (src > (uint8_t)AudioSource::TestTone) {
+    if (src > (uint8_t)AudioSource::Usb) {
       ESP_LOGW(TAG, "Migrating unknown audio source %u -> Bluetooth", (unsigned)src);
+      audio_source_ = AudioSource::Bluetooth;
+      source_needs_migration = true;
+    } else if (src == (uint8_t)AudioSource::Usb && !HAL_HAS_USB_AUDIO) {
+      ESP_LOGW(TAG, "USB audio source not supported on this board; migrating to Bluetooth");
       audio_source_ = AudioSource::Bluetooth;
       source_needs_migration = true;
     } else {
@@ -936,6 +940,9 @@ void ConfigManager::setHeadroom(HeadroomMode mode, float manual_db) {
 // ---- Audio source / Snapcast / WiFi --------------------------------------
 
 void ConfigManager::setAudioSource(AudioSource s) {
+#if !HAL_HAS_USB_AUDIO
+  if (s == AudioSource::Usb) s = AudioSource::Bluetooth;
+#endif
   audio_source_ = s;
   markDirtyNet();
 }

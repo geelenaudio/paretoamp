@@ -71,6 +71,7 @@ pio run -e louder-esp32-idf -t uploadfs --upload-port /dev/ttyUSB0
 The Geelen Audio Amp is a networked I2S audio solution with:
 
 - **Bluetooth A2DP Sink** – stream from phone/tablet (Classic BT on ESP32-WROVER)
+- **USB audio** – S3 boards enumerate as a UAC playback gadget (computer sound card). WROVER USB is UART-only. See [docs/audio_modes.md](docs/audio_modes.md)
 - **Network (Snapclient)** – Snapcast client; pair with `snapserver` + `librespot`
 - **Parametric EQ** – Amped: 10-band software PEQ + software volume, **always ganged** (one curve on both channels). Independent L/R software curves are out of scope: the stereo cascade already fills most of Core 1 on Amped-WROVER. Louder: 15-band TAS hardware PEQ per channel + hardware volume, optional Unlink. Details: [docs/eq.md](docs/eq.md).
 - **Web control panel** – volume, source, EQ, WiFi setup, factory reset

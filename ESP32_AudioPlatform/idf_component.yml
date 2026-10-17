@@ -2,4 +2,7 @@ dependencies:
   espressif/mdns: "^1.2.2"
   chmorgan/esp-libhelix-mp3: "^1.0.3"
   espressif/led_strip: "^3.0.3"
+  # UAC gadget is vendored at components_s3/usb_device_uac (S3 EXTRA_COMPONENT_DIRS).
+  # TinyUSB is fetched from that component's own idf_component.yml.
+
 

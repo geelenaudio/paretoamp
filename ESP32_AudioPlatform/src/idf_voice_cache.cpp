@@ -50,6 +50,7 @@ constexpr ClipSpec kClipManifest[] = {
     {VOICE_CLIP_DLNA_MODE,           "/spiffs/audio/DLNAMode.mp3",           "DLNAMode.mp3"},
     {VOICE_CLIP_BLUETOOTH_CONNECTED, "/spiffs/audio/BluetoothConnected.mp3", "BluetoothConnected.mp3"},
     {VOICE_CLIP_PAIRING,             "/spiffs/audio/Pairing.mp3",            "Pairing.mp3"},
+    {VOICE_CLIP_USB_MODE,            "/spiffs/audio/UsbMode.mp3",            "UsbMode.mp3"},
 };
 static_assert(sizeof(kClipManifest) / sizeof(kClipManifest[0]) == (size_t)VOICE_CLIP_COUNT_,
               "kClipManifest out of sync with voice_clip_id_t");
