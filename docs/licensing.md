@@ -48,6 +48,7 @@ GPL §6 ("Installation Information for User Products").
 | sonocotta esp32-tas5805m-dac (vendored)  | GPL-3.0-or-later  | `components/tas5805m/` (Louder only) |
 | ESP-IDF (framework, drivers, esp_http_server) | Apache-2.0   | Toolchain / SDK   |
 | espressif/led_strip (vendored v3.0.3)        | Apache-2.0   | `components/led_strip/` (WS2812 RMT) |
+| chmorgan/esp-libhelix-mp3 (vendored)         | Apache-2.0 wrapper; RealNetworks RPSL/RCSL decoder | `components/libhelix-mp3/` |
 | espressif/usb_device_uac 1.3.2 (S3 UAC gadget) | Apache-2.0 | `components_s3/usb_device_uac/` (S3 only; `usb_descriptors.c` renamed for PlatformIO) |
 | espressif/tinyusb (pulled by usb_device_uac) | MIT          | `managed_components/` on S3 builds |
 | ESP-IDF `nvs_flash`, `esp_wifi`, `esp_a2dp_api` | Apache-2.0 + ESP-IDF proprietary licence bundle | Toolchain / SDK |
