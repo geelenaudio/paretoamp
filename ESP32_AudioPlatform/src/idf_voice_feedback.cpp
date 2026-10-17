@@ -293,6 +293,7 @@ void voiceFeedbackScheduleBoot() {
     case AudioSource::Bluetooth: mode_clip = VOICE_CLIP_BLUETOOTH_MODE; break;
     case AudioSource::Network:   mode_clip = VOICE_CLIP_SNAPCAST_MODE; break;
     case AudioSource::Dlna:      mode_clip = VOICE_CLIP_DLNA_MODE; break;
+    case AudioSource::Usb:       mode_clip = VOICE_CLIP_USB_MODE; break;
     case AudioSource::TestTone:
       // Test-tone has no spoken mode clip — the Wi-Fi clip alone marks
       // "boot pair done".

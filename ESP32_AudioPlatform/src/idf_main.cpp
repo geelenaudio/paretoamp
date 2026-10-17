@@ -21,9 +21,8 @@
 #include "idf_http_server.h"
 #include "idf_snapclient.h"
 #include "esp_timer.h"
-#if CONFIG_BT_ENABLED
 #include "idf_a2dp_sink.h"
-#endif
+#include "idf_usb_audio.h"
 #include "idf_cpu_sampler.h"
 #include "idf_logs.h"
 #include "idf_dlna.h"
@@ -531,6 +530,20 @@ extern "C" void app_main(void) {
 #else
   if (src == geelen_idf::AudioSource::Bluetooth) {
     ESP_LOGW("geelen", "Bluetooth source selected but BT is disabled in sdkconfig — ignoring");
+  }
+#endif
+
+#if HAL_HAS_USB_AUDIO
+  if (src == geelen_idf::AudioSource::Usb) {
+    char usb_name[geelen_idf::DEV_NAME_MAX];
+    g_cfg.getDeviceName(usb_name, sizeof(usb_name));
+    if (!geelen_idf::usbAudioBegin(&g_engine, &g_cfg, usb_name[0] ? usb_name : "Geelen Amp")) {
+      ESP_LOGW("geelen", "USB audio gadget failed to start");
+    }
+  }
+#else
+  if (src == geelen_idf::AudioSource::Usb) {
+    ESP_LOGW("geelen", "USB audio source selected but HAL_HAS_USB_AUDIO=0 — ignoring");
   }
 #endif
 

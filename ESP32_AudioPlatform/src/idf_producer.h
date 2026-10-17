@@ -1,6 +1,6 @@
 // Phase 3 — minimal producer abstraction for runtime-swappable audio sources.
 //
-// Today the firmware launches A2DP / Snapclient / DLNA / TestTone in `app_main`
+// Today the firmware launches A2DP / Snapclient / DLNA / TestTone / USB in `app_main`
 // based on `cfg->getAudioSource()`. Switching modes therefore requires a reboot
 // because the task graph is set up once and never torn down. Phase 3 takes
 // the first step toward runtime swap by introducing this interface; future
@@ -21,6 +21,8 @@
 //     no-op on transitions but tracks it for state reporting.
 //   - TestTone (`testToneStart/Stop`)   — already has a clean stop path;
 //     trivial wrap.
+//   - USB (`usbAudioBegin`)             — REBOOT-REQUIRED; TinyUSB takes the
+//     USB DWC PHY and cannot share it with USB-Serial-JTAG. S3 only.
 //
 // The interface itself is deliberately tiny: start, stop, name, requiresReboot.
 // Anything richer (state-version reporting, telemetry, mute requests) lands

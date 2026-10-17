@@ -18,6 +18,8 @@ already shipped.
 
 ## Board / HAL
 
+- [x] USB Audio Class playback (`AudioSource::Usb`) on Amped-S3 / Louder-S3. WROVER cannot enumerate UAC (UART bridge). Default NVS source stays Bluetooth; S3 default-to-USB is a follow-up.
+- [ ] On-device soak of Amped-S3 USB + 10-band software PEQ (`dma_wait` / underruns).
 - [ ] On-device validation of Amped-S3, Louder-WROVER, Louder-S3 (only Amped-WROVER was validated on `/dev/ttyUSB0`).
 - [ ] 16 MB S3 partition/OTA layout.
 - [ ] Periodic `TAS5825M_ADDR_FAULT` poll surfaced as `state.dac.fault`.

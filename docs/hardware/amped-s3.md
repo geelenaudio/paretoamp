@@ -41,6 +41,14 @@ Same DAC + amp topology as the WROVER Amped, new SoC.
 - **Software** parametric EQ, 10 bands (identical to Amped-WROVER). Always
   ganged; Unlink is Louder-only ([eq.md](../eq.md)).
 
+## USB audio
+
+GPIO 19/20 are USB D−/D+. `HAL_HAS_USB_AUDIO=1`. Select **USB audio** in
+the SPA to enumerate as a UAC speaker (48 kHz → engine 44.1). That mode
+releases USB-Serial-JTAG so TinyUSB can own the PHY; flash via ROM
+download (hold BOOT) or UART. Other modes keep `ttyACM` USJ. Confirm the
+board USB-C is the SoC PHY, not a UART bridge. See [audio_modes.md](../audio_modes.md).
+
 ## Flashing
 
 From the repo root: `task fw:amped-s3`. S3 often enumerates as `/dev/ttyACM0`

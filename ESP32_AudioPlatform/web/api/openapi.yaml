@@ -334,10 +334,10 @@ paths:
       tags: [Audio]
       summary: Switch audio source
       description: |
-        Transitions between `bluetooth`, `snapclient`, `dlna`, and
-        `test_tone`. Any edge that crosses the `bluetooth` boundary forces
-        a reboot so the BT classic stack can be (un)loaded cleanly; the
-        reply indicates whether a reboot was scheduled.
+        Transitions between `bluetooth`, `snapclient`, `dlna`, `usb`, and
+        `test_tone`. Edges that cross `bluetooth` or `usb` force a reboot
+        (Bluedroid teardown and TinyUSB vs USB-Serial-JTAG PHY ownership).
+        `usb` is S3-only (`supports_usb`); Amped/Louder WROVER return 400.
       operationId: setMode
       requestBody:
         required: true
@@ -1057,8 +1057,10 @@ components:
   schemas:
     Mode:
       type: string
-      enum: [bluetooth, snapclient, dlna, test_tone]
-      description: Active audio source.
+      enum: [bluetooth, snapclient, dlna, test_tone, usb]
+      description: |
+        Active audio source. `usb` is USB Audio Class playback on ESP32-S3
+        boards with a native USB PHY (`state.supports_usb`).
 
     VolumeSetting:
       type: object
@@ -1304,6 +1306,14 @@ components:
           minimum: 0
           description: Milliseconds remaining in the inquiry window; 0 if hidden.
 
+    UsbPublic:
+      type: object
+      description: USB Audio Class gadget (present only when `supports_usb` is true).
+      properties:
+        connected: { type: boolean, description: TinyUSB stack is up. }
+        streaming: { type: boolean, description: Host is sending speaker PCM. }
+        rate_hz: { type: integer, description: Host sample rate advertised by UAC (typically 48000). }
+
     BluetoothSetting:
       allOf:
         - $ref: "#/components/schemas/BluetoothPublic"
@@ -1324,6 +1334,9 @@ components:
             - $ref: "#/components/schemas/IdentityPublic"
         firmware:    { type: string }
         mode:        { $ref: "#/components/schemas/Mode" }
+        supports_usb:
+          type: boolean
+          description: True on Amped-S3 / Louder-S3 (`HAL_HAS_USB_AUDIO`). WROVER is always false.
         volume:      { $ref: "#/components/schemas/VolumeSetting" }
         channels:    { $ref: "#/components/schemas/ChannelSetting" }
         led:         { $ref: "#/components/schemas/LedState" }
@@ -1331,6 +1344,7 @@ components:
         dlna:        { $ref: "#/components/schemas/DlnaSetting" }
         wifi:        { $ref: "#/components/schemas/WifiSetting" }
         bluetooth:   { $ref: "#/components/schemas/BluetoothPublic" }
+        usb:         { $ref: "#/components/schemas/UsbPublic" }
         voice_feedback: { type: boolean, description: "Cached PSRAM voice cues (boot + BT events)." }
         _v:
           type: integer

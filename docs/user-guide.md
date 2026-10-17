@@ -31,6 +31,14 @@
   the TAS fader on Louder; the phone rocker still matches 0–100%. Renaming
   applies live; some phones keep the old GAP name until you re-pair.
 
+## USB audio (S3)
+
+Amped-S3 and Louder-S3 can appear as a USB sound card. On Mode, pick
+**USB audio** (hidden on WROVER). The computer plays 48 kHz stereo into
+the on-device EQ. Switching to USB reboots; the USB-C port then leaves
+USB-Serial-JTAG so hold BOOT to flash, or use UART. See
+[audio_modes.md](audio_modes.md).
+
 ## Identity / mDNS
 
 - **Overview** has a device-name field. **About → Identity** also edits

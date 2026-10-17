@@ -14,7 +14,7 @@
 //   - DLNA `Play` no longer contends with the prompt path for the streamer
 //     singleton, so the 15 s SOAP boot-wait can become an event subscription.
 //
-// Memory cost: ~1.5 MB of PSRAM total for the seven clips at 44.1 kHz
+// Memory cost: ~1.7 MB of PSRAM total for the eight clips at 44.1 kHz
 // stereo s16 (well under the 8 MB available on the WROVER-N8R8). Numbers
 // are exposed via `voiceCacheTotalPsramBytes()` for /api/state.
 //
@@ -46,6 +46,7 @@ typedef enum {
   VOICE_CLIP_DLNA_MODE,
   VOICE_CLIP_BLUETOOTH_CONNECTED,
   VOICE_CLIP_PAIRING,
+  VOICE_CLIP_USB_MODE,
   VOICE_CLIP_COUNT_,
 } voice_clip_id_t;
 

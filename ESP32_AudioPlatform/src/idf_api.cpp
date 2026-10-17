@@ -16,6 +16,7 @@
 #include "idf_mode_manager.h"
 #include "idf_identity.h"
 #include "idf_a2dp_sink.h"
+#include "idf_usb_audio.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -243,6 +244,7 @@ static const char* modeName(AudioSource s) {
     case AudioSource::Network:   return "snapclient";
     case AudioSource::Dlna:      return "dlna";
     case AudioSource::TestTone:  return "test_tone";
+    case AudioSource::Usb:       return "usb";
   }
   return "bluetooth";
 }
@@ -256,6 +258,10 @@ static bool parseModeName(const char* s, AudioSource* out) {
   if (!strcmp(s, "dlna") || !strcmp(s, "upnp")) { *out = AudioSource::Dlna; return true; }
   if (!strcmp(s, "test_tone") || !strcmp(s, "testtone") || !strcmp(s, "tone")) {
     *out = AudioSource::TestTone;
+    return true;
+  }
+  if (!strcmp(s, "usb") || !strcmp(s, "uac")) {
+    *out = AudioSource::Usb;
     return true;
   }
   return false;
@@ -402,6 +408,7 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON_AddStringToObject(root, "firmware", desc ? desc->version : "dev");
 
   cJSON_AddStringToObject(root, "mode", modeName(cfg->getAudioSource()));
+  cJSON_AddBoolToObject(root, "supports_usb", HAL_HAS_USB_AUDIO ? true : false);
   cJSON_AddBoolToObject(root, "voice_feedback", cfg->getVoiceFeedbackEnabled());
 
   // Monotonic version, useful as an ETag analogue and so SPA clients can
@@ -469,6 +476,14 @@ cJSON* buildStateJson(ConfigManager* cfg) {
   cJSON_AddBoolToObject(bt, "discoverable", a2dpIsDiscoverable());
   cJSON_AddNumberToObject(bt, "window_ms_left", (double)a2dpPairingWindowMsLeft());
   cJSON_AddItemToObject(root, "bluetooth", bt);
+
+#if HAL_HAS_USB_AUDIO
+  cJSON* usb = cJSON_CreateObject();
+  cJSON_AddBoolToObject(usb, "connected", usbAudioMounted());
+  cJSON_AddBoolToObject(usb, "streaming", usbAudioStreaming());
+  cJSON_AddNumberToObject(usb, "rate_hz", (double)usbAudioHostRateHz());
+  cJSON_AddItemToObject(root, "usb", usb);
+#endif
 
   return root;
 }
@@ -813,7 +828,12 @@ static esp_err_t handle_post_mode(httpd_req_t* req) {
   if (!mode || !parseModeName(mode, &next)) {
     cJSON_Delete(body);
     return send_err_json(req, HTTPD_400_BAD_REQUEST,
-                         "mode must be one of bluetooth|snapclient|dlna|test_tone");
+                         "mode must be one of bluetooth|snapclient|dlna|test_tone|usb");
+  }
+  if (next == AudioSource::Usb && !HAL_HAS_USB_AUDIO) {
+    cJSON_Delete(body);
+    return send_err_json(req, HTTPD_400_BAD_REQUEST,
+                         "usb mode requires native USB (Amped-S3 / Louder-S3)");
   }
   AudioSource prev = cfg->getAudioSource();
   cfg->setAudioSource(next);

@@ -46,6 +46,9 @@
 #define HAL_I2C_FREQ_HZ        400000
 #define HAL_TAS5825M_I2C_ADDR  0x4C  // 7-bit address; ADR pin low → 0x4C, high → 0x4D
 
+// Classic ESP32 has no USB PHY; the USB jack is a UART bridge (CH340).
+#define HAL_HAS_USB_AUDIO 0
+
 // ---- WS2812B (optional RGB, Sonocotta "RGB OUT" = GPIO 12 on ESP32) ------
 #define HAL_HAS_WS2812  1
 #define HAL_PIN_WS2812  GPIO_NUM_12

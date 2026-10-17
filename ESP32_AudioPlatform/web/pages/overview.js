@@ -65,6 +65,7 @@ function modeLabel(mode) {
   if (mode === "snapclient") return "Snapclient";
   if (mode === "dlna") return "DLNA renderer";
   if (mode === "test_tone") return "Test bench";
+  if (mode === "usb") return "USB audio";
   return mode || "—";
 }
 

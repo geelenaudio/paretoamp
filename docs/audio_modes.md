@@ -2,30 +2,32 @@
 
 The device runs in exactly one **audio source** at a time. The choice is
 persisted in NVS (`audio_source` key) and surfaced via the API as a string
-(`bluetooth`, `snapclient`, `dlna`, `test_tone`). Mode-specific tasks are
+(`bluetooth`, `snapclient`, `dlna`, `usb`, `test_tone`). Mode-specific tasks are
 spawned at boot from `app_main`; switching modes from the Web UI persists
 the new choice and **reboots** the device so the task graph is rebuilt
 cleanly (see "Why mode changes reboot" below).
 
-## The four modes
+## The five modes
 
 | Mode | Enum | API string | Producer that feeds the engine | DLNA renderer always on? |
 |---|---|---|---|---|
 | Bluetooth | `AudioSource::Bluetooth` | `bluetooth` | `a2dp_pump` prio 12 (Bluedroid SBC → StreamBuffer → resample → `feedPCM`) | Yes (if `dlna_enabled`) |
 | Snapcast | `AudioSource::Network` | `snapclient` | `Snapclient::tick` (TCP WireChunk -> `feedPCM`) | Yes (if `dlna_enabled`) |
 | DLNA only | `AudioSource::Dlna` | `dlna` | `mp3::Streamer` (HTTP MP3 -> Helix -> resample -> `feedPCM`) | Yes |
+| USB | `AudioSource::Usb` | `usb` | `usb_pump` prio 12 (TinyUSB UAC → StreamBuffer → resample 48 k → 44.1 → `feedPCM`). S3 only | Yes (if `dlna_enabled`) |
 | Test tone | `AudioSource::TestTone` | `test_tone` | `idf_test_tone` (sine / square / pink / log sweep) | No |
 
 `AudioSource` is defined in `idf_config_manager.h`; mapping to API strings
 lives in `idf_api.cpp`:
 
-```151:167:ESP32_AudioPlatform/src/idf_api.cpp
+```241:249:ESP32_AudioPlatform/src/idf_api.cpp
     case AudioSource::Bluetooth: return "bluetooth";
     case AudioSource::Network:   return "snapclient";
     case AudioSource::Dlna:      return "dlna";
     case AudioSource::TestTone:  return "test_tone";
+    case AudioSource::Usb:       return "usb";
   }
-  return "";
+  return "bluetooth";
 }
 
 bool parseAudioSource(const char* s, AudioSource* out) {
@@ -142,6 +144,31 @@ mode clip:
   }
 ```
 
+### USB (S3 only)
+
+`HAL_HAS_USB_AUDIO` is 1 on Amped-S3 and Louder-S3 (native USB PHY on
+GPIO 19/20). WROVER USB is a UART bridge; those images set the flag to 0,
+`GET /api/state` reports `supports_usb: false`, the SPA hides the card, and
+`POST /api/mode {mode:"usb"}` returns 400. An NVS `src=4` blob on WROVER
+migrates to Bluetooth.
+
+USB is a **UAC1 speaker** (playback only, 16-bit stereo at 48 kHz). The
+engine and I2S stay at 44.1 kHz master; `usb_pump` resamples like A2DP.
+TinyUSB takes the USB DWC controller, so USB-Serial-JTAG is released at
+USB-mode boot. Other S3 modes keep USJ (`ttyACM`). Flash a USB-mode device
+via ROM download (hold BOOT) or UART; the app does not run a CDC ACM
+gadget (`esp_tinyusb` has no AUDIO class — we use `espressif/usb_device_uac`
+on TinyUSB directly).
+
+Host volume/mute Feature Unit maps onto the same 0–100% / mute as the SPA.
+Voice prompts gate `feedPCM` the same way A2DP does.
+
+Switching into or out of USB **reboots** (PHY owner). Do not enumerate UAC
+while Snapcast/Bluetooth is selected.
+
+Amped-S3 still runs the 10-band software PEQ on Core 1. Watch `dma_wait`
+and underruns under USB+EQ; Louder-S3 HW PEQ is the lighter path.
+
 ### Test tone
 
 The test-tone task is spawned only after the voice boot pair drains, so
@@ -174,7 +201,8 @@ waveform from the Web UI.
 
 Tasks created in `app_main` are pinned for the lifetime of the firmware:
 the snap task is in an infinite loop, the BT controller / Bluedroid stack
-allocates substantial RAM that is hard to release cleanly, and the test
+allocates substantial RAM that is hard to release cleanly, USB TinyUSB
+cannot share the PHY with USB-Serial-JTAG, and the test
 tone has its own producer thread. A teardown path that handles every
 combination is much riskier than a 500 ms restart, especially since the
 NVS write happens BEFORE the restart so the device boots straight into

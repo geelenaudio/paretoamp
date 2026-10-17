@@ -53,6 +53,9 @@
 #define HAL_HAS_I2C_DAC   0
 #define HAL_HAS_HW_PEQ    0
 
+// Classic ESP32 has no USB PHY; the USB jack is a UART bridge.
+#define HAL_HAS_USB_AUDIO 0
+
 // ---- WS2812B (optional RGB, Sonocotta "RGB OUT") -------------------------
 // GPIO 12 is MTDI (strapping). Idle-low is safe at reset; init in app_main.
 // Strip is 5 V + GND + data; firmware only drives the data pin.

@@ -1,0 +1,24 @@
+# USB Audio Class gadget (S3 native USB PHY only). Merged into Amped-S3 /
+# Louder-S3 sdkconfig_defaults. Do not add this overlay on WROVER envs.
+#
+# Speaker-only 48 kHz 16-bit stereo. The engine stays at 44.1 kHz; usb_pump
+# resamples. Mic channels 0. TinyUSB + SPK tasks on Core 0 so Core 1 keeps
+# audio_task / usb_pump.
+
+CONFIG_UAC_SPEAKER_CHANNEL_NUM=2
+CONFIG_UAC_MIC_CHANNEL_NUM=0
+CONFIG_UAC_SAMPLE_RATE=48000
+CONFIG_UAC_BIT_RESOLUTION_16=y
+CONFIG_UAC_SPK_INTERVAL_MS=10
+CONFIG_UAC_SUPPORT_MACOS=y
+
+CONFIG_UAC_TUSB_VID=0x303A
+CONFIG_UAC_TUSB_PID=0x80A1
+CONFIG_UAC_TUSB_MANUFACTURER="Geelen Audio"
+CONFIG_UAC_TUSB_PRODUCT="Geelen Amp"
+CONFIG_UAC_TUSB_SERIAL_NUM="0001"
+
+CONFIG_UAC_TINYUSB_TASK_PRIORITY=5
+CONFIG_UAC_TINYUSB_TASK_CORE=0
+CONFIG_UAC_SPK_TASK_PRIORITY=5
+CONFIG_UAC_SPK_TASK_CORE=0

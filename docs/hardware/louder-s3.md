@@ -36,6 +36,12 @@ IR / mic / TFT stay out of scope.
 - **Hardware** parametric EQ, 15 bands, Q5.27 Book 0xAA. See
   [`docs/eq.md`](../eq.md) and [louder-wrover.md](louder-wrover.md).
 
+## USB audio
+
+Same UAC gadget as Amped-S3 (`HAL_HAS_USB_AUDIO=1`). Speaker PVDD still
+powers the Class-D; the USB cable is data only. See
+[amped-s3.md](amped-s3.md) and [audio_modes.md](../audio_modes.md).
+
 ## Flashing
 
 From the repo root: `task fw:louder-s3`. S3 often enumerates as `/dev/ttyACM0`

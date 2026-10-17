@@ -11,7 +11,9 @@
 //   - either side is Bluetooth:     return RebootRequired; the supervisor
 //                                   schedules a restart so app_main can
 //                                   bring up / tear down Bluedroid cleanly.
-//   - both sides are non-Bluetooth: return RebootRequired for now (snap /
+//   - either side is USB:           return RebootRequired; TinyUSB vs
+//                                   USB-Serial-JTAG cannot share the PHY.
+//   - both sides are non-BT/USB:    return RebootRequired for now (snap /
 //                                   test-tone / DLNA hot-swap is gated on
 //                                   per-producer cleanup work that has not
 //                                   landed yet).
@@ -47,6 +49,7 @@ constexpr uint8_t kBluetooth = 0;
 constexpr uint8_t kSnapclient = 1;
 constexpr uint8_t kDlna = 2;
 constexpr uint8_t kTestTone = 3;
+constexpr uint8_t kUsb = 4;
 }  // namespace mode_source
 
 // Pure policy: given a (prev, next) pair, decide what kind of transition
@@ -70,6 +73,13 @@ inline ModeTransitionResult decideTransition(uint8_t prev_source,
     return ModeTransitionResult::RebootRequired;
   }
 
+  // USB either side ⇒ reboot. TinyUSB takes the USB DWC PHY; other S3
+  // modes keep USB-Serial-JTAG. Those stacks cannot share the PHY, so
+  // USB is a boot-time task-graph choice like Bluetooth.
+  if (prev_source == mode_source::kUsb || next_source == mode_source::kUsb) {
+    return ModeTransitionResult::RebootRequired;
+  }
+
   // Snapclient ↔ DLNA ↔ TestTone: structurally hot-swappable, but the
   // concrete `IProducer` implementations don't exist yet (the snap task
   // lifecycle currently lives in app_main and would need refactoring).
@@ -87,6 +97,7 @@ inline const char* nameForSource(uint8_t source) {
     case mode_source::kSnapclient: return "Snapclient";
     case mode_source::kDlna:       return "DLNA";
     case mode_source::kTestTone:   return "TestTone";
+    case mode_source::kUsb:        return "USB";
     default:                       return "?";
   }
 }

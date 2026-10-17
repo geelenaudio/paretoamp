@@ -80,6 +80,31 @@ This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`)
   int8=` after pair; soak a few minutes with SPA + A2DP. Do not expect
   more than ~24 KiB internal DRAM in this configuration.
 
+### USB audio (S3 only)
+
+Requires Amped-S3 or Louder-S3 with USB-C wired to the SoC PHY (GPIO 19/20).
+WROVER builds must **not** show the USB card (`supports_usb: false`) and
+`POST /api/mode {"mode":"usb"}` returns 400.
+
+- **Idle S3 (not USB mode)**: serial is USB-Serial-JTAG (`ttyACM`). SPA Mode
+  page shows **USB audio**.
+- **Select USB**: reboot; host sees a UAC speaker (“Geelen Amp”) at 48 kHz
+  16-bit stereo. Spoken/ident clip after the Wi-Fi prompt.
+- **Playback**: Windows / macOS / Linux play through EQ and the volume
+  control (host Feature Unit and SPA). Amped-S3: 10-band software PEQ on;
+  Louder-S3: TAS PEQ.
+- **Pause / unplug / replug**: audio recovers, no reboot loop, IIR not stuck.
+- **Budget**: log `dma_wait` and underruns. Amped-S3 + EQ is the gate — if
+  `dma_wait` collapses toward 12–20% with glitches, stop and cut USB work.
+- **Voice**: trigger a prompt while the host is playing; music gates, prompt
+  plays, music resumes.
+- **Mode USB → Snapcast → USB**: USJ vs TinyUSB each boot; flashing still
+  works (BOOT download or UART in USB mode).
+- **Soak** ≥ 30 min: no SOF stalls, `overflows_` not climbing.
+- **WROVER**: NVS `src=4` migrates to Bluetooth on boot.
+
+Louder: speaker rail still required; USB does not power the Class-D.
+
 ### Network (Snapclient)
 
 - **Configure Snapserver**: set host + port in the Web UI (default port 1704 — the Snapcast **stream** port).

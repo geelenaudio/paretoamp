@@ -112,7 +112,7 @@ export const api = {
     try {
       return await j("POST", "/api/mode", { mode });
     } catch (_) {
-      const map = { bluetooth: 0, snapclient: 1, dlna: 2, test_tone: 3 };
+      const map = { bluetooth: 0, snapclient: 1, dlna: 2, test_tone: 3, usb: 4 };
       const s = map[mode] ?? 0;
       return await j("POST", `/api/source?s=${s}`);
     }
