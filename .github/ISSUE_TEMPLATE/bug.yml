@@ -1,0 +1,55 @@
+name: Bug
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search [existing issues](https://github.com/geelenaudio/paretoamp/issues) first.
+        See [CONTRIBUTING.md](https://github.com/geelenaudio/paretoamp/blob/main/CONTRIBUTING.md).
+  - type: dropdown
+    id: board
+    attributes:
+      label: Board
+      options:
+        - Amped-ESP32 (WROVER)
+        - Amped-ESP32-S3
+        - Louder-ESP32 / Plus (WROVER)
+        - Louder-ESP32-S3
+        - Host / native tests (no board)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version
+      description: About on the Web UI, or the GitHub Release tag you flashed.
+      placeholder: v0.0.1
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      placeholder: Flash, join Geelen-Audio, set source to Bluetooth, …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Web UI → Logs, or serial at 115200. Strip Wi-Fi passwords.
+      render: text

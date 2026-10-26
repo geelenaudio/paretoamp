@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Using the firmware
+    url: https://github.com/geelenaudio/paretoamp/blob/main/docs/using-firmware.md
+    about: Flash a release binary and first-boot Wi-Fi, without building.
+  - name: Contributing guide
+    url: https://github.com/geelenaudio/paretoamp/blob/main/CONTRIBUTING.md
+    about: How to report bugs, request features, and open pull requests.

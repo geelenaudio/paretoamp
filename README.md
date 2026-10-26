@@ -13,23 +13,31 @@ Firmware from [geelen.audio](https://geelen.audio) for four boards in one tree: 
 **Licence:** GPL-3.0-or-later — [COPYING](COPYING),
 [docs/licensing.md](docs/licensing.md).
 
-## Flash
+## Use the firmware
 
-**Prebuilt images** are on [GitHub Releases](https://github.com/geelenaudio/paretoamp/releases)
-(one factory `.bin` per board: bootloader + partition table + app + website).
-Write the matching file at flash offset `0x0`. That **wipes NVS** (Wi-Fi,
-EQ, presets). Pick the Amped vs Louder file for your hardware — an Amped
-image never talks to the TAS.
+You can run a release binary without cloning this tree. Download the
+factory `.bin` for your board from
+[GitHub Releases](https://github.com/geelenaudio/paretoamp/releases)
+and write it at flash offset `0x0` (that **wipes NVS**). Full steps,
+file names, and first-boot Wi-Fi:
+[docs/using-firmware.md](docs/using-firmware.md).
 
 ```sh
-esptool --chip esp32  write-flash 0x0 pareto-amp-amped-esp32-vX.Y.Z.bin
-esptool --chip esp32s3 write-flash 0x0 pareto-amp-amped-esp32s3-vX.Y.Z.bin
+pip install esptool
+esptool --chip esp32  --port /dev/ttyUSB0 write-flash 0x0 pareto-amp-amped-esp32-vX.Y.Z.bin
+esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 pareto-amp-amped-esp32s3-vX.Y.Z.bin
 ```
 
-To keep NVS, clone the tag and run `task fw:flash` (app + SPIFFS only).
+Join the open hotspot **Geelen-Audio**, open
+[http://192.168.4.1/](http://192.168.4.1/), save home Wi-Fi. Day-to-day
+use: [docs/operating_guide.md](docs/operating_guide.md).
 
-The PlatformIO env is compile-time. An Amped image never talks to the TAS, so
-flashing it onto a Louder board makes EQ stay **software**. Use a named task:
+## Build from source
+
+To keep NVS while updating, clone the tag and run `task fw:flash`
+(app + SPIFFS only). The PlatformIO env is compile-time. An Amped image
+never talks to the TAS, so flashing it onto a Louder board makes EQ stay
+**software**. Use a named task:
 
 | Board | Flash (app + SPIFFS) | PIO env |
 | ----- | -------------------- | ------- |
@@ -71,12 +79,25 @@ pio run -e louder-esp32-idf -t upload --upload-port /dev/ttyUSB0
 pio run -e louder-esp32-idf -t uploadfs --upload-port /dev/ttyUSB0
 ```
 
+## Collaborate
+
+Issues and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening one.
+
+- [Open an issue](https://github.com/geelenaudio/paretoamp/issues/new/choose)
+  (bug or feature template).
+- Fork, branch from `main`, use Conventional Commits (`fix:`, `feat:`,
+  `docs:`, …). CI on the PR must pass.
+- Do not push version tags; semantic-release tags `main` after merge.
+
 ## Contents
 
+- [Using the firmware](docs/using-firmware.md) – download, flash, first boot
+- [Operating guide](docs/operating_guide.md) – Wi-Fi, Bluetooth, Snapcast, Web UI
+- [Contributing](CONTRIBUTING.md) – issues, PRs, Conventional Commits
 - [Hardware variants](docs/hardware/README.md) – four boards, pinouts, DAC
 - [EQ](docs/eq.md) – single-layer PEQ, software vs TAS5825M hardware
-- [User guide](docs/user-guide.md) – Setup, WiFi/AP, Bluetooth, Snapcast, EQ, Web UI
-- [Development](docs/development.md) – Architecture, modules, build, PlatformIO
+- [Development](docs/development.md) – architecture, modules, build, PlatformIO
 - [API reference](docs/api.md) – REST endpoints for the Web UI
 - [Manual test matrix](docs/manual-test-matrix.md) – Quick bring-up checks
 - [Roadmap](docs/roadmap.md) – deferred follow-ups
