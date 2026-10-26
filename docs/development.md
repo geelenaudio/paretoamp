@@ -74,8 +74,9 @@ Helpful flags:
 runs on every push to `main` after native tests pass. It reads
 **Conventional Commits**, picks the next SemVer, tags `vMAJOR.MINOR.PATCH`,
 writes [`pareto-amp/version.txt`](../pareto-amp/version.txt) (`PROJECT_VER` /
-About → Version), and opens a GitHub Release. CI then builds the four
-factory images and attaches them.
+About → Version), and opens a GitHub Release. Only then does CI build the
+four factory images and attach them. `docs:` / `chore:` commits skip the
+firmware matrix.
 
 | Commit | Release |
 |---|---|

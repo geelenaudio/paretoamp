@@ -46,8 +46,9 @@ wipe NVS; do not paste live credentials from a backup.
    | `BREAKING CHANGE:` in the footer | major release |
    | `docs:`, `chore:`, `style:`, `test:` | no release |
 
-5. Open a PR against `main`. CI (`.github/workflows/ci.yml`) must pass:
-   native tests plus factory images for all four boards.
+5. Open a PR against `main`. CI (`.github/workflows/ci.yml`) must pass
+   native tests. Factory images are built only after merge, when
+   semantic-release publishes a new version.
 
 Do not push `vMAJOR.MINOR.PATCH` tags and do not bump
 `pareto-amp/version.txt` by hand. semantic-release does both on `main`
