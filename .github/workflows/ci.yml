@@ -1,6 +1,5 @@
-# Pareto Amp CI — native tests + four-board factory images.
-# On push to main: semantic-release may tag and open a GitHub Release;
-# this workflow then stamps version.txt, rebuilds, and uploads the bins.
+# Pareto Amp CI — native tests on every push/PR. Four-board factory
+# images only when semantic-release publishes a new version on main.
 # Pin PlatformIO Core 6.1.19: 6.2.0 wants tool-scons 4.11.1; pioarduino
 # 55.03.37 wants 4.8.1. Those two delete/reinstall SCons mid-link and fail
 # with `No module named 'SCons.Tool.FortranCommon'`.
@@ -74,7 +73,7 @@ jobs:
 
   firmware:
     needs: [native, semantic]
-    if: always() && needs.native.result == 'success' && (needs.semantic.result == 'success' || needs.semantic.result == 'skipped')
+    if: needs.semantic.outputs.published == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -108,7 +107,6 @@ jobs:
         run: pip install --upgrade "platformio==6.1.19"
 
       - name: Stamp firmware version
-        if: needs.semantic.outputs.published == 'true'
         working-directory: pareto-amp
         run: |
           ver="${{ needs.semantic.outputs.version }}"

@@ -50,7 +50,8 @@ already shipped.
 - [ ] Native unit tests for the Wi-Fi validate/commit FSM (mock `esp_wifi_*`).
 - [ ] `pio check` / clang-tidy in Taskfile.
 - [ ] Hardware-in-the-loop harness for [manual-test-matrix.md](manual-test-matrix.md).
-- [ ] CI job that builds all four PIO envs on every PR.
+- [ ] Optional PR job that compiles all four PIO envs (release CI already
+      builds them when semantic-release publishes).
 
 ## SPA / UX
 

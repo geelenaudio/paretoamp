@@ -118,10 +118,10 @@ On-device Spotify Connect is **not** supported; use the Snapcast + librespot pat
 ## CI and releases
 
 On push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs
-native tests and builds all four boards.
-
-Pushes to `main` also run [semantic-release](https://github.com/semantic-release/semantic-release).
+native tests. Pushes to `main` also run
+[semantic-release](https://github.com/semantic-release/semantic-release).
 `feat:` / `fix:` / `BREAKING CHANGE:` commits become a `vMAJOR.MINOR.PATCH`
-tag and GitHub Release; CI attaches factory images. Use Conventional
-Commits — see [docs/development.md](docs/development.md). Version tags are
-created only by semantic-release, not by hand.
+tag and GitHub Release; only then does CI build and attach factory
+images. `docs:` / `chore:` commits do not rebuild firmware. Use
+Conventional Commits — see [docs/development.md](docs/development.md).
+Version tags are created only by semantic-release, not by hand.
