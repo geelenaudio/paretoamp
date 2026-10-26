@@ -4,7 +4,7 @@ The firmware is compiled from a single tree that targets four boards
 (see [`hardware/`](hardware/README.md)). The differences between those
 boards — pin numbers, DAC capabilities, whether the amp is controlled via a
 GPIO or via a TAS5825M state machine — are captured in the
-[`src/hal/`](../ESP32_AudioPlatform/src/hal/) layer at compile time.
+[`src/hal/`](../pareto-amp/src/hal/) layer at compile time.
 
 ## Layering
 
@@ -120,7 +120,7 @@ retries, coexist/BT work piles up, and Core 0 looks 70–90% busy even
 though I2S/PEQ run on Core 1.
 
 Firmware therefore takes **all ESP32 RMT SRAM: 512 symbols** (8 blocks
-× 64) in [`led_ws2812.cpp`](../ESP32_AudioPlatform/src/hal/led_ws2812.cpp)
+× 64) in [`led_ws2812.cpp`](../pareto-amp/src/hal/led_ws2812.cpp)
 — about 10 pixels of slack. That is the hardware cap. A 50-LED frame
 still needs ~2400 symbols, so the driver will always ping-pong; 512
 only makes each refill rarer. Do not compute `count × 24 × 2` and
@@ -166,7 +166,7 @@ env you picked. If you flashed the wrong env, the boot banner tells you —
 
 1. Create `src/hal/boards/<name>.h` mirroring one of the existing files.
 2. Add a `#elif defined(BOARD_<NAME>) …` case in
-   [`src/hal/hal_board.h`](../ESP32_AudioPlatform/src/hal/hal_board.h).
+   [`src/hal/hal_board.h`](../pareto-amp/src/hal/hal_board.h).
 3. Add a matching `[env:<name>]` block in `platformio.ini` with
    `build_flags = -DBOARD_<NAME>=1`.
 4. Ship a `sdkconfig.<env>` next to the existing ones.

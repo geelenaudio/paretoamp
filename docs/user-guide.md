@@ -25,7 +25,7 @@
 ## Bluetooth
 
 - Default source is **Bluetooth** (ESP32-WROVER builds). The device
-  advertises as **Geelen Audio** (or the name you set on Overview / About).
+  advertises as **Pareto Amp** (or the name you set on Overview / About).
   Pair from your phone; audio goes through the PEQ (software on Amped,
   TAS58xx on-chip on Louder; Louder can unlink L/R). Volume is software on Amped and
   the TAS fader on Louder; the phone rocker still matches 0–100%. Renaming

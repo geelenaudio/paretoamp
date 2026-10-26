@@ -52,7 +52,7 @@ headroom, active_slot }`.
   the curve cannot fit. Amped never returns this.
 - Presets are V4 (`EGP4`) with both curves; V3 loads as ganged (R=L).
 
-Canonical schema: [`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml).
+Canonical schema: [`web/api/openapi.yaml`](../pareto-amp/web/api/openapi.yaml).
 
 ### GET /api/snapcast
 
@@ -95,7 +95,7 @@ Also exposed on `GET /api/state` as `led`.
 
 Friendly name, DHCP/mDNS hostname, mDNS URL, and STA/AP/BT MACs
 (`current`, `factory`, `overridden`). Canonical schema:
-[`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml).
+[`web/api/openapi.yaml`](../pareto-amp/web/api/openapi.yaml).
 See [identity.md](identity.md).
 
 ### POST /api/identity

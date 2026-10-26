@@ -185,12 +185,12 @@ class StreamerImpl : public Streamer {
     int n;
     if (start_offset > 0) {
       n = snprintf(req, sizeof(req),
-                   "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Geelen/DLNA\r\n"
+                   "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ParetoAmp/DLNA\r\n"
                    "Range: bytes=%lu-\r\nConnection: close\r\n\r\n",
                    path, host, (unsigned long)start_offset);
     } else {
       n = snprintf(req, sizeof(req),
-                   "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Geelen/DLNA\r\n"
+                   "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ParetoAmp/DLNA\r\n"
                    "Connection: close\r\n\r\n",
                    path, host);
     }

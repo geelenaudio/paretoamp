@@ -53,11 +53,11 @@ void scheduleRestart(unsigned delay_ms);
 // intentionally tiny (<1 KB) so it fits inside a single TCP segment.
 static const char FALLBACK_INDEX_HTML[] = R"raw(<!DOCTYPE html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Geelen Audio (bootstrap)</title>
+<title>Pareto Amp (bootstrap)</title>
 <style>body{font:14px/1.5 system-ui;background:#16181A;color:#FFFCF2;margin:0;padding:2rem;}
 a{color:#8aa890}code{background:#24282c;padding:2px 6px;border-radius:4px;font-family:ui-monospace,monospace}</style>
 </head><body>
-<h1>Geelen Audio — SPIFFS not loaded</h1>
+<h1>Pareto Amp — SPIFFS not loaded</h1>
 <p>The firmware is running but the SPA assets are missing from SPIFFS. Upload them with:</p>
 <p><code>pio run -t uploadfs -e amped-esp32-idf</code></p>
 <p>Legacy API probes: <a href="/api/status">/api/status</a></p>
@@ -69,7 +69,7 @@ a{color:#8aa890}code{background:#24282c;padding:2px 6px;border-radius:4px;font-f
 // creds to `POST /api/wifi`, reads nearby SSIDs from `GET /api/wifi/scan`.
 static const char SETUP_HTML[] = R"raw(<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Geelen Audio — Wi-Fi setup</title>
+<title>Pareto Amp — Wi-Fi setup</title>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}

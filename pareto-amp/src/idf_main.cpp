@@ -313,7 +313,7 @@ static constexpr int kBtDeferMaxPolls = 6;
 static const char* a2dp_name_from_cfg() {
   static char name[geelen_idf::DEV_NAME_MAX];
   g_cfg.getDeviceName(name, sizeof(name));
-  return name[0] ? name : "Geelen Audio";
+  return name[0] ? name : geelen_idf::kDefaultDeviceName;
 }
 
 static void deferred_a2dp_start_task(void*) {
@@ -407,7 +407,7 @@ extern "C" void app_main(void) {
     hooks.free_fn = &cjson_free_psram;
     cJSON_InitHooks(&hooks);
   }
-  ESP_LOGI("geelen", "Geelen Audio Amp – ESP-IDF env boot");
+  ESP_LOGI("geelen", "Pareto Amp – ESP-IDF env boot");
   // Bring up the control-plane event loop early so any subsystem that
   // wants to post an event during init has somewhere to post it. Phase 0
   // only logs events; Phases 1–4 migrate Wi-Fi / voice / mode / state-diff
@@ -537,7 +537,7 @@ extern "C" void app_main(void) {
   if (src == geelen_idf::AudioSource::Usb) {
     char usb_name[geelen_idf::DEV_NAME_MAX];
     g_cfg.getDeviceName(usb_name, sizeof(usb_name));
-    if (!geelen_idf::usbAudioBegin(&g_engine, &g_cfg, usb_name[0] ? usb_name : "Geelen Amp")) {
+    if (!geelen_idf::usbAudioBegin(&g_engine, &g_cfg, usb_name[0] ? usb_name : geelen_idf::kDefaultDeviceName)) {
       ESP_LOGW("geelen", "USB audio gadget failed to start");
     }
   }

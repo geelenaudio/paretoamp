@@ -37,8 +37,8 @@ If you turn voice feedback off in the Web UI, the device starts silent.
 5. The device restarts (~500 ms). On the next boot you should hear
    "Wi-Fi connected" + the mode clip, and the device is reachable on
    your home network at the IP address your router assigned. mDNS
-   hostname defaults to `geelen-audio.local` (slug of the friendly name
-   **Geelen Audio**). Open `http://geelen-audio.local/` if your client
+   hostname defaults to `geelen-audio.local` (the factory friendly name
+   **Pareto Amp** is not slugged). Open `http://geelen-audio.local/` if your client
    supports multicast DNS, or use the DHCP IP. Rename hostname on
    **About → Identity** — see [identity.md](identity.md).
 
@@ -78,7 +78,7 @@ lists. After the window it is quiet: the last bonded phone can still
 reconnect; nobody new will see it in a scan.
 
 1. Put the device in Bluetooth mode. It advertises as the friendly name
-   (default `Geelen Audio`).
+   (default `Pareto Amp`).
 2. During the pairing window, choose it from the phone's Bluetooth
    settings.
    - Modern phones often use SSP and never ask for a PIN.
@@ -116,7 +116,7 @@ DLNA is always available when `dlna_enabled` is on, regardless of the
 selected mode (except test tone). To play to the device:
 
 1. From your phone or laptop, open a DLNA controller app and choose
-   `Geelen Audio` (or whatever you renamed it to).
+   `Pareto Amp` (or whatever you renamed it to).
 2. Pick a track and hit Play. The device acknowledges within a second.
 3. Volume / pause / next-track all work through standard UPnP
    AVTransport / RenderingControl actions.

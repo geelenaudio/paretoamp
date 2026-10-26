@@ -16,6 +16,7 @@
 #include "audio_engine.h"
 #include "idf_config_manager.h"
 #include "idf_events.h"
+#include "idf_identity.h"
 #include "idf_voice_feedback.h"
 
 #include "usb_device_uac.h"
@@ -241,7 +242,7 @@ bool usbAudioBegin(geelen::AudioEngine* engine, ConfigManager* cfg, const char* 
   s_engine = engine;
   s_cfg = cfg;
   // usb_device_uac owns TinyUSB string descriptors (Kconfig product
-  // "Geelen Amp"). Identity device_name is logged; runtime override would
+  // "Pareto Amp"). Identity device_name is logged; runtime override would
   // need a forked descriptor table.
 
   releaseUsbSerialJtag();
@@ -277,7 +278,7 @@ bool usbAudioBegin(geelen::AudioEngine* engine, ConfigManager* cfg, const char* 
   s_up.store(true, std::memory_order_relaxed);
   eventPost(EV_USB_MOUNTED, nullptr, 0);
   ESP_LOGI(TAG, "UAC speaker up (%u Hz 16-bit stereo, identity '%s')",
-           (unsigned)kHostRateHz, device_name && device_name[0] ? device_name : "Geelen Amp");
+           (unsigned)kHostRateHz, device_name && device_name[0] ? device_name : kDefaultDeviceName);
   return true;
 }
 

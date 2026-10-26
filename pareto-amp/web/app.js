@@ -164,7 +164,7 @@ function App() {
         <div class="shell__brand-mark">
           <img src="/logo/geelen_audio.svg" alt="" width="72" height="42" />
         </div>
-        <span class="shell__brand-text">Geelen Audio</span>
+        <span class="shell__brand-text">Pareto Amp</span>
       </div>
       <header class="shell__header">
         <div class="shell__header-title">Pareto Firmware</div>

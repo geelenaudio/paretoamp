@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * TAS5825M DAC driver — public header used by the Geelen Audio firmware.
+ * TAS5825M DAC driver — public header used by the Pareto Amp firmware.
  *
  * The API surface mirrors the sonocotta upstream
  * (https://github.com/sonocotta/esp32-tas5805m-dac) with two Geelen-specific

@@ -22,6 +22,7 @@
 #include "idf_dlna.h"
 
 #include "idf_config_manager.h"
+#include "idf_identity.h"
 #include "idf_mp3_streamer.h"
 #include "idf_voice_feedback.h"
 #include "audio_engine.h"
@@ -521,7 +522,7 @@ esp_err_t h_ctrl_cm (httpd_req_t* r) { return handle_soap_dispatch(r, "cm");  }
 esp_err_t h_desc(httpd_req_t* req) {
   char name_buf[64] = {0};
   if (s_cfg) s_cfg->getDeviceName(name_buf, sizeof(name_buf));
-  if (!name_buf[0]) strlcpy(name_buf, "Geelen Audio", sizeof(name_buf));
+  if (!name_buf[0]) strlcpy(name_buf, kDefaultDeviceName, sizeof(name_buf));
   const char* name = name_buf;
   char* buf = (char*)malloc(4096);
   if (!buf) return ESP_FAIL;
@@ -535,7 +536,7 @@ esp_err_t h_desc(httpd_req_t* req) {
         "<manufacturer>Geelen Audio</manufacturer>"
         "<manufacturerURL>https://geelen.audio/</manufacturerURL>"
         "<modelDescription>ESP32 DLNA Renderer</modelDescription>"
-        "<modelName>Geelen ESP32 Amp</modelName>"
+        "<modelName>Pareto Amp</modelName>"
         "<modelNumber>1</modelNumber>"
         "<modelURL>https://geelen.audio/</modelURL>"
         "<serialNumber>%s</serialNumber>"

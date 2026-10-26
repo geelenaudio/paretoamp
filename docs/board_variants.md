@@ -1,7 +1,7 @@
 # Board variants
 
 Four PlatformIO environments share one firmware tree. The compile-time HAL
-under `ESP32_AudioPlatform/src/hal/` selects pin maps, DAC drivers, and the
+under `pareto-amp/src/hal/` selects pin maps, DAC drivers, and the
 EQ backend from the `BOARD_*` symbol passed by the active env.
 
 | Product                | SoC               | PIO env              | `BOARD_*`             | Volume + EQ                                              |
@@ -38,7 +38,7 @@ task fw:upload PIO_ENV=louder-esp32-idf
 PIO_ENV=louder-esp32-idf task fw:upload
 ```
 
-Raw PlatformIO (from `ESP32_AudioPlatform/`):
+Raw PlatformIO (from `pareto-amp/`):
 
 ```bash
 pio run -e amped-esp32-idf

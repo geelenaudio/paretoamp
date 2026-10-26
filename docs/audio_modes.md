@@ -20,7 +20,7 @@ cleanly (see "Why mode changes reboot" below).
 `AudioSource` is defined in `idf_config_manager.h`; mapping to API strings
 lives in `idf_api.cpp`:
 
-```241:249:ESP32_AudioPlatform/src/idf_api.cpp
+```241:249:pareto-amp/src/idf_api.cpp
     case AudioSource::Bluetooth: return "bluetooth";
     case AudioSource::Network:   return "snapclient";
     case AudioSource::Dlna:      return "dlna";
@@ -43,10 +43,11 @@ bool parseAudioSource(const char* s, AudioSource* out) {
 
 ### Bluetooth
 
-```309:319:ESP32_AudioPlatform/src/idf_main.cpp
+```517:528:pareto-amp/src/idf_main.cpp
   if (src == geelen_idf::AudioSource::Bluetooth) {
+    geelen_idf::a2dpSetConfig(&g_cfg);
     if (!g_wifi.isApOnly()) {
-      g_a2dp.begin("Geelen Audio");
+      g_a2dp.begin(a2dp_name_from_cfg());
     } else {
       ESP_LOGW("geelen",
                "AP-only Wi-Fi onboarding: deferring Bluetooth ~%u s (or until STA "
@@ -70,7 +71,7 @@ bool parseAudioSource(const char* s, AudioSource* out) {
 
 ### Snapcast (Network)
 
-```332:395:ESP32_AudioPlatform/src/idf_main.cpp
+```332:395:pareto-amp/src/idf_main.cpp
   } else if (src == geelen_idf::AudioSource::Network) {
     ...
     g_snap.setEngine(&g_engine);
@@ -107,7 +108,7 @@ bool parseAudioSource(const char* s, AudioSource* out) {
 
 ### DLNA
 
-```296:298:ESP32_AudioPlatform/src/idf_main.cpp
+```296:298:pareto-amp/src/idf_main.cpp
   if (g_cfg.getDlnaEnabled() && src != geelen_idf::AudioSource::TestTone) {
     geelen_idf::dlna::start((httpd_handle_t)g_http.nativeHandle(), &g_cfg);
   }
@@ -128,7 +129,7 @@ The SOAP `Play` handler waits for the boot pair to drain (15 s hard cap)
 before it kicks off the streamer, so a casting app cannot preempt the
 mode clip:
 
-```280:291:ESP32_AudioPlatform/src/idf_dlna.cpp
+```280:291:pareto-amp/src/idf_dlna.cpp
   if (strcmp(action, "Play") == 0) {
     // A casting app issuing Play during the boot mode clip would have the
     // streamer abort the prompt and start music. Gate on the boot pair (15 s
@@ -175,7 +176,7 @@ The test-tone task is spawned only after the voice boot pair drains, so
 the user actually hears the boot Wi-Fi clip even when the device boots
 into the test-tone page:
 
-```188:193:ESP32_AudioPlatform/src/idf_main.cpp
+```188:193:pareto-amp/src/idf_main.cpp
 /** Test tone shares the engine ring with voice prompts; start it only after boot clips finish. */
 static void test_tone_after_voice_task(void*) {
   geelen_idf::voiceFeedbackWaitForBootDone(portMAX_DELAY);
@@ -190,7 +191,7 @@ waveform from the Web UI.
 
 ## Why mode changes reboot
 
-```47:62:ESP32_AudioPlatform/src/idf_main.cpp
+```47:62:pareto-amp/src/idf_main.cpp
 // Hook invoked by the HTTP server after POST /api/mode persists a new
 // source selection. Until the runtime source manager lands (Phase 9 wires
 // DLNA on top of it), there is no clean way to stop the Snap task or

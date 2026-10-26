@@ -6,8 +6,8 @@ the SPA About page, `GET/POST /api/identity`, and `POST /api/device-name`.
 
 ## Fields
 
-**Device name** (`dev_name`, max 31 UTF-8 bytes plus NUL). Default
-`Geelen Audio`. Shown in the SPA, Bluetooth GAP advertising, DLNA friendly
+**Device name** (`dev_name`, max 31 UTF-8 bytes plus NUL). Factory default
+`Pareto Amp`. Shown in the SPA, Bluetooth GAP advertising, DLNA friendly
 name, and the mDNS **instance**. Changing it applies live: GAP name,
 mDNS instance, and the SSE state snapshot update without a reboot. Phones
 may keep the old Bluetooth name until they re-pair.
@@ -16,7 +16,11 @@ may keep the old Bluetooth name until they re-pair.
 trailing hyphen. Used as the STA DHCP hostname and the mDNS A record, so
 the SPA is at `http://<hostname>.local/` on clients that speak mDNS.
 If the NVS value is empty, firmware slugs the device name (lowercase,
-spaces to `-`, other punctuation stripped, fallback `geelen-audio`).
+spaces to `-`, other punctuation stripped). The factory name `Pareto Amp`
+is a special case: it is **not** slugged to `pareto-amp`. The hostname
+stays `geelen-audio` so mDNS remains `http://geelen-audio.local/`. User-
+chosen names (for example `Kitchen`) still slug as today (`kitchen`).
+Empty or invalid slugs also fall back to `geelen-audio`.
 `POST /api/identity` with `hostname: null` or `""` clears the override
 so later renames of the friendly name re-derive the slug.
 

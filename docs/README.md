@@ -1,6 +1,6 @@
-# ESP32 Audio Platform — Documentation
+# Pareto Amp — Documentation
 
-This directory documents the firmware that runs on the Amped-ESP32 board: how
+This directory documents the Pareto Amp firmware (from [geelen.audio](https://geelen.audio)) that runs on the Amped-ESP32 and related boards: how
 the audio pipeline is wired together, how the device onboards onto Wi-Fi,
 which spoken prompts you can expect to hear, and how to build / flash / extend
 the project.
@@ -42,7 +42,7 @@ are diving into the code, start with **Architecture**.
 ### Reference
 
 - [REST API](api.md) — endpoint reference (legacy notes; the canonical schema
-  lives in [`web/api/openapi.yaml`](../ESP32_AudioPlatform/web/api/openapi.yaml)
+  lives in [`web/api/openapi.yaml`](../pareto-amp/web/api/openapi.yaml)
   and is rendered at `/docs` on the device).
 - [Hardware variants](hardware/README.md) — four boards; [hardware.md](hardware.md)
   is a pointer to that index.
@@ -50,5 +50,5 @@ are diving into the code, start with **Architecture**.
 
 ### Development
 
-- [Development](development.md) — PlatformIO env, build / flash / upload-fs
-  commands, native test, adding SPIFFS audio, OpenAPI workflow.
+- [Development](development.md) — PlatformIO env, build / flash / factory
+  images, SemVer tags, native test, adding SPIFFS audio, OpenAPI workflow.

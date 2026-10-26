@@ -229,7 +229,7 @@ void ConfigManager::loadDefaults() {
   config_.eq_active_slot = 0xFF;  // "unsaved / modified"
   config_.eq_hr_mode = HeadroomMode::Auto;
   config_.eq_hr_manual_db = 0.0f;
-  strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
+  strncpy(config_.dev_name, kDefaultDeviceName, DEV_NAME_MAX - 1);
   config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   hostname_[0] = '\0';
   strncpy(bt_pin_, "1234", BT_PIN_MAX - 1);
@@ -503,7 +503,7 @@ bool ConfigManager::load() {
 
   size_t name_len = DEV_NAME_MAX;
   if (nvs_get_str(h, NVS_KEY_DEV_NAME, config_.dev_name, &name_len) != ESP_OK) {
-    strncpy(config_.dev_name, "Geelen Audio", DEV_NAME_MAX - 1);
+    strncpy(config_.dev_name, kDefaultDeviceName, DEV_NAME_MAX - 1);
     config_.dev_name[DEV_NAME_MAX - 1] = '\0';
   }
 
