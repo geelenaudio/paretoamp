@@ -100,7 +100,8 @@ BREAKING CHANGE: existing devices must factory-reset.
 loop. OpenAPI `info.version` is the HTTP schema, not the firmware tag.
 
 Do not push `vMAJOR.MINOR.PATCH` tags. semantic-release is the only
-release path; a tag push does not build or publish firmware.
+release path; a tag push does not build or publish firmware. How to
+open issues and pull requests: [Contributing](../CONTRIBUTING.md).
 
 Each Release attaches four factory images (bootloader + partition table +
 app + SPIFFS website). `esptool write-flash 0x0 …` is a **factory write**:

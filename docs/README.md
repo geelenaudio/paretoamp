@@ -12,12 +12,16 @@ are diving into the code, start with **Architecture**.
 
 ### Operations
 
+- [Using the firmware](using-firmware.md) — download a GitHub Release
+  binary, flash at `0x0`, first-boot hotspot.
 - [Operating guide](operating_guide.md) — first-time setup, what each prompt
   means, switching modes from the Web UI, troubleshooting.
 - [User guide (legacy)](user-guide.md) — older operations notes (kept for
   reference; the operating guide supersedes most of it).
 - [Manual test matrix](manual-test-matrix.md) — checklist for verifying a
   build before flashing.
+- [Contributing](../CONTRIBUTING.md) — issues, pull requests, Conventional
+  Commits.
 
 ### How it works
 

@@ -1,0 +1,35 @@
+name: Feature
+description: An idea or missing behaviour
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search [existing issues](https://github.com/geelenaudio/paretoamp/issues) first.
+        See [CONTRIBUTING.md](https://github.com/geelenaudio/paretoamp/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is awkward or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should the device or tooling do instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: board
+    attributes:
+      label: Boards this would affect
+      multiple: true
+      options:
+        - Amped-ESP32 (WROVER)
+        - Amped-ESP32-S3
+        - Louder-ESP32 / Plus (WROVER)
+        - Louder-ESP32-S3
+        - All boards
+        - Docs / CI only
