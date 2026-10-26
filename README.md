@@ -102,6 +102,5 @@ native tests and builds all four boards.
 Pushes to `main` also run [semantic-release](https://github.com/semantic-release/semantic-release).
 `feat:` / `fix:` / `BREAKING CHANGE:` commits become a `vMAJOR.MINOR.PATCH`
 tag and GitHub Release; CI attaches factory images. Use Conventional
-Commits — see [docs/development.md](docs/development.md).
-
-Manual tags still work via [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Commits — see [docs/development.md](docs/development.md). Version tags are
+created only by semantic-release, not by hand.
