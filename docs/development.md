@@ -99,12 +99,8 @@ BREAKING CHANGE: existing devices must factory-reset.
 `chore(release):` commits from the bot include `[skip ci]` so they do not
 loop. OpenAPI `info.version` is the HTTP schema, not the firmware tag.
 
-**First release:** with no existing tag, semantic-release starts at
-**1.0.0** on the next `feat:` / `fix:`. To stay on 0.x, push a seed tag
-once (`git tag v0.1.0 && git push origin v0.1.0`) before merging
-releasable commits.
-
-Manual `git push origin vX.Y.Z` still works ([`release.yml`](../.github/workflows/release.yml)).
+Do not push `vMAJOR.MINOR.PATCH` tags. semantic-release is the only
+release path; a tag push does not build or publish firmware.
 
 Each Release attaches four factory images (bootloader + partition table +
 app + SPIFFS website). `esptool write-flash 0x0 …` is a **factory write**:

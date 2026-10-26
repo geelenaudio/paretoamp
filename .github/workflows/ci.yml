@@ -13,13 +13,6 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  workflow_call:
-    inputs:
-      firmware_version:
-        description: SemVer without a v prefix (overwrites pareto-amp/version.txt)
-        type: string
-        required: false
-        default: ""
 
 jobs:
   native:
@@ -42,13 +35,6 @@ jobs:
 
       - name: Install PlatformIO Core
         run: pip install --upgrade "platformio==6.1.19"
-
-      - name: Stamp firmware version
-        if: inputs.firmware_version != ''
-        working-directory: pareto-amp
-        run: |
-          echo "${{ inputs.firmware_version }}" | sed 's/^v//' > version.txt
-          echo "version.txt=$(cat version.txt)"
 
       - name: Native unit tests
         run: pio test -e native
@@ -122,11 +108,10 @@ jobs:
         run: pip install --upgrade "platformio==6.1.19"
 
       - name: Stamp firmware version
-        if: inputs.firmware_version != '' || needs.semantic.outputs.published == 'true'
+        if: needs.semantic.outputs.published == 'true'
         working-directory: pareto-amp
         run: |
-          ver="${{ inputs.firmware_version }}"
-          if [ -z "$ver" ]; then ver="${{ needs.semantic.outputs.version }}"; fi
+          ver="${{ needs.semantic.outputs.version }}"
           echo "${ver#v}" > version.txt
           echo "version.txt=$(cat version.txt)"
 
@@ -153,17 +138,11 @@ jobs:
   attach-factory:
     name: Attach factory images
     needs: [semantic, firmware]
-    # semantic-release sets published=true on a new version. A seed tag on
-    # the same commit (e.g. v0.0.0) is "no release" — still attach to that tag.
-    if: always() && github.event_name != 'pull_request' && needs.firmware.result == 'success' && (needs.semantic.result == 'success' || needs.semantic.result == 'skipped')
+    if: needs.semantic.outputs.published == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - uses: actions/download-artifact@v4
         with:
           pattern: factory-*
@@ -177,25 +156,12 @@ jobs:
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PUBLISHED: ${{ needs.semantic.outputs.published }}
           VERSION: ${{ needs.semantic.outputs.version }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "${PUBLISHED}" = "true" ] && [ -n "${VERSION}" ]; then
-            tag="v${VERSION}"
-          else
-            tag="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
-          fi
-          if [ -z "${tag}" ]; then
-            echo "No new semantic-release and HEAD is untagged — nothing to attach."
-            exit 0
-          fi
-          ver="${tag#v}"
-          mkdir -p dist
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "Pareto Amp ${tag}" --notes "Factory images for ${tag}."
-          fi
+          tag="v${VERSION}"
+          ver="${VERSION#v}"
           gh release upload "$tag" dist/*.bin dist/SHA256SUMS.txt --clobber
           body="$(gh release view "$tag" --json body --jq .body)"
           {
