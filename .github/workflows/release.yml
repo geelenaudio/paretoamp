@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
+  actions: read
 
 jobs:
   prepare:
@@ -25,7 +28,13 @@ jobs:
 
   build:
     needs: prepare
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: read
     uses: ./.github/workflows/ci.yml
+    secrets: inherit
     with:
       firmware_version: ${{ needs.prepare.outputs.version }}
 
