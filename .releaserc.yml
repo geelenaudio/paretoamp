@@ -14,11 +14,12 @@ plugins:
   - - "@semantic-release/release-notes-generator"
     - preset: conventionalcommits
   - - "@semantic-release/exec"
-    - prepareCmd: "printf '%s\\n' '${nextRelease.version}' > pareto-amp/version.txt"
+    - prepareCmd: "python3 scripts/stamp_release.py '${nextRelease.version}'"
       successCmd: "echo published=true >> \"$GITHUB_OUTPUT\" && echo version=${nextRelease.version} >> \"$GITHUB_OUTPUT\""
   - - "@semantic-release/git"
     - assets:
         - pareto-amp/version.txt
+        - README.md
       message: "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
   - - "@semantic-release/github"
     - assets: []
