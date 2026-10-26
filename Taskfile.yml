@@ -1,9 +1,10 @@
-# Mini dev loop for the ESP32 Audio Platform.
+# Mini dev loop for Pareto Amp.
 #
 #   task                 # list all tasks
 #   task fw:targets      # board → env → flash command
 #   task fw:amped        # flash Amped-WROVER (software PEQ)
 #   task fw:louder       # flash Louder-WROVER (TAS58xx HW PEQ)
+#   task fw:factory      # merge a 0x0 factory image (app + SPIFFS; wipes NVS)
 #   task snap:up         # start the snapcast server
 #   task stream:desktop  # pipe desktop audio into the snapserver FIFO
 #
@@ -29,7 +30,7 @@ vars:
     sh: echo "${PIO_ENV:-amped-esp32-idf}"
   PIO_PORT:
     sh: echo "${PIO_PORT:-/dev/ttyUSB0}"
-  FW_DIR: ESP32_AudioPlatform
+  FW_DIR: pareto-amp
   SNAP_DIR: snapcast-example
   SNAP_FIFO: snapcast-example/data/testfifo
 
@@ -204,6 +205,20 @@ tasks:
       - |
         img=$(ls -1 .pio/build/{{.PIO_ENV}}/*spiffs*.bin 2>/dev/null | head -n 1)
         [ -n "$img" ] && echo "SPIFFS image: $(pwd)/$img ($(stat -c %s "$img") bytes)"
+
+  fw:factory:
+    desc: Build app + SPIFFS and merge a factory 0x0 image (flashing it wipes NVS)
+    dir: "{{.FW_DIR}}"
+    cmds:
+      - task: _fw_banner
+        vars:
+          PIO: "{{.PIO}}"
+          PIO_ENV: "{{.PIO_ENV}}"
+          PIO_PORT: "{{.PIO_PORT}}"
+          FW_ACTION: factory
+      - "{{.PIO}} run -e {{.PIO_ENV}}"
+      - "{{.PIO}} run -e {{.PIO_ENV}} -t buildfs"
+      - python3 scripts/merge_factory.py --env {{.PIO_ENV}}
 
   fw:flash:
     desc: Flash app + SPIFFS for PIO_ENV (no monitor). Default env is Amped.

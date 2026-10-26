@@ -1,7 +1,7 @@
 # Snapcast example (Spotify → Snapserver → ESP32)
 
 A minimal Docker setup that turns any Linux box into a Snapcast server that the
-Geelen Audio Amp (Network / Snapcast source) can stream from. Uses the
+Pareto Amp (Network / Snapcast source) can stream from. Uses the
 self-contained [`sweisgerber/snapcast`](https://hub.docker.com/r/sweisgerber/snapcast)
 image, which already bundles `snapserver`, `snapweb`, `librespot`, and
 `shairport-sync` in one container — no extra sidecar needed.

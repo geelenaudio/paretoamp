@@ -43,7 +43,7 @@ Wi-Fi clip plays at boot.
 `voiceFeedbackScheduleBoot` is called from `app_main` BEFORE the audio
 producers (A2DP, Snap) are wired up:
 
-```402:408:ESP32_AudioPlatform/src/idf_main.cpp
+```402:408:pareto-amp/src/idf_main.cpp
   geelen_idf::mp3::streamer()->setEngine(&g_engine);
   geelen_idf::voiceFeedbackSetContext(&g_cfg, &g_wifi, &g_engine);
   // Schedules the boot prompts and spawns the voice task. PCM comes
@@ -139,7 +139,7 @@ small.
 
 To swap a clip:
 
-1. Drop the new MP3 in `ESP32_AudioPlatform/data/audio/<Name>.mp3` with
+1. Drop the new MP3 in `pareto-amp/data/audio/<Name>.mp3` with
    the same basename.
 2. `pio run -t uploadfs` to flash the SPIFFS partition.
 3. Reboot the device — the cache decodes once at startup.

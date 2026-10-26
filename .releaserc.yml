@@ -1,0 +1,27 @@
+# semantic-release: conventional commits on main/master → SemVer tag + GitHub Release.
+# Factory .bin files are built in CI after this job and uploaded to the same release.
+# npm is not a publish target.
+
+branches:
+  - main
+  - master
+
+tagFormat: "v${version}"
+
+plugins:
+  - - "@semantic-release/commit-analyzer"
+    - preset: conventionalcommits
+  - - "@semantic-release/release-notes-generator"
+    - preset: conventionalcommits
+  - - "@semantic-release/exec"
+    - prepareCmd: "printf '%s\\n' '${nextRelease.version}' > pareto-amp/version.txt"
+      successCmd: "echo published=true >> \"$GITHUB_OUTPUT\" && echo version=${nextRelease.version} >> \"$GITHUB_OUTPUT\""
+  - - "@semantic-release/git"
+    - assets:
+        - pareto-amp/version.txt
+      message: "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+  - - "@semantic-release/github"
+    - assets: []
+      successComment: false
+      failComment: false
+      releasedLabels: false

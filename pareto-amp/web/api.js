@@ -57,7 +57,7 @@ export const api = {
         volume: { l: legacy.volume ?? 80, r: legacy.volume ?? 80, muted: false },
         channels: { stereo_mono: "stereo", l_on: true, r_on: true },
         snapcast: { host: legacy.snap_host || "", port: legacy.snap_port || 1704 },
-        device_name: "Geelen Audio",
+        device_name: "Pareto Amp",
         firmware: "dev",
         voice_feedback: true,
         _legacy: true,

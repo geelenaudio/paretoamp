@@ -54,7 +54,7 @@ flowchart LR
 
 Source-of-truth references:
 
-```51:59:ESP32_AudioPlatform/src/idf_main.cpp
+```51:59:pareto-amp/src/idf_main.cpp
 static geelen::AudioEngine g_engine;
 static i2s_chan_handle_t g_i2s_tx = nullptr;
 static geelen_idf::ConfigManager g_cfg;
@@ -73,7 +73,7 @@ pump. Other producers (Snapcast, MP3 streamer, voice) sit at prio 3–5 on
 the same core so they can never starve I2S, while Wi-Fi / BT / LwIP keep
 Core 0 free to do their own scheduling.
 
-```265:278:ESP32_AudioPlatform/src/idf_main.cpp
+```265:278:pareto-amp/src/idf_main.cpp
 static void audio_task(void*) {
   // … yield one tick only on prefill / rebuffer / empty-ring …
   for (;;) {
@@ -88,7 +88,7 @@ static void audio_task(void*) {
 
 `AudioEngine` owns a PSRAM ring sized for ~2 s of stereo s16 at 44.1 kHz:
 
-```39:46:ESP32_AudioPlatform/include/audio_engine.h
+```39:46:pareto-amp/include/audio_engine.h
 constexpr int SAMPLE_RATE = 44100;
 constexpr size_t RING_BUF_SAMPLES = (size_t)SAMPLE_RATE * 2;
 constexpr size_t RING_BUF_BYTES = RING_BUF_SAMPLES * sizeof(int16_t) * 2;
@@ -124,7 +124,7 @@ There is exactly one `geelen_idf::mp3::Streamer` in the process. It runs a
 single decode task (`dlna-mp3`) on Core 1 and accepts commands via a
 mutex-guarded single-slot mailbox:
 
-```52:56:ESP32_AudioPlatform/src/idf_mp3_streamer.cpp
+```52:56:pareto-amp/src/idf_mp3_streamer.cpp
 struct Command {
   enum class Kind { None, Play, Pause, Resume, Stop };
   Kind kind{Kind::None};
@@ -137,7 +137,7 @@ Both DLNA SOAP `Play` and the voice serializer go through `playFile(...)` /
 decoder roughly real-time so it doesn't race ahead and overflow the engine
 ring (which would silently drop the tail of every short SPIFFS clip):
 
-```264:284:ESP32_AudioPlatform/src/idf_mp3_streamer.cpp
+```264:284:pareto-amp/src/idf_mp3_streamer.cpp
   bool pumpOnce() {
     // Back-pressure: Helix decode runs several × realtime, so for short SPIFFS
     // clips the producer would race ahead and `feedPCM` would silently drop
@@ -200,7 +200,7 @@ Three properties this design gives us for free:
 
 ## Producer gates
 
-```127:135:ESP32_AudioPlatform/src/idf_a2dp_sink.cpp
+```127:135:pareto-amp/src/idf_a2dp_sink.cpp
 void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
   if (!engine_ || !data || len == 0) return;
   // Voice prompts share the engine ring via `feedPCM`. While any prompt is in
@@ -212,7 +212,7 @@ void A2dpSink::a2dpDataCb_(const uint8_t* data, uint32_t len) {
   }
 ```
 
-```269:274:ESP32_AudioPlatform/src/idf_snapclient.cpp
+```269:274:pareto-amp/src/idf_snapclient.cpp
     // Single source of truth for "voice prompt owns the ring": gate on it so
     // WireChunks don't splice into the middle of "Snapcast mode" / mode-clip.
     if (!geelen_idf::voiceFeedbackActive()) {

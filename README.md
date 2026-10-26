@@ -1,8 +1,10 @@
-# Geelen Audio Amp – Documentation
+# Pareto Amp
 
-[![PlatformIO CI](https://github.com/geelenaudio/paretoamp/actions/workflows/platformio.yml/badge.svg)](https://github.com/geelenaudio/paretoamp/actions/workflows/platformio.yml)
+[![CI](https://github.com/geelenaudio/paretoamp/actions/workflows/ci.yml/badge.svg)](https://github.com/geelenaudio/paretoamp/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/geelenaudio/paretoamp)](https://github.com/geelenaudio/paretoamp/releases)
+[![semantic-release: conventionalcommits](https://img.shields.io/badge/semantic--release-conventionalcommits-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
 
-Firmware for four boards in one tree: **Amped-ESP32** (WROVER-N8R8, PCM5100A),
+Firmware from [geelen.audio](https://geelen.audio) for four boards in one tree: **Amped-ESP32** (WROVER-N8R8, PCM5100A),
 **Amped-ESP32-S3**, **Louder-ESP32-Plus** (WROVER-N8R8 + TAS58xx),
 **Louder-ESP32-S3**. Pinouts and HAL notes:
 [docs/hardware/README.md](docs/hardware/README.md),
@@ -12,6 +14,19 @@ Firmware for four boards in one tree: **Amped-ESP32** (WROVER-N8R8, PCM5100A),
 [docs/licensing.md](docs/licensing.md).
 
 ## Flash
+
+**Prebuilt images** are on [GitHub Releases](https://github.com/geelenaudio/paretoamp/releases)
+(one factory `.bin` per board: bootloader + partition table + app + website).
+Write the matching file at flash offset `0x0`. That **wipes NVS** (Wi-Fi,
+EQ, presets). Pick the Amped vs Louder file for your hardware — an Amped
+image never talks to the TAS.
+
+```sh
+esptool --chip esp32  write-flash 0x0 pareto-amp-amped-esp32-v0.1.0.bin
+esptool --chip esp32s3 write-flash 0x0 pareto-amp-amped-esp32s3-v0.1.0.bin
+```
+
+To keep NVS, clone the tag and run `task fw:flash` (app + SPIFFS only).
 
 The PlatformIO env is compile-time. An Amped image never talks to the TAS, so
 flashing it onto a Louder board makes EQ stay **software**. Use a named task:
@@ -51,7 +66,7 @@ Confirm the image after reset:
 repo root (the directory with `Taskfile.yml`). Equivalent raw PlatformIO:
 
 ```sh
-cd ESP32_AudioPlatform
+cd pareto-amp
 pio run -e louder-esp32-idf -t upload --upload-port /dev/ttyUSB0
 pio run -e louder-esp32-idf -t uploadfs --upload-port /dev/ttyUSB0
 ```
@@ -68,7 +83,7 @@ pio run -e louder-esp32-idf -t uploadfs --upload-port /dev/ttyUSB0
 
 ## Overview
 
-The Geelen Audio Amp is a networked I2S audio solution with:
+Pareto Amp is a networked I2S audio solution from [geelen.audio](https://geelen.audio) with:
 
 - **Bluetooth A2DP Sink** – stream from phone/tablet (Classic BT on ESP32-WROVER)
 - **USB audio** – S3 boards enumerate as a UAC playback gadget (computer sound card). WROVER USB is UART-only. See [docs/audio_modes.md](docs/audio_modes.md)
@@ -79,6 +94,14 @@ The Geelen Audio Amp is a networked I2S audio solution with:
 
 On-device Spotify Connect is **not** supported; use the Snapcast + librespot path above.
 
-## CI
+## CI and releases
 
-Builds run on **GitHub Actions** (`.github/workflows/platformio.yml`): on push/PR to `main` or `master`, the workflow installs PlatformIO and runs `pio run -e amped-esp32-idf` in the `ESP32_AudioPlatform` project directory.
+On push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs
+native tests and builds all four boards.
+
+Pushes to `main` also run [semantic-release](https://github.com/semantic-release/semantic-release).
+`feat:` / `fix:` / `BREAKING CHANGE:` commits become a `vMAJOR.MINOR.PATCH`
+tag and GitHub Release; CI attaches factory images. Use Conventional
+Commits — see [docs/development.md](docs/development.md).
+
+Manual tags still work via [`.github/workflows/release.yml`](.github/workflows/release.yml).

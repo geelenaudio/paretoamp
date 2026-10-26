@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: Geelen Audio Device API
-  summary: On-device REST + SSE API for the Geelen ESP32 audio amplifier.
+  title: Pareto Amp Device API
+  summary: On-device REST + SSE API for the Pareto Amp.
   description: |
     Developed by [Geelen Audio](https://geelen.audio/). Source:
     [geelenaudio/paretoamp](https://github.com/geelenaudio/paretoamp).
@@ -91,17 +91,17 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceState" }
               example:
-                device_name: "Geelen Audio"
+                device_name: "Pareto Amp"
                 firmware: "0.3.0"
                 mode: "snapclient"
                 _v: 42
                 identity:
-                  device_name: "Geelen Audio"
+                  device_name: "Pareto Amp"
                   hostname: "geelen-audio"
                   hostname_custom: false
                   mdns:
                     hostname: "geelen-audio"
-                    instance: "Geelen Audio"
+                    instance: "Pareto Amp"
                     url: "http://geelen-audio.local/"
                 volume: { l: 70, r: 70, muted: false }
                 channels: { stereo_mono: "stereo", l_on: true, r_on: true }
@@ -112,7 +112,7 @@ paths:
                   color: "#ff8800"
                   brightness: 40
                 snapcast: { host: "10.0.80.34", port: 1704 }
-                dlna: { enabled: false, name: "Geelen Audio" }
+                dlna: { enabled: false, name: "Pareto Amp" }
                 wifi: { power_save: "none" }
                 voice_feedback: true
                 eq:

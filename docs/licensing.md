@@ -3,7 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 # Licensing
 
-The Geelen Audio firmware is distributed under the
+The Pareto Amp firmware is distributed under the
 **GNU General Public License, version 3, or (at your option) any later
 version**. See the [COPYING](../COPYING) file at the repo root for the
 full text of the licence.
@@ -30,16 +30,20 @@ single licence to avoid confusion.
 
 ## Obtaining the corresponding source
 
-The corresponding source is this repository. Build instructions live in
-[../ESP32_AudioPlatform/BRINGUP.md](../ESP32_AudioPlatform/BRINGUP.md);
+The corresponding source is this repository. GitHub Release binaries
+match the git tag of the same name (`v0.1.0` → that commit). Build
+instructions live in
+[../pareto-amp/BRINGUP.md](../pareto-amp/BRINGUP.md);
 you need PlatformIO with the ESP-IDF 5.5+ platform. `pio run -e <env>`
 produces byte-identical firmware from a clean tree (all timestamps in
 the SPIFFS image are zero-mtime'd by `scripts/build_web.py`; the ELF is
 deterministic modulo the toolchain version).
 
 To install a modified version on the same hardware, follow the
-`fw:upload` and `fw:uploadfs` targets in `Taskfile.yml`; those satisfy
-GPL §6 ("Installation Information for User Products").
+`fw:upload` and `fw:web` targets in `Taskfile.yml`, or flash a factory
+image from a GitHub Release with `esptool write-flash 0x0` (that path
+wipes NVS). Those satisfy GPL §6 ("Installation Information for User
+Products").
 
 ## Third-party inventory
 

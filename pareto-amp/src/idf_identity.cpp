@@ -22,8 +22,6 @@
 
 namespace geelen_idf {
 
-static const char* kFallbackHost = "geelen-audio";
-
 bool identityMacEqual(const uint8_t a[6], const uint8_t b[6]) {
   return a && b && memcmp(a, b, 6) == 0;
 }
@@ -100,6 +98,12 @@ bool identityNormalizeHostname(const char* in, char* out, size_t max_len) {
 bool identitySlugHostname(const char* device_name, char* out, size_t max_len) {
   if (!out || max_len < 2) return false;
   const size_t cap = max_len < HOSTNAME_MAX ? max_len : HOSTNAME_MAX;
+  if (!device_name || !device_name[0] ||
+      strcmp(device_name, kDefaultDeviceName) == 0) {
+    strncpy(out, kFallbackHost, cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+  }
   size_t o = 0;
   bool last_hyphen = true;  // strip leading hyphens
   if (device_name) {
@@ -201,7 +205,7 @@ void identityApplyLive() {
   char name[DEV_NAME_MAX];
   s_cfg->getDeviceName(name, sizeof(name));
 #if CONFIG_BT_ENABLED
-  a2dpSetAdvertisedName(name[0] ? name : "Geelen Audio");
+  a2dpSetAdvertisedName(name[0] ? name : kDefaultDeviceName);
 #endif
   stateStreamMarkDirty();
 }

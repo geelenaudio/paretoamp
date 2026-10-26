@@ -33,7 +33,7 @@ Primary datasheet: [tas5825m.pdf](tas5825m.pdf) (SLASEH7H). Do not copy
 - 7-bit address `0x4C` (ADR pin low). Set `HAL_TAS5825M_I2C_ADDR` in
   `src/hal/boards/louder_wrover.h` if your board straps ADR high.
 - The DAC is controlled through the vendored sonocotta driver at
-  [`components/tas5805m/`](../../ESP32_AudioPlatform/components/tas5805m/).
+  [`components/tas5805m/`](../../pareto-amp/components/tas5805m/).
   Refer to that component's README for licensing (GPL-3.0-or-later — see
   the top-level [`COPYING`](../../COPYING) file).
 - Bring-up follows datasheet §9.5.3: I2S stable → Hi-Z + DSP enable →

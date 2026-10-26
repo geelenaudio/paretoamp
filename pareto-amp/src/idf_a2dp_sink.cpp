@@ -12,6 +12,7 @@
 
 #include "audio_engine.h"
 #include "idf_config_manager.h"
+#include "idf_identity.h"
 #include "idf_events.h"
 #include "idf_led.h"
 #include "idf_state_stream.h"
@@ -424,7 +425,7 @@ static void btAppGapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param
 }
 
 bool A2dpSink::begin(const char* device_name) {
-  if (!device_name) device_name = "Geelen Audio";
+  if (!device_name) device_name = kDefaultDeviceName;
 
   // Bluedroid's host-side init (gatt_init / btu_init) allocates ~210 B
   // queues + several KB of working memory from the BT-OSI heap, which is

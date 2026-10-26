@@ -116,7 +116,7 @@ function DlnaSettings({ state, onSave, busy }) {
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    setName(state.dlna?.name || state.device_name || "Geelen Audio");
+    setName(state.dlna?.name || state.device_name || "Pareto Amp");
     setEnabled(!!state.dlna?.enabled);
     setDirty(false);
   }, [state]);

@@ -15,6 +15,11 @@ struct cJSON;
 
 namespace geelen_idf {
 
+// Factory friendly name. mDNS/DHCP hostname stays kFallbackHost when this
+// default is in use (slugging "Pareto Amp" would yield pareto-amp).
+inline constexpr char kDefaultDeviceName[] = "Pareto Amp";
+inline constexpr char kFallbackHost[] = "geelen-audio";
+
 class WifiManager;
 
 // LDH hostname: 1..HOSTNAME_MAX-1 chars, [a-z0-9-], no leading/trailing '-'.

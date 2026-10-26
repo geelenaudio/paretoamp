@@ -215,7 +215,7 @@ export default function Overview({ api, navigate, toast }) {
             type="text"
             maxlength="31"
             value=${nameDraft}
-            placeholder="Geelen Audio"
+            placeholder="Pareto Amp"
             aria-label="Device name"
             onInput=${(e) => setNameDraft(e.target.value)}
             onKeyDown=${(e) => { if (e.key === "Enter" && nameDirty) saveName(); }}

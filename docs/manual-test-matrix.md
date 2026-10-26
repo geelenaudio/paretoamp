@@ -1,4 +1,4 @@
-## Manual test matrix (ESP32 Audio Amp)
+## Manual test matrix (Pareto Amp)
 
 This checklist is for the **ESP-IDF** PlatformIO environment (`amped-esp32-idf`) and covers the Web UI + all supported audio sources.
 
@@ -88,7 +88,7 @@ WROVER builds must **not** show the USB card (`supports_usb: false`) and
 
 - **Idle S3 (not USB mode)**: serial is USB-Serial-JTAG (`ttyACM`). SPA Mode
   page shows **USB audio**.
-- **Select USB**: reboot; host sees a UAC speaker (“Geelen Amp”) at 48 kHz
+- **Select USB**: reboot; host sees a UAC speaker (“Pareto Amp”) at 48 kHz
   16-bit stereo. Spoken/ident clip after the Wi-Fi prompt.
 - **Playback**: Windows / macOS / Linux play through EQ and the volume
   control (host Feature Unit and SPA). Amped-S3: 10-band software PEQ on;

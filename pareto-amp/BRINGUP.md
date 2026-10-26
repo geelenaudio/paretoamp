@@ -1,4 +1,4 @@
-# ESP32_AudioPlatform bring-up checklist (Amped-ESP32, ESP-IDF)
+# Pareto Amp bring-up checklist (Amped-ESP32, ESP-IDF)
 
 ## Serial logging
 - Named flash from repo root: `task fw:amped` (or `task fw:louder` on TAS boards)
@@ -8,7 +8,7 @@
 
 Expected early output:
 - ROM boot text (`ets Jul 29 2019 ...`)
-- `Geelen Audio Amp – ESP-IDF env boot`
+- `Pareto Amp – ESP-IDF env boot`
 
 ## First boot after partition changes
 - Erase once: `pio run -e amped-esp32-idf -t erase`

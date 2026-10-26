@@ -1,0 +1,197 @@
+# Pareto Amp CI — native tests + four-board factory images.
+# On push to main: semantic-release may tag and open a GitHub Release;
+# this workflow then stamps version.txt, rebuilds, and uploads the bins.
+# Pin PlatformIO Core 6.1.19: 6.2.0 wants tool-scons 4.11.1; pioarduino
+# 55.03.37 wants 4.8.1. Those two delete/reinstall SCons mid-link and fail
+# with `No module named 'SCons.Tool.FortranCommon'`.
+# https://github.com/pioarduino/platform-espressif32/issues/529
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_call:
+    inputs:
+      firmware_version:
+        description: SemVer without a v prefix (overwrites pareto-amp/version.txt)
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-6.1.19-${{ hashFiles('pareto-amp/platformio.ini') }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO Core
+        run: pip install --upgrade "platformio==6.1.19"
+
+      - name: Stamp firmware version
+        if: inputs.firmware_version != ''
+        working-directory: pareto-amp
+        run: |
+          echo "${{ inputs.firmware_version }}" | sed 's/^v//' > version.txt
+          echo "version.txt=$(cat version.txt)"
+
+      - name: Native unit tests
+        run: pio test -e native
+        working-directory: pareto-amp
+
+  semantic:
+    name: semantic-release
+    needs: native
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      published: ${{ steps.sr.outputs.published }}
+      version: ${{ steps.sr.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - id: sr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "published=false" >> "$GITHUB_OUTPUT"
+          npx semantic-release
+
+  firmware:
+    needs: [native, semantic]
+    if: always() && needs.native.result == 'success' && (needs.semantic.result == 'success' || needs.semantic.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: amped-esp32-idf
+            slug: amped-esp32
+          - env: louder-esp32-idf
+            slug: louder-esp32
+          - env: amped-esp32s3-idf
+            slug: amped-esp32s3
+          - env: louder-esp32s3-idf
+            slug: louder-esp32s3
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-6.1.19-${{ hashFiles('pareto-amp/platformio.ini') }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO Core
+        run: pip install --upgrade "platformio==6.1.19"
+
+      - name: Stamp firmware version
+        if: inputs.firmware_version != '' || needs.semantic.outputs.published == 'true'
+        working-directory: pareto-amp
+        run: |
+          ver="${{ inputs.firmware_version }}"
+          if [ -z "$ver" ]; then ver="${{ needs.semantic.outputs.version }}"; fi
+          echo "${ver#v}" > version.txt
+          echo "version.txt=$(cat version.txt)"
+
+      - name: Build firmware
+        run: pio run -e ${{ matrix.env }}
+        working-directory: pareto-amp
+
+      - name: Build SPIFFS image
+        run: pio run -e ${{ matrix.env }} -t buildfs
+        working-directory: pareto-amp
+
+      - name: Merge factory image
+        run: python3 scripts/merge_factory.py --env ${{ matrix.env }} --slug ${{ matrix.slug }}
+        working-directory: pareto-amp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factory-${{ matrix.slug }}
+          path: |
+            pareto-amp/dist/*.bin
+            pareto-amp/dist/*.sha256
+          if-no-files-found: error
+
+  attach-factory:
+    name: Attach factory images
+    needs: [semantic, firmware]
+    if: needs.semantic.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: factory-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.bin | tee SHA256SUMS.txt
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.semantic.outputs.version }}
+        run: |
+          tag="v${VERSION}"
+          gh release upload "$tag" dist/*.bin dist/SHA256SUMS.txt --clobber
+          body="$(gh release view "$tag" --json body --jq .body)"
+          {
+            echo "Factory images (bootloader + partition table + app + SPIFFS website) are attached."
+            echo
+            echo "Flashing at \`0x0\` **wipes NVS** (Wi-Fi, EQ, presets). To keep NVS, clone this tag and run \`task fw:flash\`."
+            echo
+            echo "### Flash"
+            echo
+            echo '```'
+            echo "esptool --chip esp32  write-flash 0x0 pareto-amp-amped-esp32-v${VERSION}.bin"
+            echo "esptool --chip esp32  write-flash 0x0 pareto-amp-louder-esp32-v${VERSION}.bin"
+            echo "esptool --chip esp32s3 write-flash 0x0 pareto-amp-amped-esp32s3-v${VERSION}.bin"
+            echo "esptool --chip esp32s3 write-flash 0x0 pareto-amp-louder-esp32s3-v${VERSION}.bin"
+            echo '```'
+            echo
+            echo "Corresponding source: https://github.com/geelenaudio/paretoamp/tree/${tag}"
+            echo
+            echo "$body"
+          } > /tmp/notes.md
+          gh release edit "$tag" --notes-file /tmp/notes.md

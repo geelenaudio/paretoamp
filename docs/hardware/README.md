@@ -1,7 +1,7 @@
 # Hardware variants index
 
 This firmware targets four boards. Every build uses the same code tree; the
-[`src/hal/`](../../ESP32_AudioPlatform/src/hal/) layer selects pinouts, DAC
+[`src/hal/`](../../pareto-amp/src/hal/) layer selects pinouts, DAC
 drivers, and EQ backend at compile time.
 
 | Board                                             | SoC                    | DAC / amp              | Volume     | EQ backend | Bands | RGB GPIO | PIO env               |

@@ -10,3 +10,6 @@ tools/
 # scripts/build_web.py. Checked-in source is `web/`; the gzipped output here
 # is purely build artefact.
 data/web/
+
+# Factory merge output (bootloader + table + app + SPIFFS).
+dist/

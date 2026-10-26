@@ -1,0 +1,16 @@
+{
+  "name": "pareto-amp",
+  "private": true,
+  "description": "Release tooling only. Firmware is not an npm package.",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geelenaudio/paretoamp.git"
+  },
+  "devDependencies": {
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^10.0.1",
+    "conventional-changelog-conventionalcommits": "^8.0.0",
+    "semantic-release": "^24.2.0"
+  }
+}

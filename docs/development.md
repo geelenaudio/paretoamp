@@ -1,6 +1,6 @@
 # Development
 
-The firmware is a pure ESP-IDF project, built through PlatformIO so the
+Pareto Amp firmware (from [geelen.audio](https://geelen.audio)) is a pure ESP-IDF project, built through PlatformIO so the
 toolchain + IDF version are pinned via `platformio.ini`. There is also a
 `native` env for host-side unit tests that compile against the same
 audio / Snapcast helpers.
@@ -24,7 +24,7 @@ invariants, and the voice-prompt state machine.
 
 ## Build / flash / monitor
 
-Four PlatformIO envs live in `ESP32_AudioPlatform/platformio.ini`. The env is
+Four PlatformIO envs live in `pareto-amp/platformio.ini`. The env is
 **compile-time** (HAL + TAS driver). Flashing Amped onto a Louder board leaves
 EQ on the software cascade. Prefer named tasks from the **repo root**:
 
@@ -43,7 +43,7 @@ Port defaults to `/dev/ttyUSB0`; pass `PIO_PORT=/dev/ttyACM0` for S3 CDC
 (USB-Serial-JTAG). In **USB audio** mode TinyUSB owns the PHY — flash via
 ROM download (hold BOOT, still `ttyACM`) or a UART adapter.
 
-Raw PlatformIO, from `ESP32_AudioPlatform/` (the directory that contains
+Raw PlatformIO, from `pareto-amp/` (the directory that contains
 `platformio.ini`):
 
 ```sh
@@ -65,6 +65,51 @@ Helpful flags:
 - `pio run -e native` — build the host-side test binary.
 - `pio run -t menuconfig` — open the IDF sdkconfig menu (saved to
   `sdkconfig.defaults`).
+- `task fw:factory` — app + SPIFFS merged into one `0x0` factory image under
+  `pareto-amp/dist/` (flashing it wipes NVS).
+
+## Versioning and releases
+
+[semantic-release](https://github.com/semantic-release/semantic-release)
+runs on every push to `main` after native tests pass. It reads
+**Conventional Commits**, picks the next SemVer, tags `vMAJOR.MINOR.PATCH`,
+writes [`pareto-amp/version.txt`](../pareto-amp/version.txt) (`PROJECT_VER` /
+About → Version), and opens a GitHub Release. CI then builds the four
+factory images and attaches them.
+
+| Commit | Release |
+|---|---|
+| `fix: …` | PATCH |
+| `feat: …` | MINOR |
+| footer `BREAKING CHANGE: …` | MAJOR |
+| `docs:`, `chore:`, `style:`, `test:` | none |
+
+```
+feat(usb): add UAC playback on S3
+
+fix: stop EQ click on mute
+
+docs: explain factory flash
+
+feat!: new NVS layout
+
+BREAKING CHANGE: existing devices must factory-reset.
+```
+
+`chore(release):` commits from the bot include `[skip ci]` so they do not
+loop. OpenAPI `info.version` is the HTTP schema, not the firmware tag.
+
+**First release:** with no existing tag, semantic-release starts at
+**1.0.0** on the next `feat:` / `fix:`. To stay on 0.x, push a seed tag
+once (`git tag v0.1.0 && git push origin v0.1.0`) before merging
+releasable commits.
+
+Manual `git push origin vX.Y.Z` still works ([`release.yml`](../.github/workflows/release.yml)).
+
+Each Release attaches four factory images (bootloader + partition table +
+app + SPIFFS website). `esptool write-flash 0x0 …` is a **factory write**:
+NVS at `0x9000` is 0xFF, so Wi-Fi credentials and EQ presets are cleared.
+`task fw:flash` updates app + SPIFFS only and keeps NVS.
 
 ## Code layout
 
@@ -120,10 +165,10 @@ To iterate on UI changes:
 
 ## SPIFFS audio assets
 
-Voice prompts live in `ESP32_AudioPlatform/data/audio/`. Names must match
+Voice prompts live in `pareto-amp/data/audio/`. Names must match
 the `kClipManifest` table in `src/idf_voice_cache.cpp`:
 
-```46:52:ESP32_AudioPlatform/src/idf_voice_cache.cpp
+```46:52:pareto-amp/src/idf_voice_cache.cpp
     {VOICE_CLIP_WIFI_CONNECTED,      "/spiffs/audio/WifiConnected.mp3",      "WifiConnected.mp3"},
     {VOICE_CLIP_WIFI_DISCONNECTED,   "/spiffs/audio/WifiDisconnected.mp3",   "WifiDisconnected.mp3"},
     {VOICE_CLIP_BLUETOOTH_MODE,      "/spiffs/audio/BluetoothMode.mp3",      "BluetoothMode.mp3"},
@@ -183,7 +228,7 @@ host build will fail before flash.
   otherwise installs a current `espressif32` with IDF 6.x.
 - PlatformIO Core **6.1.19** (not 6.2). 6.2 ships SCons 4.11.1; this
   platform pins 4.8.1, and the mismatch wipes `tool-scons` mid-link. CI
-  pins the same version in `.github/workflows/platformio.yml`.
+  pins the same version in `.github/workflows/ci.yml`.
 - IDF components: `nvs_flash`, `spiffs`, `esp_wifi`, `esp_netif`,
   `esp_event`, `esp_http_server`, `esp_timer`, `lwip`, `mdns`, `bt`.
 - External libraries: vendored `chmorgan/esp-libhelix-mp3`
