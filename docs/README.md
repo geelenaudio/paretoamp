@@ -12,8 +12,8 @@ are diving into the code, start with **Architecture**.
 
 ### Operations
 
-- [Using the firmware](using-firmware.md) — download a GitHub Release
-  binary, flash at `0x0`, first-boot hotspot.
+- [Using the firmware](using-firmware.md) — [browser installer](https://geelenaudio.github.io/flasher/),
+  GitHub Release binary, flash at `0x0`, first-boot hotspot.
 - [Operating guide](operating_guide.md) — first-time setup, what each prompt
   means, switching modes from the Web UI, troubleshooting.
 - [User guide (legacy)](user-guide.md) — older operations notes (kept for

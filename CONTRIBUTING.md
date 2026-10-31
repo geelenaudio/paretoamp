@@ -6,6 +6,7 @@ Thanks for helping with Pareto Amp. The firmware is
 welcome.
 
 You can also just **use** a release binary — no clone required:
+[browser installer](https://geelenaudio.github.io/flasher/) or
 [Using the firmware](docs/using-firmware.md).
 
 ## Issues

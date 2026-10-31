@@ -15,7 +15,11 @@ Firmware from [geelen.audio](https://geelen.audio) for four boards in one tree: 
 
 ## Use the firmware
 
-You can run a release binary without cloning this tree. Download the
+On a desktop **Chrome / Edge / Opera / Firefox 151+**, open the
+[browser installer](https://geelenaudio.github.io/flasher/)
+(USB, no extra apps). Safari: download from that page, or esptool below.
+
+You can also run a release binary without cloning this tree. Download the
 factory `.bin` for your board from
 [GitHub Releases](https://github.com/geelenaudio/paretoamp/releases)
 and write it at flash offset `0x0` (that **wipes NVS**). Full steps,
@@ -92,7 +96,7 @@ Issues and pull requests are welcome. Please read
 
 ## Contents
 
-- [Using the firmware](docs/using-firmware.md) – download, flash, first boot
+- [Using the firmware](docs/using-firmware.md) – [browser installer](https://geelenaudio.github.io/flasher/), download, flash, first boot
 - [Operating guide](docs/operating_guide.md) – Wi-Fi, Bluetooth, Snapcast, Web UI
 - [Contributing](CONTRIBUTING.md) – issues, PRs, Conventional Commits
 - [Hardware variants](docs/hardware/README.md) – four boards, pinouts, DAC

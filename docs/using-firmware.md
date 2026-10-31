@@ -4,6 +4,12 @@ You do not need to build anything. Each [GitHub Release](https://github.com/geel
 attaches one factory image per board: bootloader, partition table, app, and
 the web UI. Flash that file at offset `0x0` and the board is a Pareto Amp.
 
+**Chrome, Edge, Opera, or Firefox 151+:** use the
+[browser installer](https://geelenaudio.github.io/flasher/)
+(USB, pick Amped or Louder, pick a release). Safari cannot talk to serial
+ports; use Download on that page or esptool below. A factory write **wipes
+NVS**.
+
 To change the code instead, see [Development](development.md) and
 [Contributing](../CONTRIBUTING.md).
 

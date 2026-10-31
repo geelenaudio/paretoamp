@@ -1,7 +1,9 @@
 # Operating guide
 
 A practical guide for using the device once it is powered on. To put a
-release binary on the board, see [Using the firmware](using-firmware.md).
+release binary on the board, use the
+[browser installer](https://geelenaudio.github.io/flasher/)
+or [Using the firmware](using-firmware.md).
 For how the firmware works under the hood, see [Architecture](architecture.md).
 
 ## What you should hear at boot
