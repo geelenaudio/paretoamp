@@ -109,6 +109,16 @@ app + SPIFFS website). `esptool write-flash 0x0 …` is a **factory write**:
 NVS at `0x9000` is 0xFF, so Wi-Fi credentials and EQ presets are cleared.
 `task fw:flash` updates app + SPIFFS only and keeps NVS.
 
+A published release with those images attached starts the
+[flasher Pages workflow](https://github.com/geelenaudio/flasher/actions/workflows/pages.yml),
+which copies them onto the browser installer. That dispatch uses the
+`flasher-dispatch` GitHub App, installed on `geelenaudio/flasher` only,
+with Actions read and write. CI mints a one-hour token from the
+`geelenaudio` organization secrets `FLASHER_APP_ID` and
+`FLASHER_APP_PRIVATE_KEY`. Those secrets are visible to this repository
+and to no other repository. The flasher site also copies releases hourly
+if the dispatch does not run.
+
 ## Code layout
 
 - `src/idf_main.cpp` — entry, I2S init, GPIO 13, Wi-Fi, A2DP / Snapclient /

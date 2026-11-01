@@ -182,3 +182,24 @@ jobs:
           } > /tmp/notes.md
           gh release edit "$tag" --notes-file /tmp/notes.md
 
+  dispatch-flasher:
+    name: Dispatch flasher
+    needs: [semantic, attach-factory]
+    if: needs.semantic.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mint flasher installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FLASHER_APP_ID }}
+          private-key: ${{ secrets.FLASHER_APP_PRIVATE_KEY }}
+          owner: geelenaudio
+          repositories: flasher
+
+      - name: Start flasher Pages
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh workflow run Pages --repo geelenaudio/flasher --ref main
+
