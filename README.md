@@ -1,7 +1,7 @@
 # Pareto Amp
 
 [![CI](https://github.com/geelenaudio/paretoamp/actions/workflows/ci.yml/badge.svg)](https://github.com/geelenaudio/paretoamp/actions/workflows/ci.yml)
-[![GitHub Release](https://img.shields.io/badge/release-v0.0.1-blue)](https://github.com/geelenaudio/paretoamp/releases)
+[![GitHub Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/geelenaudio/paretoamp/releases)
 [![semantic-release: conventionalcommits](https://img.shields.io/badge/semantic--release-conventionalcommits-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
 
 Firmware from [geelen.audio](https://geelen.audio) for four boards in one tree: **Amped-ESP32** (WROVER-N8R8, PCM5100A),
