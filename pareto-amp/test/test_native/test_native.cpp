@@ -10,6 +10,7 @@
 #include "eq_types.h"
 #include "idf_events.h"
 #include "idf_mode_manager.h"
+#include "dlna_ssdp.h"
 #include <cstring>
 #include <cmath>
 #include <type_traits>
@@ -392,6 +393,101 @@ void test_mode_fsm_name_for_source(void) {
   TEST_ASSERT_EQUAL_STRING("?",          geelen_idf::nameForSource(99));
 }
 
+static const char* kDlnaTestUdn = "uuid:5f9e4a40-80f3-da59-9448-geelenamp00";
+
+static const char* kDlnaHostThenSt =
+    "M-SEARCH * HTTP/1.1\r\n"
+    "HOST: 239.255.255.250:1900\r\n"
+    "MAN: \"ssdp:discover\"\r\n"
+    "MX: 1\r\n"
+    "ST: upnp:rootdevice\r\n"
+    "\r\n";
+
+void test_dlna_ssdp_host_line_is_not_st(void) {
+  char st[128];
+  TEST_ASSERT_TRUE(geelen_idf::dlnaParseHeader(kDlnaHostThenSt, "ST", st, sizeof(st)));
+  TEST_ASSERT_EQUAL_STRING("upnp:rootdevice", st);
+  const char* out[geelen_idf::kDlnaSsdpMaxTargets];
+  const size_t n = geelen_idf::dlnaSearchTargets(
+      st, kDlnaTestUdn, out, geelen_idf::kDlnaSsdpMaxTargets);
+  TEST_ASSERT_EQUAL_size_t(1, n);
+  TEST_ASSERT_EQUAL_STRING("upnp:rootdevice", out[0]);
+}
+
+void test_dlna_ssdp_st_before_host_and_lowercase(void) {
+  const char* before =
+      "M-SEARCH * HTTP/1.1\r\n"
+      "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+      "HOST: 239.255.255.250:1900\r\n"
+      "\r\n";
+  char st[128];
+  TEST_ASSERT_TRUE(geelen_idf::dlnaParseHeader(before, "ST", st, sizeof(st)));
+  TEST_ASSERT_EQUAL_STRING("urn:schemas-upnp-org:device:MediaRenderer:1", st);
+
+  const char* lower =
+      "M-SEARCH * HTTP/1.1\r\n"
+      "HOST: 239.255.255.250:1900\r\n"
+      "st: upnp:rootdevice\r\n"
+      "\r\n";
+  TEST_ASSERT_TRUE(geelen_idf::dlnaParseHeader(lower, "ST", st, sizeof(st)));
+  TEST_ASSERT_EQUAL_STRING("upnp:rootdevice", st);
+}
+
+void test_dlna_ssdp_missing_st_yields_no_target(void) {
+  const char* pkt =
+      "M-SEARCH * HTTP/1.1\r\n"
+      "HOST: 239.255.255.250:1900\r\n"
+      "MAN: \"ssdp:discover\"\r\n"
+      "\r\n";
+  char st[128] = "stale";
+  TEST_ASSERT_FALSE(geelen_idf::dlnaParseHeader(pkt, "ST", st, sizeof(st)));
+  const char* out[geelen_idf::kDlnaSsdpMaxTargets];
+  TEST_ASSERT_EQUAL_size_t(
+      0, geelen_idf::dlnaSearchTargets("", kDlnaTestUdn, out, geelen_idf::kDlnaSsdpMaxTargets));
+  TEST_ASSERT_EQUAL_size_t(
+      0, geelen_idf::dlnaSearchTargets(nullptr, kDlnaTestUdn, out, geelen_idf::kDlnaSsdpMaxTargets));
+}
+
+void test_dlna_ssdp_media_renderer_is_one_target(void) {
+  const char* st = "urn:schemas-upnp-org:device:MediaRenderer:1";
+  const char* out[geelen_idf::kDlnaSsdpMaxTargets];
+  const size_t n = geelen_idf::dlnaSearchTargets(
+      st, kDlnaTestUdn, out, geelen_idf::kDlnaSsdpMaxTargets);
+  TEST_ASSERT_EQUAL_size_t(1, n);
+  TEST_ASSERT_EQUAL_STRING(st, out[0]);
+}
+
+void test_dlna_ssdp_all_yields_six_advertisements(void) {
+  const char* out[geelen_idf::kDlnaSsdpMaxTargets];
+  const size_t n = geelen_idf::dlnaSearchTargets(
+      "ssdp:all", kDlnaTestUdn, out, geelen_idf::kDlnaSsdpMaxTargets);
+  TEST_ASSERT_EQUAL_size_t(6, n);
+  TEST_ASSERT_EQUAL_STRING("upnp:rootdevice", out[0]);
+  TEST_ASSERT_EQUAL_STRING(kDlnaTestUdn, out[1]);
+  TEST_ASSERT_EQUAL_STRING("urn:schemas-upnp-org:device:MediaRenderer:1", out[2]);
+  TEST_ASSERT_EQUAL_STRING("urn:schemas-upnp-org:service:AVTransport:1", out[3]);
+  TEST_ASSERT_EQUAL_STRING("urn:schemas-upnp-org:service:RenderingControl:1", out[4]);
+  TEST_ASSERT_EQUAL_STRING("urn:schemas-upnp-org:service:ConnectionManager:1", out[5]);
+}
+
+void test_dlna_uuid_from_mac_is_rfc_uuid(void) {
+  const uint8_t mac[6] = {0x80, 0xf3, 0xda, 0x59, 0x94, 0x48};
+  char u[40];
+  TEST_ASSERT_TRUE(geelen_idf::dlnaUuidFromMac(mac, u, sizeof(u)));
+  TEST_ASSERT_EQUAL_STRING("5f9e4a40-80f3-4000-8000-80f3da599448", u);
+  TEST_ASSERT_EQUAL_INT('4', u[14]);
+  TEST_ASSERT_EQUAL_INT('8', u[19]);
+  TEST_ASSERT_FALSE(geelen_idf::dlnaUuidFromMac(mac, u, 36));
+}
+
+void test_dlna_ssdp_media_server_yields_none(void) {
+  const char* out[geelen_idf::kDlnaSsdpMaxTargets];
+  const size_t n = geelen_idf::dlnaSearchTargets(
+      "urn:schemas-upnp-org:device:MediaServer:1", kDlnaTestUdn, out,
+      geelen_idf::kDlnaSsdpMaxTargets);
+  TEST_ASSERT_EQUAL_size_t(0, n);
+}
+
 void test_event_payload_sizes(void) {
   /* Pin sizes so a future struct change is visible. The DLNA URI is the
    * largest payload by far; keeping it ≤ 256 bytes bounds the per-post
@@ -433,6 +529,13 @@ int main(int argc, char** argv) {
   RUN_TEST(test_eqHwSlotTotal_seven_times_24_is_14);
   RUN_TEST(test_event_ids_are_stable);
   RUN_TEST(test_event_payloads_are_pod);
+  RUN_TEST(test_dlna_ssdp_host_line_is_not_st);
+  RUN_TEST(test_dlna_ssdp_st_before_host_and_lowercase);
+  RUN_TEST(test_dlna_ssdp_missing_st_yields_no_target);
+  RUN_TEST(test_dlna_ssdp_media_renderer_is_one_target);
+  RUN_TEST(test_dlna_ssdp_all_yields_six_advertisements);
+  RUN_TEST(test_dlna_ssdp_media_server_yields_none);
+  RUN_TEST(test_dlna_uuid_from_mac_is_rfc_uuid);
   RUN_TEST(test_event_payload_sizes);
   RUN_TEST(test_mode_fsm_noop_for_same_source);
   RUN_TEST(test_mode_fsm_bluetooth_either_side_reboots);

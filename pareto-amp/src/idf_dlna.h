@@ -78,10 +78,15 @@ struct Snapshot {
   uint32_t position_s;
 };
 
+// Register GET/POST `/dlna/*` on `server` **before** the SPA `/*`
+// catch-all. esp_http_server first-match-wins, so handlers installed
+// after `/*` never run (control points then GET /dlna/desc.xml → 404).
+// Safe to call more than once. Returns false if a register fails.
+bool registerHttpHandlers(httpd_handle_t server);
+
 // Install the DLNA module. `server` is the already-started main HTTPD
-// handle; we register additional URI handlers for DLNA descriptors and
-// SOAP. Call after the WiFi STA has an IP — before that, SSDP can't do
-// much. Returns false if SSDP socket setup fails.
+// handle. Call after the WiFi STA has an IP — before that, SSDP can't
+// do much. Returns false if SSDP socket setup fails.
 bool start(httpd_handle_t server, ConfigManager* cfg);
 
 // Stop advertising (deletes SSDP socket + task). Keeps HTTP descriptors

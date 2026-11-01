@@ -15,6 +15,7 @@
 #include "idf_http_server.h"
 #include "idf_api.h"
 #include "idf_config_manager.h"
+#include "idf_dlna.h"
 #include "idf_logs.h"
 #include "idf_state_stream.h"
 #include "idf_wifi_manager.h"
@@ -806,6 +807,11 @@ bool HttpServer::begin(ConfigManager* cfg, WifiManager* wifi) {
   // SSE endpoint for the SPA's push-based device state. Same registration
   // ordering rationale as the logs stream — must be ahead of `/*`.
   geelen_idf::stateStreamRegister(h);
+
+  // DLNA GET /dlna/desc.xml (etc.) must be registered *before* the SPA
+  // catch-all. esp_http_server uses first-match; `/*` would 404 the
+  // descriptor and control points would never list the renderer.
+  geelen_idf::dlna::registerHttpHandlers(h);
 
   // Catch-all static handler, registered last so the /api/* URIs win by
   // prefix-specificity above it. Captive probes are handled inside

@@ -20,6 +20,7 @@
 // foobar2000 UPnP, Linn Kazoo).
 
 #include "idf_dlna.h"
+#include "dlna_ssdp.h"
 
 #include "idf_config_manager.h"
 #include "idf_identity.h"
@@ -44,7 +45,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <cctype>
 
 // --- Forward declaration of an engine symbol we prod when volume changes.
 extern "C" void on_volume_changed() __attribute__((weak));
@@ -63,11 +63,12 @@ httpd_handle_t s_http = nullptr;
 SemaphoreHandle_t s_mutex = nullptr;
 TaskHandle_t s_ssdp_task = nullptr;
 bool s_running = false;
+bool s_uris_registered = false;
 int s_ssdp_sock = -1;
 
 // ============================ [UUID] ================================
 
-char s_uuid[40] = {0};        // "uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+char s_uuid[40] = {0};        // RFC 4122 UUID, no "uuid:" prefix
 char s_device_udn[64] = {0};  // full UDN including "uuid:" prefix
 char s_host_ip[16] = {0};     // "a.b.c.d" populated at start()
 uint16_t s_http_port = 80;
@@ -77,9 +78,9 @@ void init_uuid_from_mac() {
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
   // Stable UUID: namespace bytes + MAC. Not cryptographically sound,
   // but UPnP only cares that it's stable per device.
-  snprintf(s_uuid, sizeof(s_uuid),
-           "5f9e4a40-%02x%02x-%02x%02x-%02x%02x-geelenamp00",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  if (!dlnaUuidFromMac(mac, s_uuid, sizeof(s_uuid))) {
+    strlcpy(s_uuid, "5f9e4a40-80f3-4000-8000-000000000000", sizeof(s_uuid));
+  }
   snprintf(s_device_udn, sizeof(s_device_udn), "uuid:%s", s_uuid);
 }
 
@@ -528,9 +529,11 @@ esp_err_t h_desc(httpd_req_t* req) {
   if (!buf) return ESP_FAIL;
   int n = snprintf(buf, 4096,
     "<?xml version=\"1.0\"?>"
-    "<root xmlns=\"urn:schemas-upnp-org:device-1-0\" configId=\"1\">"
+    "<root xmlns=\"urn:schemas-upnp-org:device-1-0\""
+    " xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\" configId=\"1\">"
       "<specVersion><major>1</major><minor>0</minor></specVersion>"
       "<device>"
+        "<dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>"
         "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
         "<friendlyName>%s</friendlyName>"
         "<manufacturer>Geelen Audio</manufacturer>"
@@ -753,12 +756,15 @@ esp_err_t h_scpd_avt(httpd_req_t* r) { httpd_resp_set_type(r, "text/xml"); retur
 esp_err_t h_scpd_rc (httpd_req_t* r) { httpd_resp_set_type(r, "text/xml"); return httpd_resp_sendstr(r, SCPD_RC);  }
 esp_err_t h_scpd_cm (httpd_req_t* r) { httpd_resp_set_type(r, "text/xml"); return httpd_resp_sendstr(r, SCPD_CM);  }
 
-// GENA stub: accept SUBSCRIBE/UNSUBSCRIBE with a fake SID so clients
-// that refuse to operate without eventing don't bail. We never call
-// back.
+// GENA stub. Control points SUBSCRIBE before they will list a renderer.
+// The SID has to be a real UUID; "uuid:geelen-stub-0000" is rejected and
+// the device is dropped. We never send NOTIFY callbacks.
 esp_err_t h_evt_stub(httpd_req_t* req) {
+  char sid[64];
+  snprintf(sid, sizeof(sid), "uuid:%s",
+           s_uuid[0] ? s_uuid : "5f9e4a40-80f3-4000-8000-000000000000");
   httpd_resp_set_status(req, "200 OK");
-  httpd_resp_set_hdr(req, "SID", "uuid:geelen-stub-0000");
+  httpd_resp_set_hdr(req, "SID", sid);
   httpd_resp_set_hdr(req, "TIMEOUT", "Second-1800");
   httpd_resp_send(req, "", 0);
   return ESP_OK;
@@ -813,21 +819,12 @@ void parse_didl_metadata(const char* didl, size_t n) {
 //   1. Owns a UDP socket bound to 0.0.0.0:1900 with IP_ADD_MEMBERSHIP
 //      to 239.255.255.250.
 //   2. Blocks in recvfrom() most of the time.
-//   3. On incoming M-SEARCH, parses the ST and responds unicast if we
-//      match.
-//   4. Every 30 s, multicasts ssdp:alive announcements (IDs 1–5).
+//   3. On incoming M-SEARCH, parses the ST at line start (not the "ST:"
+//      inside "HOST:") and unicasts one response per matching target.
+//   4. Every 30 s, multicasts one ssdp:alive per advertisement.
 
 constexpr uint32_t kAnnounceIntervalMs = 30 * 1000;
 constexpr int kMaxAge = 1800;
-
-const char* kAdvertTypes[] = {
-  "upnp:rootdevice",
-  nullptr,  // uuid: filled at runtime
-  "urn:schemas-upnp-org:device:MediaRenderer:1",
-  "urn:schemas-upnp-org:service:AVTransport:1",
-  "urn:schemas-upnp-org:service:RenderingControl:1",
-  "urn:schemas-upnp-org:service:ConnectionManager:1",
-};
 
 void populate_host_ip() {
   esp_netif_t* nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -873,19 +870,18 @@ void send_notify(int sock, const char* nt, const char* nts) {
   sendto(sock, pkt, n, 0, (sockaddr*)&dst, sizeof(dst));
 }
 
-void send_alive_burst(int sock) {
-  for (size_t i = 0; i < sizeof(kAdvertTypes)/sizeof(kAdvertTypes[0]); ++i) {
-    send_notify(sock, kAdvertTypes[i], "ssdp:alive");
+void send_advert_burst(int sock, const char* nts) {
+  const char* types[kDlnaSsdpMaxTargets];
+  const size_t n = dlnaAdvertTargets(s_device_udn, types, kDlnaSsdpMaxTargets);
+  for (size_t i = 0; i < n; ++i) {
+    send_notify(sock, types[i], nts);
     vTaskDelay(pdMS_TO_TICKS(25));
   }
 }
 
-void send_byebye(int sock) {
-  for (size_t i = 0; i < sizeof(kAdvertTypes)/sizeof(kAdvertTypes[0]); ++i) {
-    send_notify(sock, kAdvertTypes[i], "ssdp:byebye");
-    vTaskDelay(pdMS_TO_TICKS(25));
-  }
-}
+void send_alive_burst(int sock) { send_advert_burst(sock, "ssdp:alive"); }
+
+void send_byebye(int sock) { send_advert_burst(sock, "ssdp:byebye"); }
 
 void send_search_response(int sock, const sockaddr_in& to, const char* st) {
   char usn[128]; build_usn(usn, sizeof(usn), st);
@@ -902,28 +898,6 @@ void send_search_response(int sock, const sockaddr_in& to, const char* st) {
     "\r\n",
     kMaxAge, s_host_ip, (unsigned)s_http_port, st, usn);
   sendto(sock, pkt, n, 0, (const sockaddr*)&to, sizeof(to));
-}
-
-// Return true if the incoming M-SEARCH ST matches any of our types.
-// If so, `resp_st` is populated with the matched string to echo back.
-bool search_matches(const char* st, const char** resp_st) {
-  if (strcmp(st, "ssdp:all") == 0) {
-    *resp_st = "upnp:rootdevice";
-    return true;
-  }
-  for (size_t i = 0; i < sizeof(kAdvertTypes)/sizeof(kAdvertTypes[0]); ++i) {
-    const char* t = kAdvertTypes[i] ? kAdvertTypes[i] : s_device_udn;
-    if (strcmp(st, t) == 0) {
-      *resp_st = t;
-      return true;
-    }
-  }
-  // Device UUID check.
-  if (strcmp(st, s_device_udn) == 0) {
-    *resp_st = s_device_udn;
-    return true;
-  }
-  return false;
 }
 
 void ssdp_task(void*) {
@@ -964,30 +938,23 @@ void ssdp_task(void*) {
 
   char buf[1500];
   sockaddr_in from{};
-  socklen_t flen = sizeof(from);
   while (s_running) {
     timeval tv{}; tv.tv_sec = 1; tv.tv_usec = 0;
     fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
     int r = select(sock + 1, &rfds, nullptr, nullptr, &tv);
     if (r > 0 && FD_ISSET(sock, &rfds)) {
+      socklen_t flen = sizeof(from);
       int n = recvfrom(sock, buf, sizeof(buf) - 1, 0, (sockaddr*)&from, &flen);
       if (n > 0) {
         buf[n] = 0;
         if (strncmp(buf, "M-SEARCH", 8) == 0) {
-          const char* st_hdr = strcasestr(buf, "ST:");
-          if (st_hdr) {
-            st_hdr += 3;
-            while (*st_hdr == ' ') ++st_hdr;
-            char st[128]; size_t i = 0;
-            while (*st_hdr && *st_hdr != '\r' && *st_hdr != '\n' && i < sizeof(st) - 1) {
-              st[i++] = *st_hdr++;
-            }
-            st[i] = 0;
-            // Strip trailing whitespace.
-            while (i > 0 && isspace((unsigned char)st[i-1])) st[--i] = 0;
-            const char* match = nullptr;
-            if (search_matches(st, &match)) {
-              send_search_response(sock, from, match);
+          char st[128];
+          if (dlnaParseHeader(buf, "ST", st, sizeof(st))) {
+            const char* targets[kDlnaSsdpMaxTargets];
+            const size_t ntargets =
+                dlnaSearchTargets(st, s_device_udn, targets, kDlnaSsdpMaxTargets);
+            for (size_t i = 0; i < ntargets; ++i) {
+              send_search_response(sock, from, targets[i]);
             }
           }
         }
@@ -1010,6 +977,39 @@ void ssdp_task(void*) {
 
 // ============================ [public] ==============================
 
+bool registerHttpHandlers(httpd_handle_t server) {
+  if (!server) return false;
+  if (s_uris_registered) return true;
+  for (auto& u : kUris) {
+    httpd_uri_t h{};
+    h.uri = u.uri;
+    h.method = u.method;
+    h.handler = u.handler;
+    h.user_ctx = nullptr;
+    const esp_err_t e = httpd_register_uri_handler(server, &h);
+    if (e != ESP_OK && e != ESP_ERR_HTTPD_HANDLER_EXISTS) {
+      ESP_LOGE(TAG, "register %s failed: %s", u.uri, esp_err_to_name(e));
+      return false;
+    }
+  }
+  const httpd_method_t evt_methods[] = { HTTP_GET, HTTP_SUBSCRIBE, HTTP_UNSUBSCRIBE };
+  for (httpd_method_t method : evt_methods) {
+    httpd_uri_t evt{
+        .uri = "/dlna/evt/*",
+        .method = method,
+        .handler = h_evt_stub,
+        .user_ctx = nullptr,
+    };
+    const esp_err_t e = httpd_register_uri_handler(server, &evt);
+    if (e != ESP_OK && e != ESP_ERR_HTTPD_HANDLER_EXISTS) {
+      ESP_LOGE(TAG, "register /dlna/evt/* failed: %s", esp_err_to_name(e));
+      return false;
+    }
+  }
+  s_uris_registered = true;
+  return true;
+}
+
 bool start(httpd_handle_t server, ConfigManager* cfg) {
   if (s_running) return true;
   s_http = server;
@@ -1021,13 +1021,7 @@ bool start(httpd_handle_t server, ConfigManager* cfg) {
   // The main server is on 80 — we don't get to pick here, so use it.
   s_http_port = 80;
 
-  for (auto& u : kUris) {
-    httpd_uri_t h{};
-    h.uri = u.uri; h.method = u.method; h.handler = u.handler; h.user_ctx = nullptr;
-    httpd_register_uri_handler(server, &h);
-  }
-  httpd_uri_t evt_get{ .uri="/dlna/evt/*", .method=HTTP_GET, .handler=h_evt_stub, .user_ctx=nullptr };
-  httpd_register_uri_handler(server, &evt_get);
+  if (!registerHttpHandlers(server)) return false;
 
   s_running = true;
   xTaskCreatePinnedToCore(ssdp_task, "dlna-ssdp", 4096, nullptr, 4, &s_ssdp_task, 0);
