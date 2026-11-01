@@ -77,16 +77,31 @@ paths:
         Single round-trip snapshot of everything the SPA needs to render:
         current mode, volume, channel config, Snapcast host, DLNA settings,
         Bluetooth connection / pairing-window status (PIN is not included),
-        the EQ curve + backend + per-board `max_bands`, headroom settings,
-        device name, hostname (mDNS), firmware version.
+        test-tone generator parameters, the EQ curve + backend + per-board
+        `max_bands`, headroom settings, device name, hostname (mDNS),
+        firmware version, and the Wi-Fi credential-probe state.
 
-        SPA fetches this once per page mount; live metrics (CPU / heap /
-        WiFi RSSI) live on `GET /api/system` and should be polled
-        separately.
+        Live metrics (CPU / heap / WiFi RSSI) live on `GET /api/system` and
+        should be polled separately. Push updates of this same document are
+        on `GET /api/state/stream`.
+
+        Responses carry an `ETag` of `_v` (`"%08lx"`, quoted). A matching
+        `If-None-Match` returns 304 with an empty body. A `W/` prefix on
+        the validator is ignored.
       operationId: getState
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: Previous `ETag`. A match returns 304.
       responses:
         "200":
           description: Current state.
+          headers:
+            ETag:
+              description: Quoted hex state version, e.g. `"0000002a"`.
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceState" }
@@ -94,6 +109,7 @@ paths:
                 device_name: "Pareto Amp"
                 firmware: "0.3.0"
                 mode: "snapclient"
+                supports_usb: false
                 _v: 42
                 identity:
                   device_name: "Pareto Amp"
@@ -113,8 +129,18 @@ paths:
                   brightness: 40
                 snapcast: { host: "10.0.80.34", port: 1704 }
                 dlna: { enabled: false, name: "Pareto Amp" }
-                wifi: { power_save: "none" }
+                wifi: { power_save: "none", state: "idle" }
                 voice_feedback: true
+                bluetooth: { connected: false, discoverable: false, window_ms_left: 0 }
+                test_tone:
+                  freq_hz: 1000
+                  amp_db: -12
+                  pan: 0
+                  mode: 0
+                  sweep_s: 10
+                  sweep_lo_hz: 20
+                  sweep_hi_hz: 20000
+                  dual_f2_hz: 1000
                 eq:
                   enabled: true
                   band_count: 6
@@ -131,15 +157,68 @@ paths:
                     - { freq: 12000,gain_db:  1.0, q: 0.80, type: "bell" }
                   headroom: { mode: "auto", manual_db: 0, auto_db: -2.3 }
                   active_slot: 255
+        "304":
+          description: "If-None-Match matched the current ETag. Empty body."
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+
+  /api/state/stream:
+    get:
+      tags: [State]
+      summary: Push device state (SSE)
+      description: |
+        Server-Sent Events stream of the same document as `GET /api/state`
+        (`buildStateJson`). A new subscriber receives `event: snapshot`
+        within one broadcast tick (250 ms, or 500 ms while A2DP playback,
+        voice feedback, or USB streaming is active). Later updates are
+        `event: diff`: a JSON object of only the top-level keys that
+        changed. A key removed from the snapshot
+        is JSON `null`. If more than four top-level keys change, the
+        server sends another full `snapshot` instead of a diff.
+
+        Each frame is `event: <name>\nid: <version>\ndata: <json>\n\n`.
+        `id` is the monotonic `_v` state version. While the stream is
+        idle, `event: ping` with `data: 0` is sent every 10 s.
+
+        At most 3 concurrent subscribers. A full list is **503**
+        `text/plain` with `Retry-After: 5`.
+      operationId: streamState
+      responses:
+        "200":
+          description: Event stream. `snapshot` data is a DeviceState; `diff` data is a partial DeviceState; `ping` data is `0`.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            text/event-stream:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DeviceState"
+                  - type: object
+                    additionalProperties: true
+                    description: Top-level keys of DeviceState that changed since the previous frame.
+        "503":
+          description: Subscriber limit (3) reached.
+          headers:
+            Retry-After:
+              schema: { type: integer, const: 5 }
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: state stream subscriber limit reached
 
   /api/system:
     get:
       tags: [State]
       summary: Runtime metrics
       description: |
-        Live snapshot of uptime, free heap, PSRAM, chip info, WiFi link
-        status, and CPU load per core. Intended to be polled at ~1 Hz
-        while the Overview page is visible.
+        Live snapshot of uptime, free heap, PSRAM, audio output meters,
+        chip info, firmware build identity, Wi-Fi link status, CPU load
+        per core, and the full identity object (including MACs).
       operationId: getSystem
       responses:
         "200":
@@ -160,6 +239,12 @@ paths:
                   channel: 36
                   ip: "10.0.80.34"
                 cpu: { core0_pct: 12, core1_pct: 34 }
+                audio:
+                  out:
+                    peak_l_db: -12.4
+                    peak_r_db: -13.1
+                    rms_l_db: -18.0
+                    rms_r_db: -18.2
 
   /api/system/metrics:
     get:
@@ -226,7 +311,7 @@ paths:
           description: Compact metrics snapshot.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/SystemInfo" }
+              schema: { $ref: "#/components/schemas/SystemSummary" }
 
   /api/system/tasks:
     get:
@@ -326,6 +411,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LedState" }
+        "400":
+          description: "`color` is not `#rrggbb`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "color must be #rrggbb" }
         "404":
           description: This firmware image has no WS2812 (`HAL_HAS_WS2812=0`).
 
@@ -646,25 +737,7 @@ paths:
           description: The full curve after clamping, plus backend and headroom.
           content:
             application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/EqCurve"
-                  - type: object
-                    required: [headroom, backend, max_bands]
-                    properties:
-                      max_bands:
-                        type: integer
-                        minimum: 1
-                        maximum: 15
-                        description: Per-board runtime cap for `band_count`.
-                      backend:
-                        type: string
-                        enum: [software, hardware, "software (fallback)"]
-                        description: |
-                          Where the curve runs when `enabled` is true.
-                          Independent of `enabled`; Louder reports
-                          `hardware` even when EQ is off.
-                      headroom: { $ref: "#/components/schemas/HeadroomSetting" }
+              schema: { $ref: "#/components/schemas/EqState" }
         "400":
           description: |
             Louder only: the merged curve needs more than 15 TAS biquad
@@ -752,7 +825,7 @@ paths:
                 properties:
                   index: { type: integer }
                   name: { type: string }
-                  eq: { $ref: "#/components/schemas/EqCurve" }
+                  eq: { $ref: "#/components/schemas/EqState" }
         "404":
           description: Slot is empty.
           content:
@@ -810,10 +883,11 @@ paths:
       summary: Reset a scope of persistent memory
       description: |
         Available scopes: `wifi`, `bluetooth`, `snapcast`, `dlna`, `eq`,
-        `audio`, `all`. WiFi and Bluetooth scopes force a reboot; others
-        stay live. The `eq` scope also clears all preset slots. The
-        `bluetooth` scope wipes Bluedroid bonded peers (not only an NVS
-        hint) before reboot.
+        `audio`, `all`, `factory`. `wifi`, `bluetooth`, `all`, and
+        `factory` reboot; the others stay live. `all` and `factory` are
+        the same full wipe. The `eq` scope also clears all preset slots.
+        `bluetooth`, `all`, and `factory` wipe Bluedroid bonded peers
+        (not only an NVS hint) before reboot.
       operationId: resetScope
       requestBody:
         required: true
@@ -843,12 +917,14 @@ paths:
   /api/wifi:
     post:
       tags: [WiFi]
-      summary: Save Wi-Fi credentials and reboot
+      summary: Probe Wi-Fi credentials, then save and reboot
       description: |
         Form-encoded credential save (`application/x-www-form-urlencoded`,
-        body `ssid=…&pass=…`). On success the device persists the creds to
-        NVS and reboots after ~800 ms. The same handler is used by the
-        AP-mode inline setup page (`/`) and by the SPA `/wifi` page.
+        body `ssid=…&pass=…`). Probes first (12 s, same path as
+        `POST /api/wifi/validate`) and only persists to NVS and reboots
+        (~800 ms) when the probe gets an IP. A failed probe returns 200
+        with `ok: false` and does not write NVS. Used by the AP-mode
+        inline setup page (`/`) and by the SPA `/wifi` page.
       operationId: setWifi
       requestBody:
         required: true
@@ -862,13 +938,32 @@ paths:
                 pass: { type: string, maxLength: 64, description: "WPA2 PSK; omit to keep current password." }
       responses:
         "200":
-          description: Credentials saved; device is rebooting.
+          description: |
+            Probe result. `ok: true` means the credentials were saved and
+            the device is rebooting. `ok: false` means the probe failed;
+            nothing was persisted. HTTP status is 200 in both cases.
           content:
             application/json:
               schema:
                 type: object
+                required: [ok]
                 properties:
                   ok: { type: boolean }
+                  reason:
+                    type: string
+                    enum: [AUTH_FAIL, NO_AP_FOUND, ASSOC_FAIL, TIMEOUT, FAIL]
+                    description: Present when `ok` is false.
+                  detail:
+                    type: string
+                    description: |
+                      Present when `ok` is false. Disconnect failures use
+                      `wifi disconnect reason <n>`; a missing SSID is
+                      `missing ssid`; a timeout is `no IP within probe window`.
+              examples:
+                saved:
+                  value: { ok: true }
+                rejected:
+                  value: { ok: false, reason: AUTH_FAIL, detail: "wifi disconnect reason 202" }
 
   /api/wifi/validate:
     post:
@@ -978,6 +1073,7 @@ paths:
                 ip: "10.0.80.34"
                 ap_ssid: ""
                 ap_ip: "0.0.0.0"
+                state: "idle"
 
   /api/wifi/power-save:
     post:
@@ -1263,6 +1359,37 @@ components:
           maximum: 0
           description: Computed peak gain in dB. Response-only; ignored on requests.
 
+    EqState:
+      description: |
+        Live EQ object from `fill_eq_object`. Returned by `GET /api/state`
+        (`eq`), `POST /api/eq`, and `POST /api/eq/presets/{idx}/load`
+        (`eq`). Amped omits `bands_r`, `max_hw_slots`, `hw_slots`, and
+        `hw_slots_r`.
+      allOf:
+        - $ref: "#/components/schemas/EqCurve"
+        - type: object
+          required: [max_bands, backend, headroom, active_slot]
+          properties:
+            max_bands:
+              type: integer
+              minimum: 1
+              maximum: 15
+              description: |
+                Per-board runtime cap for `band_count`. 10 on Amped
+                (software cascade), up to 15 on Louder (TAS5825M
+                on-chip DSP or software fallback).
+            backend:
+              type: string
+              enum: [software, hardware, "software (fallback)"]
+              description: |
+                Where the curve runs when `enabled` is true.
+                Independent of `enabled`; Louder reports `hardware`
+                even when EQ is off.
+            headroom: { $ref: "#/components/schemas/HeadroomSetting" }
+            active_slot:
+              type: integer
+              description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
+
     EqPresetSlot:
       type: object
       properties:
@@ -1346,64 +1473,26 @@ components:
         bluetooth:   { $ref: "#/components/schemas/BluetoothPublic" }
         usb:         { $ref: "#/components/schemas/UsbPublic" }
         voice_feedback: { type: boolean, description: "Cached PSRAM voice cues (boot + BT events)." }
+        test_tone:
+          description: Persisted generator parameters. Audio is produced only while `mode` is `test_tone`.
+          allOf:
+            - $ref: "#/components/schemas/TestToneSetting"
         _v:
           type: integer
           description: |
             Monotonic state version. Bumped on every persisted mutation; used
             by the `/api/state/stream` SSE consumer (and as an ETag analogue
             on `/api/state`) so SPA clients can detect skipped frames.
-        eq:
-          allOf:
-            - $ref: "#/components/schemas/EqCurve"
-            - type: object
-              properties:
-                max_bands:
-                  type: integer
-                  minimum: 1
-                  maximum: 15
-                  description: |
-                    Per-board runtime cap for `band_count`. 10 on Amped
-                    (software cascade), up to 15 on Louder (TAS5825M
-                    on-chip DSP or software fallback).
-                backend:
-                  type: string
-                  enum: [software, hardware, "software (fallback)"]
-                  description: |
-                    Where the curve runs when `enabled` is true.
-                    Independent of `enabled`; Louder reports `hardware`
-                    even when EQ is off.
-                headroom: { $ref: "#/components/schemas/HeadroomSetting" }
-                active_slot:
-                  type: integer
-                  description: Slot index currently loaded, or 255 if the live curve is unsaved/modified.
-                supports_split:
-                  type: boolean
-                channel_mode:
-                  type: string
-                  enum: [ganged, split]
-                bands_r:
-                  type: array
-                  items: { $ref: "#/components/schemas/EqBand" }
-                max_hw_slots:
-                  type: integer
-                  description: |
-                    TAS biquad slots per channel (15). Present on Louder
-                    only. Amped omits this field (software cascade has no
-                    15-slot cap).
-                hw_slots:
-                  type: integer
-                  description: Nominal TAS slots used by the left / ganged active bands.
-                hw_slots_r:
-                  type: integer
-                  description: Nominal TAS slots used by the right active bands (Louder).
+        eq: { $ref: "#/components/schemas/EqState" }
 
     WifiSetting:
       type: object
       description: |
-        Persisted Wi-Fi configuration knobs surfaced in the device state
-        snapshot. Live STA status (RSSI, IP, AP fallback) lives on
-        `GET /api/wifi/state` instead — that endpoint is not part of the
-        push-based snapshot because the values change too often.
+        Wi-Fi knobs on the device-state snapshot. `power_save` is the
+        persisted boot policy. `state` is the live credential-probe
+        progress. Link status (RSSI, IP, AP fallback) stays on
+        `GET /api/wifi/state` because those values change too often for
+        the push snapshot.
       properties:
         power_save:
           type: string
@@ -1411,9 +1500,37 @@ components:
           description: |
             `esp_wifi_set_ps` policy applied at boot. See
             `POST /api/wifi/power-save` for the trade-offs.
+        state: { $ref: "#/components/schemas/WifiProbeState" }
+
+    SystemSummary:
+      type: object
+      description: |
+        `GET /api/system/summary` payload. Same counters as
+        `SystemMetrics` without the audio meters.
+      properties:
+        uptime_s:      { type: number }
+        free_heap:     { type: integer }
+        min_free_heap: { type: integer }
+        free_psram:    { type: integer }
+        wifi:
+          type: object
+          properties:
+            connected: { type: boolean }
+            ssid:      { type: string }
+            rssi:      { type: integer, description: "dBm" }
+            channel:   { type: integer }
+            ip:        { type: string }
+        cpu:
+          type: object
+          properties:
+            core0_pct: { type: integer, minimum: 0, maximum: 100 }
+            core1_pct: { type: integer, minimum: 0, maximum: 100 }
 
     SystemInfo:
       type: object
+      description: |
+        `GET /api/system` payload. Live counters including audio meters,
+        plus chip, firmware, net, and the full identity object.
       properties:
         uptime_s:      { type: number }
         free_heap:     { type: integer }
@@ -1438,6 +1555,16 @@ components:
           properties:
             core0_pct: { type: integer, minimum: 0, maximum: 100 }
             core1_pct: { type: integer, minimum: 0, maximum: 100 }
+        audio:
+          type: object
+          properties:
+            out:
+              type: object
+              properties:
+                peak_l_db: { type: number }
+                peak_r_db: { type: number }
+                rms_l_db: { type: number }
+                rms_r_db: { type: number }
         firmware:
           type: object
           description: Build-time identity of the running image.
@@ -1605,6 +1732,15 @@ components:
         ip:            { type: string, description: "STA IPv4 dotted-quad; '0.0.0.0' when not connected" }
         ap_ssid:       { type: string, description: "AP fallback SSID (when ap_running)" }
         ap_ip:         { type: string, description: "AP fallback IPv4 (typically 192.168.4.1)" }
+        state:         { $ref: "#/components/schemas/WifiProbeState" }
+
+    WifiProbeState:
+      type: string
+      enum: [idle, probing, ok, failed]
+      description: |
+        Credential-probe progress. `idle` before any probe this boot,
+        `probing` during the 12 s attempt, `ok` after an IP, `failed`
+        after auth/assoc/timeout.
 
     Error:
       type: object
